@@ -45,4 +45,4 @@ jobs:
       - name: Pre-render serialized_space (dev_->prod_) + allowlist check
         run: bash scripts/render.sh prod
       - name: Deploy bundle to prod
-        run: databricks bundle deploy -t prod --var "workspace_host=${{ vars.DATABRICKS_PROD_HOST }}" --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
+        run: databricks bundle deploy -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"

@@ -35,4 +35,4 @@ jobs:
       - name: Pre-render + identifier allowlist (rejects foreign-env / cross-domain refs)
         run: bash scripts/render.sh prod
       - name: Validate bundle (prod target)
-        run: databricks bundle validate -t prod --var "workspace_host=${{ vars.DATABRICKS_PROD_HOST }}" --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
+        run: databricks bundle validate -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
