@@ -10,17 +10,20 @@ eval gate) into the operations the UI needs:
   GO-LIVE (not yet wired — need the S3 GitHub repo): request_promotion() opens the PR
   and the Steward approval releases the gate; create_space() calls genie create-space.
 
-Uses the Databricks CLI via subprocess (works locally with a profile AND is trivial
-to swap for the SDK on the deployed app). Pure assembly helpers are unit-tested;
-the live calls are verified against the real dev space.
+Uses the Databricks SDK (WorkspaceClient). Locally a CLI profile selects the
+workspace; on the deployed Databricks App ``profile`` is None and the app's service
+principal authenticates automatically. The live calls take an injectable ``client``,
+so SDK-response parsing is unit-tested with a fake — no network, runs offline.
 """
 from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
-import tempfile
+
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.catalog import SecurableType
+from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _p in ("genie_reviewer", "scripts"):
@@ -36,36 +39,44 @@ LLM = os.environ.get("APP_LLM_ENDPOINT", "databricks-claude-opus-4-8")
 DOMAIN = os.environ.get("APP_DOMAIN", "recebiveis")
 
 
-def _cli(profile: str, *args: str) -> dict | list:
-    out = subprocess.check_output(["databricks", *args, "-p", profile, "-o", "json"], text=True)
-    return json.loads(out or "{}")
+def _client(profile: str | None = None) -> WorkspaceClient:
+    """Build a Databricks SDK WorkspaceClient.
+
+    Locally a CLI profile (``~/.databrickscfg``) selects the workspace. On the
+    deployed Databricks App ``profile`` is None and auth is automatic — the app's
+    service principal is injected via env, so ``WorkspaceClient()`` just works.
+    Construction is lazy (no network call), so this is safe to build offline.
+    """
+    return WorkspaceClient(profile=profile) if profile else WorkspaceClient()
 
 
-def list_spaces(profile: str) -> list[dict]:
-    """The author's Genie Spaces (id + title + status placeholder)."""
-    data = _cli(profile, "genie", "list-spaces")
-    spaces = data.get("spaces", data) if isinstance(data, dict) else data
-    return [{"space_id": s.get("space_id"), "title": s.get("title", "(sem título)")}
-            for s in (spaces or []) if isinstance(s, dict)]
+def list_spaces(profile: str, client: WorkspaceClient | None = None) -> list[dict]:
+    """The author's Genie Spaces (id + title). ``client`` is injectable for tests."""
+    w = client or _client(profile)
+    resp = w.genie.list_spaces()
+    return [{"space_id": s.space_id, "title": s.title or "(sem título)"}
+            for s in (resp.spaces or [])]
 
 
-def export_serialized(space_id: str, profile: str) -> dict:
-    d = _cli(profile, "genie", "get-space", space_id, "--include-serialized-space")
-    ss = d.get("serialized_space")
+def export_serialized(space_id: str, profile: str, client: WorkspaceClient | None = None) -> dict:
+    w = client or _client(profile)
+    space = w.genie.get_space(space_id, include_serialized_space=True)
+    ss = space.serialized_space
     return json.loads(ss) if isinstance(ss, str) else (ss or {})
 
 
-def _claude(system: str, user: str, profile: str) -> str:
-    req = {"messages": [{"role": "system", "content": system},
-                        {"role": "user", "content": user}], "max_tokens": 3000}
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        json.dump(req, fh)
-        path = fh.name
-    out = subprocess.check_output(
-        ["databricks", "serving-endpoints", "query", LLM, "--json", f"@{path}", "-p", profile, "-o", "json"],
-        text=True)
-    r = json.loads(out)
-    return r["choices"][0]["message"]["content"] if r.get("choices") else ""
+def _claude(system: str, user: str, profile: str, client: WorkspaceClient | None = None) -> str:
+    w = client or _client(profile)
+    resp = w.serving_endpoints.query(
+        name=LLM,
+        messages=[
+            ChatMessage(role=ChatMessageRole.SYSTEM, content=system),
+            ChatMessage(role=ChatMessageRole.USER, content=user),
+        ],
+        max_tokens=3000,
+    )
+    choices = resp.choices or []
+    return choices[0].message.content if choices and choices[0].message else ""
 
 
 def build_timeline(checks_ok: bool, gate: dict, eval_res: dict, approved: bool, deployed: bool) -> list[dict]:
@@ -83,13 +94,22 @@ def build_timeline(checks_ok: bool, gate: dict, eval_res: dict, approved: bool, 
     ]
 
 
-def _effective_grants(profile: str, full_name: str) -> list[dict]:
+def _priv_name(p) -> str | None:
+    """Normalize a privilege to its string form. The SDK returns a ``Privilege``
+    enum (``.value`` == 'SELECT'); a plain string passes through unchanged."""
+    return getattr(p, "value", p)
+
+
+def _effective_grants(profile: str, full_name: str, client: WorkspaceClient | None = None) -> list[dict]:
     """Effective UC privileges on a table (includes schema/catalog-inherited grants)."""
-    d = _cli(profile, "grants", "get-effective", "table", full_name)
+    w = client or _client(profile)
+    # SDK 0.111 takes securable_type as a plain string ("TABLE"); the enum's str repr
+    # ("SecurableType.TABLE") is rejected by the API, so pass .value.
+    resp = w.grants.get_effective(securable_type=SecurableType.TABLE.value, full_name=full_name)
     out = []
-    for pa in (d.get("privilege_assignments") or []) if isinstance(d, dict) else []:
-        privs = [(p.get("privilege") if isinstance(p, dict) else p) for p in (pa.get("privileges") or [])]
-        out.append({"principal": pa.get("principal"), "privileges": [x for x in privs if x]})
+    for pa in (resp.privilege_assignments or []):
+        privs = [_priv_name(p.privilege) for p in (pa.privileges or [])]
+        out.append({"principal": pa.principal, "privileges": [x for x in privs if x]})
     return out
 
 
@@ -105,7 +125,10 @@ def review_space(space_id: str, profile: str, to_env: str = "prod", domain: str 
     """
     consumer_group = consumer_group or os.environ.get("APP_CONSUMER_GROUP", "account users")
     grant_profile = grant_profile or os.environ.get("APP_PROD_PROFILE", profile)
-    dev_serialized = export_serialized(space_id, profile)
+    # One client per workspace, reused across calls: `w` for the source/dev ops (export +
+    # agent review) and `gw` for the prod grant check (built lazily inside the try below).
+    w = _client(profile)
+    dev_serialized = export_serialized(space_id, profile, client=w)
     rendered = pre_render.rebind(json.dumps(dev_serialized, ensure_ascii=False), "dev", to_env, domain)
     prod_space = json.loads(rendered)
     violations = pre_render.find_violations(rendered, to_env, domain)  # deterministic ENV allowlist
@@ -120,14 +143,15 @@ def review_space(space_id: str, profile: str, to_env: str = "prod", domain: str 
         for v in violations
     ]
     try:
+        gw = _client(grant_profile)  # built here so a bad/unreachable prod profile can't break the review
         deterministic += grant_check.check_grants(
-            prod_space, consumer_group, lambda fq: _effective_grants(grant_profile, fq))
+            prod_space, consumer_group, lambda fq: _effective_grants(grant_profile, fq, client=gw))
     except Exception:  # noqa: BLE001 — grant check is best-effort; never break the review
         pass
 
     ctx = review_core.build_space_context(prod_space)
     system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, deterministic)
-    review = review_core.parse_review(_claude(system, user, profile))
+    review = review_core.parse_review(_claude(system, user, profile, client=w))
     findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"])
     gate = review_core.decide_gate(findings)
     eval_res = eval_gate.run_eval_gate(space_id, profile)
