@@ -61,3 +61,5 @@ targets:
           display_name: "Painel Recebíveis"
           warehouse_id: ${var.warehouse_id}
           file_path: ./build/dashboards/recebiveis.lvdash.json
+
+# ci smoke — verify re-point (runner + new SP secret + --var). remove after.
