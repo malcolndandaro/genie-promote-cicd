@@ -56,3 +56,5 @@ targets:
           display_name: "Painel Recebíveis"
           warehouse_id: ${var.warehouse_id}
           file_path: ./build/dashboards/recebiveis.lvdash.json
+
+# ci smoke 2 — verify host-fix on the runner. remove after.
