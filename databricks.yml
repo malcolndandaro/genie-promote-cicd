@@ -53,6 +53,6 @@ targets:
       # DABs deploy); no eval-run (a dashboard has no benchmark questions).
       dashboards:
         recebiveis_painel:
-          display_name: "Painel Recebíveis"
+          display_name: "Painel de Recebíveis — Volume por Bandeira"
           warehouse_id: ${var.warehouse_id}
           file_path: ./build/dashboards/recebiveis.lvdash.json
