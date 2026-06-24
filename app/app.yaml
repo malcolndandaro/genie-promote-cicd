@@ -1,0 +1,23 @@
+# Databricks App runtime config (Streamlit). Port/host per the platform spec; CORS+XSRF
+# off (reverse-proxy origin differs from workspace origin).
+#
+# DEPLOY NOTE (go-live): deploy with source_code_path = the repo root so the app can import
+# genie_reviewer/ + scripts/ (set command to `streamlit run app/app.py ...`), AND swap
+# app_logic's `databricks` CLI subprocess calls for databricks-sdk WorkspaceClient calls
+# (the Apps container has the SDK + the app SP's auth, not the CLI). The app flow + engine
+# integration are verified locally via the CLI; this is the documented go-live adaptation.
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port
+  - "${DATABRICKS_APP_PORT:-8000}"
+  - --server.address
+  - "0.0.0.0"
+env:
+  - name: STREAMLIT_SERVER_ENABLE_CORS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+    value: "false"
+  - name: APP_DOMAIN
+    value: "recebiveis"

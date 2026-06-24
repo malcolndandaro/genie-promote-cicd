@@ -1,0 +1,38 @@
+name: pr-checks
+
+# S3 — deterministic gate on every PR: the bundle must validate against prod
+# before a human (or the agent, added in S4/S5) ever looks at it. The full
+# deterministic suite (JSON schema, identifier allowlist ^prod_<domain>\.,
+# pre-render) is layered on in S4 — this is the deployability floor.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+env:
+  DATABRICKS_BUNDLE_ENGINE: direct
+
+jobs:
+  validate:
+    name: bundle validate (prod)
+    runs-on: self-hosted   # workspace IP-ACL blocks hosted runners
+    if: vars.DATABRICKS_PROD_HOST != ''
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_PROD_HOST }}
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_PROD_SP_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_PROD_SP_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+        with:
+          version: 1.4.0
+      - name: Pre-render + identifier allowlist (rejects foreign-env / cross-domain refs)
+        run: bash scripts/render.sh prod
+      - name: Validate bundle (prod target)
+        run: databricks bundle validate -t prod --var "workspace_host=${{ vars.DATABRICKS_PROD_HOST }}" --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"

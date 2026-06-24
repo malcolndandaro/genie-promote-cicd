@@ -1,0 +1,48 @@
+name: deploy
+
+# S3 — PR-triggered promotion to prod. On merge to main, the per-domain CI/CD
+# service principal deploys the bundle to the prod/portal workspace, behind a
+# GitHub Environment gate (the Steward approves — SoD per ADR-0002). Authoring
+# happens in the dev workspace (native Genie); this pipeline only promotes.
+#
+# runs-on: self-hosted because both workspaces enforce IP access lists, which
+# reject GitHub-hosted runner egress (see SETUP.md → runner registration).
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # never kill an approved, mid-deploy run
+
+env:
+  # Catalog + genie_spaces resources require the direct deployment engine (ADR-0004 / S2).
+  DATABRICKS_BUNDLE_ENGINE: direct
+
+jobs:
+  deploy-prod:
+    name: Promote to prod (Steward approval)
+    runs-on: self-hosted
+    # Gated until the CI/CD service principal vars/secrets are set (SETUP.md / provision_ci.sh).
+    if: vars.DATABRICKS_PROD_HOST != ''
+    environment: prod   # required-reviewer gate — pauses for the Steward's approval
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_PROD_HOST }}
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_PROD_SP_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_PROD_SP_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+        with:
+          version: 1.4.0   # pin the CLI (demo stability — genie_spaces + direct engine need >=1.4.0)
+      - name: Pre-render serialized_space (dev_->prod_) + allowlist check
+        run: bash scripts/render.sh prod
+      - name: Deploy bundle to prod
+        run: databricks bundle deploy -t prod --var "workspace_host=${{ vars.DATABRICKS_PROD_HOST }}" --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"

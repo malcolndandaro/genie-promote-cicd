@@ -1,0 +1,51 @@
+# CI/CD go-live runbook (S3)
+
+The pipeline code is complete and committed. Three human steps make it **live** —
+they need your GitHub account + workspace-admin + this machine, so they're not
+done autonomously. All are scripted.
+
+## What's already done (autonomous)
+- Git repo initialised; bundle + workflows committed.
+- **CI-portable targets** — `databricks.yml` uses `host:` (not `profile:`), so the
+  same bundle resolves locally *and* on a runner with OAuth M2M.
+- `.github/workflows/deploy.yml` — on merge to `main`, deploy to **prod** behind a
+  GitHub Environment gate (`environment: prod`), as the CI/CD service principal,
+  with `DATABRICKS_BUNDLE_ENGINE=direct`.
+- `.github/workflows/pr-checks.yml` — `bundle validate -t prod` on every PR (the
+  deterministic suite is extended in S4).
+- `scripts/provision_ci.sh` — creates the SP, grants least-privilege, generates the
+  OAuth secret, sets repo vars/secret, and prints the gate + runner steps.
+
+## Go-live (3 steps, ~10 min)
+1. **Create the repo + push**
+   ```bash
+   cd genie-cicd-app
+   gh repo create <owner>/genie-promote --private --source . --remote origin --push
+   ```
+2. **Provision CI/CD identity + gate**
+   ```bash
+   GH_REPO=<owner>/genie-promote bash scripts/provision_ci.sh
+   ```
+   Then add **Pedro (Steward)** as the required reviewer on the `prod` Environment.
+3. **Register the self-hosted runner** (the one piece that needs this machine —
+   both workspaces enforce IP access lists, so GitHub-hosted runners are rejected).
+   The exact commands are printed by `provision_ci.sh` step 6.
+
+## Why a self-hosted runner (the S3 blocker)
+`enableIpAccessLists=true` on both `databricks-dev` and `databricks-prod`. A
+GitHub-hosted runner's egress IP isn't allowlisted, so it can't reach the
+workspace API. Options: (a) self-hosted runner on an allowlisted host (this
+machine — what bimbo_demo used), or (b) add the runner's egress range to the IP
+ACL (needs the workspace's network policy owner). (a) is the demo default.
+
+## Local deploys: always render first
+The prod `genie_space` reads its `serialized_space` from `build/` (gitignored,
+generated). **Before any `databricks bundle deploy/validate -t <env>` run
+`scripts/render.sh <env>`** — it pre-renders `dev_`→`<env>_` and runs the allowlist,
+and `rm`s any stale build first. The workflows do this automatically; this note is
+for local operators (a raw `bundle deploy -t prod` with a stale/dev `build/` would
+ship the wrong env — S4 review M2).
+
+## Verify (after go-live)
+Open a PR that touches a resource → `pr-checks` validates → merge → `deploy-prod`
+pauses on the prod gate → Pedro approves → SP runs `bundle deploy -t prod`.

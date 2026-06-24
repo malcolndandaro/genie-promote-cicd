@@ -1,0 +1,63 @@
+# Genie/AI-BI Promotion — DABs bundle.
+#
+# Portable by construction (ADR-0004): NO workspace is hardcoded. Set workspace_host +
+# warehouse_id per target below for your own workspaces, or override them in CI via
+# `--var` from repo variables (see .github/workflows). Switching workspaces = change
+# those values (or the repo variables) — nothing else. All-DABs, no Terraform.
+bundle:
+  name: genie-promote
+
+include:
+  - resources/*.yml
+
+variables:
+  domain:
+    description: UC data domain. The catalog is ${var.env}_${var.domain}.
+    default: recebiveis
+  env:
+    description: Environment prefix for the catalog (dev|prod). Set per target.
+  workspace_host:
+    description: Target workspace URL. Set per target, or override in CI via --var.
+  warehouse_id:
+    description: SQL warehouse id. Set per target, or override in CI via --var.
+  consumer_group:
+    description: UC group that consumes the domain's diamond (gold) layer.
+    default: account users
+  # The catalog ${env}_${domain} is expected to exist — create it in the UI (Default
+  # Storage), or add a resources/*.catalog.yml if your deployer has CREATE CATALOG on the
+  # metastore. DABs owns the schemas, grants (via the setup job), and seed data on top.
+
+targets:
+  # No `mode: development` so catalog/space names stay deterministic.
+  dev:
+    default: true
+    workspace:
+      host: ${var.workspace_host}
+    variables:
+      env: dev
+      workspace_host: https://your-dev-workspace.cloud.databricks.com
+      warehouse_id: your-dev-warehouse-id
+
+  prod:
+    workspace:
+      host: ${var.workspace_host}
+    variables:
+      env: prod
+      workspace_host: https://your-prod-workspace.cloud.databricks.com
+      warehouse_id: your-prod-warehouse-id
+    # The promoted Genie Space is a PROD-only resource: dev is human-authored (native
+    # Genie), prod is bundle-managed. file_path points at the pre-rendered output
+    # (scripts/render.sh prod runs first — wired into the workflows).
+    resources:
+      genie_spaces:
+        receivables:
+          title: "Receivables and Merchant Data"
+          warehouse_id: ${var.warehouse_id}
+          file_path: ./build/genie/receivables.serialized_space.json
+      # An AI/BI dashboard promoted through the SAME pipeline (pre-render + allowlist +
+      # DABs deploy); no eval-run (a dashboard has no benchmark questions).
+      dashboards:
+        recebiveis_painel:
+          display_name: "Painel Recebíveis"
+          warehouse_id: ${var.warehouse_id}
+          file_path: ./build/dashboards/recebiveis.lvdash.json

@@ -1,0 +1,32 @@
+# Databricks / DABs
+.databricks/
+*.tfstate
+*.tfstate.*
+
+# Secrets — never commit (ADR-0002/0004)
+.env
+*.secret
+*-secret.json
+.databrickscfg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Pre-render build output (generated from src/genie/*.serialized_space.json)
+build/
+
+# Node / AppKit (S8+)
+node_modules/
+dist/
+build/
+.next/
+
+# OS / editor
+.DS_Store
+*.swp
+
+# pytest
+.pytest_cache/
