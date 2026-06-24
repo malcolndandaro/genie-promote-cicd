@@ -1,6 +1,12 @@
-"""Unit tests for the App backend pure helpers (S8-S11). No Streamlit/Databricks."""
+"""Unit tests for the App backend pure helpers (S8-S11). No Streamlit/Databricks.
+
+The live calls are now SDK-based and accept an injectable ``client``, so the
+response-parsing (SDK objects -> UI dicts) is covered with a fake WorkspaceClient
+— no network, runs fully offline.
+"""
 import os
 import sys
+from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 import app_logic  # noqa: E402
@@ -41,3 +47,65 @@ def test_sod_requester_cannot_self_approve_even_as_steward():
 def test_sod_distinct_steward_can_approve():
     ok, _ = app_logic.can_approve("steward", "malcoln@x", "pedro@x")
     assert ok is True
+
+
+# --- SDK-backed live calls: parsing verified with a fake WorkspaceClient (offline) ---
+
+def test_list_spaces_maps_sdk_objects():
+    fake = NS(genie=NS(list_spaces=lambda: NS(spaces=[
+        NS(space_id="abc", title="Recebíveis"),
+        NS(space_id="def", title=None),  # missing title -> placeholder
+    ])))
+    out = app_logic.list_spaces("ignored-profile", client=fake)
+    assert out == [
+        {"space_id": "abc", "title": "Recebíveis"},
+        {"space_id": "def", "title": "(sem título)"},
+    ]
+
+
+def test_list_spaces_handles_empty():
+    fake = NS(genie=NS(list_spaces=lambda: NS(spaces=None)))
+    assert app_logic.list_spaces("p", client=fake) == []
+
+
+def test_export_serialized_parses_json_string():
+    fake = NS(genie=NS(get_space=lambda sid, include_serialized_space=False:
+                       NS(serialized_space='{"title": "X", "n": 2}')))
+    assert app_logic.export_serialized("sid", "p", client=fake) == {"title": "X", "n": 2}
+
+
+def test_export_serialized_empty_when_missing():
+    fake = NS(genie=NS(get_space=lambda sid, include_serialized_space=False:
+                       NS(serialized_space=None)))
+    assert app_logic.export_serialized("sid", "p", client=fake) == {}
+
+
+def test_effective_grants_maps_enum_and_string_privileges():
+    # Real shape: privilege_assignments[].privileges[] are EffectivePrivilege with a
+    # .privilege field holding a Privilege enum (.value); tolerate plain strings + Nones.
+    def get_effective(securable_type, full_name):
+        # SDK 0.111 wants the string "TABLE", not the enum's str repr — guard against regression.
+        assert securable_type == "TABLE", f"bad securable_type: {securable_type!r}"
+        return NS(privilege_assignments=[
+            NS(principal="account users",
+               privileges=[NS(privilege=NS(value="SELECT")), NS(privilege=None),
+                           NS(privilege="USAGE")]),
+            NS(principal="svc", privileges=None),
+        ])
+    fake = NS(grants=NS(get_effective=get_effective))
+    out = app_logic._effective_grants("p", "cat.sch.tbl", client=fake)
+    assert out == [
+        {"principal": "account users", "privileges": ["SELECT", "USAGE"]},
+        {"principal": "svc", "privileges": []},
+    ]
+
+
+def test_claude_returns_first_choice_content():
+    fake = NS(serving_endpoints=NS(query=lambda name, messages, max_tokens:
+                                   NS(choices=[NS(message=NS(content="resposta"))])))
+    assert app_logic._claude("sys", "usr", "p", client=fake) == "resposta"
+
+
+def test_claude_empty_when_no_choices():
+    fake = NS(serving_endpoints=NS(query=lambda name, messages, max_tokens: NS(choices=[])))
+    assert app_logic._claude("sys", "usr", "p", client=fake) == ""
