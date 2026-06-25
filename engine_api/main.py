@@ -16,6 +16,7 @@ import sys
 from typing import Callable
 
 from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
 
 # Reuse the existing engine unchanged: app_logic resolves genie_reviewer/ + scripts/ itself.
 # NB: this relies on the app being deployed with source_code_path = the REPO ROOT (so app/ and
@@ -81,3 +82,33 @@ def spaces(
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
     return {"spaces": _engine_call("list_spaces", lambda: app_logic.list_spaces(user_token=token))}
+
+
+class ReviewRequest(BaseModel):
+    space_id: str
+
+
+# Only the UI-facing fields of the review result (drop the large prod_serialized payload).
+_REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group")
+
+
+@app.post("/review")
+def review(
+    body: ReviewRequest,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The full promotion review for a space (export via OBO -> pre-render -> ENV-01 + grant
+    preview + LLM reviewer + eval gate). The Genie export runs on behalf of the user; the LLM
+    reviewer + grant preview run as the app SP (the engine's existing auth split)."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        result = app_logic.review_space(body.space_id, user_token=token)
+        # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
+        # rather than silently emitting null and breaking the UI with no server-side signal.
+        return {k: result[k] for k in _REVIEW_FIELDS}
+
+    return _engine_call("review_space", _run)

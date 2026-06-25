@@ -87,3 +87,68 @@ def test_spaces_engine_error_maps_to_502(monkeypatch):
     assert r.status_code == 502
     # generic body — no internal/SDK detail leaked to the client
     assert "simulated SDK auth failure" not in r.text
+
+
+# --- POST /review (AK3) ---
+
+_FAKE_REVIEW = {
+    "findings": [{"rule_id": "EVAL-01", "severity": "BLOCKER", "message": "...", "citation": "..."}],
+    "gate": {"conclusion": "failure", "blocker_count": 1, "summary": "🔴 ..."},
+    "eval": {"status": "advisory", "summary": "🟡 ..."},
+    "timeline": [{"key": "checks", "label": "...", "status": "pass"}],
+    "allowlist_violations": [],
+    "consumer_group": "account users",
+    "prod_serialized": {"huge": "payload", "should": "not be returned"},
+}
+
+
+def test_review_threads_token_and_returns_ui_fields(monkeypatch):
+    captured = {}
+
+    def fake_review_space(space_id, *args, user_token=None, **kwargs):
+        captured["space_id"] = space_id
+        captured["user_token"] = user_token
+        return dict(_FAKE_REVIEW)
+
+    monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
+    r = client.post("/review", json={"space_id": "01f16e83"},
+                    headers={"x-forwarded-access-token": "tok-r"})
+    assert r.status_code == 200
+    body = r.json()
+    assert captured == {"space_id": "01f16e83", "user_token": "tok-r"}
+    assert set(body.keys()) == {"findings", "gate", "eval", "timeline",
+                                "allowlist_violations", "consumer_group"}
+    assert "prod_serialized" not in body  # large payload dropped
+    assert body["gate"]["conclusion"] == "failure"
+
+
+def test_review_requires_a_token():
+    r = client.post("/review", json={"space_id": "x"})
+    assert r.status_code == 401
+
+
+def test_review_requires_space_id():
+    r = client.post("/review", json={}, headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 422  # FastAPI validation: space_id is required
+
+
+def test_review_engine_error_maps_to_502(monkeypatch):
+    def boom(space_id, *args, user_token=None, **kwargs):
+        raise RuntimeError("simulated review failure")
+
+    monkeypatch.setattr(engine_api.app_logic, "review_space", boom)
+    r = client.post("/review", json={"space_id": "x"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 502
+    assert "simulated review failure" not in r.text
+
+
+def test_review_contract_drift_maps_to_502(monkeypatch):
+    # If the engine ever drops a UI field, the endpoint must fail loudly (502), not emit null.
+    incomplete = {k: v for k, v in _FAKE_REVIEW.items() if k != "gate"}
+
+    monkeypatch.setattr(engine_api.app_logic, "review_space",
+                        lambda space_id, *a, user_token=None, **k: dict(incomplete))
+    r = client.post("/review", json={"space_id": "x"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 502
