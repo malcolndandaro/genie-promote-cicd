@@ -40,28 +40,6 @@ test('switches to the "Novo Genie Space" tab and shows the placeholder', async (
   await expect(page.getByText('Em breve — assistente de criação', { exact: false })).toBeVisible();
 });
 
-test('requesting a review renders the (placeholder) verdict summary', async ({ page }) => {
-  await page.route('**/api/spaces', oneSpace);
-  await page.route('**/api/review', (route) =>
-    route.fulfill({
-      json: {
-        findings: [{ rule_id: 'EVAL-01', severity: 'BLOCKER', message: 'Poucas perguntas' }],
-        gate: { conclusion: 'failure', blocker_count: 1, summary: '🔴 Promoção bloqueada' },
-        eval: { status: 'advisory', summary: '🟡 eval indisponível' },
-        allowlist_violations: [],
-        consumer_group: 'account users',
-        timeline: [{ key: 'checks', label: 'Checagens', status: 'pass' }],
-      },
-    }),
-  );
-  await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
-
-  await expect(page.getByText('🔴 Promoção bloqueada')).toBeVisible();
-  await expect(page.getByText('1 achado(s)', { exact: false })).toBeVisible();
-});
-
 test('shows the empty state with a next action when there are no spaces', async ({ page }) => {
   await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [] } }));
   await page.goto('/');

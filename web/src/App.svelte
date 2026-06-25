@@ -6,9 +6,15 @@
   import NovoEspaco from './screens/NovoEspaco.svelte';
   import { getWhoami } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
+  import type { Whoami } from './lib/types';
 
-  // OBO identity (drives the header badge + is reused by SV4's SoD). Retryable.
-  let whoamiP = $state(getWhoami());
+  // OBO identity (drives the header badge + the review AI-trust badge + SV4's SoD). Display-only,
+  // so a failure is silent — the spaces error surfaces any re-auth need.
+  let who = $state<Whoami | null>(null);
+  getWhoami()
+    .then((w) => (who = w))
+    .catch(() => {});
+
   // The shared promotion flow state (selection → review → approval).
   const promotion = new Promotion();
 
@@ -21,13 +27,9 @@
 
 <Header>
   {#snippet right()}
-    {#await whoamiP then who}
-      {#if who.email}
-        <span class="identity"><span class="identity__dot"></span>{who.email}</span>
-      {/if}
-    {:catch}
-      <!-- Identity is display-only; a whoami failure surfaces via the spaces error/re-auth path. -->
-    {/await}
+    {#if who?.email}
+      <span class="identity"><span class="identity__dot"></span>{who.email}</span>
+    {/if}
   {/snippet}
 </Header>
 
@@ -36,7 +38,7 @@
     <Tabs tabs={TABS} bind:active={tab} idBase="promote" />
     <div role="tabpanel" id={`promote-panel-${tab}`} aria-labelledby={`promote-tab-${tab}`} tabindex="-1">
       {#if tab === 'spaces'}
-        <MeusEspacos {promotion} onGoToNew={() => (tab = 'new')} />
+        <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => (tab = 'new')} />
       {:else}
         <NovoEspaco />
       {/if}

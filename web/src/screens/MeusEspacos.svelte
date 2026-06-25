@@ -4,16 +4,20 @@
   import Badge from '../lib/components/Badge.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import Select from '../lib/components/Select.svelte';
+  import Pipeline from '../lib/components/Pipeline.svelte';
+  import ReviewPanel from '../lib/components/ReviewPanel.svelte';
   import { getResources, isAuthError } from '../lib/api';
   import { kindMeta } from '../lib/resources';
+  import { pendingTimeline } from '../lib/pipeline';
   import type { Promotion } from '../lib/promotion.svelte';
   import type { PromotableResource } from '../lib/types';
 
   interface Props {
     promotion: Promotion;
+    userEmail: string | null;
     onGoToNew?: () => void;
   }
-  let { promotion, onGoToNew }: Props = $props();
+  let { promotion, userEmail, onGoToNew }: Props = $props();
 
   // The user's promotable resources (OBO). In $state so an error is retryable.
   let resourcesP = $state(getResources());
@@ -95,22 +99,22 @@
     </div>
   {/await}
 
-  <!-- The review result. SV3 replaces this minimal summary with the full animated pipeline panel. -->
-  {#if promotion.phase === 'error'}
+  <!-- The review result: an animated pipeline while in flight, then the full review panel. -->
+  {#if promotion.phase === 'reviewing'}
+    <div class="review-running">
+      <h3 class="running-heading">
+        <span class="running-dot" aria-hidden="true"></span>
+        Executando pipeline de promoção…
+      </h3>
+      <Pipeline steps={pendingTimeline()} running />
+    </div>
+  {:else if promotion.phase === 'error'}
     <div class="review-stub error-state" role="alert">
       <span class="error">Não foi possível revisar: {promotion.error}</span>
       <Button variant="outline" onclick={() => promotion.requestReview()}>Tentar novamente</Button>
     </div>
   {:else if promotion.phase === 'reviewed' && promotion.review}
-    <div class="review-stub">
-      <p class="text-sm">
-        <Badge tone={promotion.review.gate.conclusion === 'failure' ? 'destructive' : 'success'}>
-          {promotion.review.gate.conclusion === 'failure' ? 'Bloqueado' : 'OK'}
-        </Badge>
-        {promotion.review.gate.summary}
-      </p>
-      <p class="muted text-xs">{promotion.review.findings.length} achado(s) — detalhamento na próxima etapa.</p>
-    </div>
+    <ReviewPanel review={promotion.review} {userEmail} />
   {/if}
 </Card>
 
@@ -161,5 +165,35 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+  }
+  .review-running {
+    margin-top: var(--space-5);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+  }
+  .running-heading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 0.95rem;
+    margin-bottom: var(--space-4);
+  }
+  .running-dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: running-dot 1.2s ease-in-out infinite;
+  }
+  @keyframes running-dot {
+    0%,
+    100% {
+      opacity: 0.35;
+      transform: scale(0.8);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1.1);
+    }
   }
 </style>
