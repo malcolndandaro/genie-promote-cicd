@@ -1,0 +1,7 @@
+command: ['npm', 'run', 'start']
+env:
+  # The engine API base URL. The Express proxy forwards the user's OBO token here (https only).
+  # Bounded ADR-0004 deviation: dev-only literal (workspace-id in host). Portability follow-up
+  # (fold with AK4's): a DABs var / reference to the engine app's URL.
+  - name: APP_ENGINE_URL
+    value: 'https://genie-engine-api-7474659480509540.aws.databricksapps.com'

@@ -1,0 +1,19 @@
+bundle:
+  name: genie-promote-ui
+
+resources:
+  apps:
+    app:
+      name: "genie-promote-ui"
+      description: "A Databricks App powered by AppKit"
+      source_code_path: ./
+      # OBO: the forwarded user token needs Genie access so the Express proxy's call to the
+      # engine API (/spaces, /review) acts as the user. Only the non-default scope is settable.
+      user_api_scopes:
+        - dashboards.genie
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://fevm-cerc-mlops-dev.cloud.databricks.com
