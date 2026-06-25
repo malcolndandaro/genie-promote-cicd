@@ -12,6 +12,15 @@ bundle:
 include:
   - resources/*.yml
 
+# build/ is gitignored (generated), but the engine API app's source_code_path points into it
+# (build/engine_app, assembled by scripts/build_engine_app.sh). Force the sync to upload it so
+# the app's source resolves in the workspace. (Tradeoff: the Streamlit app's repo-root upload
+# then also carries a redundant copy of build/engine_app — harmless, it reads its own root
+# app.yaml; acceptable for the demo. Clean long-term fix: per-app sync.paths.)
+sync:
+  include:
+    - build/engine_app/**
+
 variables:
   domain:
     description: UC data domain. The catalog is ${var.env}_${var.domain}.
@@ -50,6 +59,16 @@ targets:
           # get_space). Only non-default scopes are settable — the iam.current-user:read /
           # iam.access-control:read defaults are auto-applied. The LLM reviewer + grant
           # preview run as the app SP, which needs no user scope.
+          user_api_scopes:
+            - dashboards.genie
+        # The engine API (FastAPI) — the HTTP boundary over the Python engine (AK1/AK2).
+        # DABs forbids two apps sharing a source_code_path, so the engine API deploys from an
+        # ASSEMBLED dir (shared engine + engine_api/ + its own app.yaml), built by
+        # scripts/build_engine_app.sh BEFORE deploy. Distinct from the Streamlit repo-root source.
+        engine_api:
+          name: "genie-engine-api"
+          description: "Engine API (FastAPI): OBO Genie reads + review behind an HTTP boundary."
+          source_code_path: ./build/engine_app
           user_api_scopes:
             - dashboards.genie
 
