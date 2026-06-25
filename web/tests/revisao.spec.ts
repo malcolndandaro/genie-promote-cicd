@@ -24,6 +24,8 @@ const review = {
   ],
 };
 
+const PR = { number: 42, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/42' };
+
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (route) =>
     route.fulfill({ json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com' } }),
@@ -33,13 +35,17 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test('renders the review: finding card, AI disclaimer, exec-identity note, pipeline + gate', async ({
+test('promoting renders the review (finding + AI-trust + pipeline + gate) and the PR link', async ({
   page,
 }) => {
-  await page.route('**/api/review', (route) => route.fulfill({ json: review }));
+  await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
   await page.goto('/');
   await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
   await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+
+  // The opened PR is surfaced with a link to GitHub.
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByRole('link', { name: /Ver no GitHub/ })).toHaveAttribute('href', PR.url);
 
   // Finding card: rule_id + severity badge + message + suggestion + citation.
   await expect(page.getByText('EVAL-01', { exact: true })).toBeVisible();
@@ -48,51 +54,50 @@ test('renders the review: finding card, AI disclaimer, exec-identity note, pipel
   await expect(page.getByText(/Adicione uma 3ª pergunta/)).toBeVisible();
   await expect(page.getByText(/Genie Promotion Handbook/)).toBeVisible();
 
-  // AI-trust: persistent disclaimer + truthful execution-identity note + identity badge.
+  // AI-trust + a representative pipeline step + the gate.
   await expect(page.getByText('Achados gerados por IA — verifique antes de aprovar.')).toBeVisible();
   await expect(page.getByText(/Leitura dos espaços executa como você \(OBO\)/)).toBeVisible();
-  await expect(page.getByText('malcoln@databricks.com').first()).toBeVisible();
-
-  // Pipeline timeline (a representative step) + gate summary.
   await expect(page.getByText('Revisão do agente (Genie Reviewer)')).toBeVisible();
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
 });
 
-test('shows the animated running pipeline while the review is in flight', async ({ page }) => {
+test('shows the animated running pipeline while the promotion is in flight', async ({ page }) => {
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => (release = r));
-  await page.route('**/api/review', async (route) => {
+  await page.route('**/api/promote', async (route) => {
     await gate;
-    await route.fulfill({ json: review });
+    await route.fulfill({ json: { review, pr: PR } });
   });
   await page.goto('/');
   await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
   await page.getByRole('button', { name: /Solicitar promoção/ }).click();
 
-  // In-flight: the running pipeline + the loading button label.
   await expect(page.getByText('Executando pipeline de promoção…')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Revisando…' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
 
   release();
   await expect(page.getByText('EVAL-01', { exact: true })).toBeVisible();
 });
 
 test('renders a clean (success) review with no findings', async ({ page }) => {
-  await page.route('**/api/review', (route) =>
+  await page.route('**/api/promote', (route) =>
     route.fulfill({
       json: {
-        findings: [],
-        gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
-        eval: { status: 'advisory', summary: '🟡 eval indisponível' },
-        allowlist_violations: [],
-        consumer_group: 'account users',
-        timeline: [
-          { key: 'checks', label: 'Checagens', status: 'pass' },
-          { key: 'review', label: 'Revisão', status: 'pass' },
-          { key: 'eval', label: 'Eval-run', status: 'pass' },
-          { key: 'approval', label: 'Aprovação do Steward', status: 'running' },
-          { key: 'deploy', label: 'Deploy', status: 'pending' },
-        ],
+        pr: PR,
+        review: {
+          findings: [],
+          gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
+          eval: { status: 'advisory', summary: '🟡 eval indisponível' },
+          allowlist_violations: [],
+          consumer_group: 'account users',
+          timeline: [
+            { key: 'checks', label: 'Checagens', status: 'pass' },
+            { key: 'review', label: 'Revisão', status: 'pass' },
+            { key: 'eval', label: 'Eval-run', status: 'pass' },
+            { key: 'approval', label: 'Aprovação do Steward', status: 'running' },
+            { key: 'deploy', label: 'Deploy', status: 'pending' },
+          ],
+        },
       },
     }),
   );
@@ -105,15 +110,18 @@ test('renders a clean (success) review with no findings', async ({ page }) => {
 });
 
 test('a finding without suggestion/citation omits those lines', async ({ page }) => {
-  await page.route('**/api/review', (route) =>
+  await page.route('**/api/promote', (route) =>
     route.fulfill({
       json: {
-        findings: [{ rule_id: 'ENV-01', severity: 'BLOCKER', message: 'Referência fora do ambiente.' }],
-        gate: { conclusion: 'failure', blocker_count: 1, summary: '🔴 Bloqueado.' },
-        eval: { status: 'advisory', summary: '🟡 eval indisponível' },
-        allowlist_violations: [],
-        consumer_group: 'account users',
-        timeline: [{ key: 'checks', label: 'Checagens', status: 'fail' }],
+        pr: PR,
+        review: {
+          findings: [{ rule_id: 'ENV-01', severity: 'BLOCKER', message: 'Referência fora do ambiente.' }],
+          gate: { conclusion: 'failure', blocker_count: 1, summary: '🔴 Bloqueado.' },
+          eval: { status: 'advisory', summary: '🟡 eval indisponível' },
+          allowlist_violations: [],
+          consumer_group: 'account users',
+          timeline: [{ key: 'checks', label: 'Checagens', status: 'fail' }],
+        },
       },
     }),
   );
@@ -125,14 +133,14 @@ test('a finding without suggestion/citation omits those lines', async ({ page })
   await expect(page.getByText('↳', { exact: false })).toHaveCount(0); // no suggestion line
 });
 
-test('shows an error state with retry when /api/review fails', async ({ page }) => {
-  await page.route('**/api/review', (route) =>
-    route.fulfill({ status: 502, json: { detail: 'engine error: review_space' } }),
+test('shows an error state with retry when /api/promote fails', async ({ page }) => {
+  await page.route('**/api/promote', (route) =>
+    route.fulfill({ status: 502, json: { detail: 'engine error: request_promotion' } }),
   );
   await page.goto('/');
   await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
   await page.getByRole('button', { name: /Solicitar promoção/ }).click();
 
-  await expect(page.getByText(/Não foi possível revisar/)).toBeVisible();
+  await expect(page.getByText(/Não foi possível solicitar a promoção/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();
 });

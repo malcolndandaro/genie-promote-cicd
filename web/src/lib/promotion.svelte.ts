@@ -12,7 +12,7 @@
  * the git integration lands, `approve()` is replaced by "approve the open PR".
  */
 import type { PromotableResource, Review } from './types';
-import { postReview } from './api';
+import { postPromote, type PullRequestRef } from './api';
 
 export type PromotionPhase = 'idle' | 'reviewing' | 'reviewed' | 'error';
 export type Persona = 'author' | 'steward';
@@ -25,6 +25,8 @@ export class Promotion {
   phase = $state<PromotionPhase>('idle');
   review = $state<Review | null>(null);
   error = $state<string | null>(null);
+  /** The opened/updated promotion PR (GH2) — set once the bot opens it. */
+  pr = $state<PullRequestRef | null>(null);
 
   // --- separation of duties (SV4) ---
   /** Demo persona toggle: act as the Autor (requester) or the Steward (approver). */
@@ -88,20 +90,26 @@ export class Promotion {
     this.error = null;
     this.phase = 'idle';
     this.approved = false;
+    this.pr = null;
   }
 
-  /** Run the full promotion review for the selected resource (OBO export + app-SP reviewer). */
-  async requestReview(): Promise<void> {
+  /**
+   * Request a promotion for the selected resource: review it (OBO export + app-SP reviewer) AND
+   * open/update a real GitHub PR with the attributed review comment (bot). One action, one review.
+   */
+  async requestPromotion(): Promise<void> {
     if (!this.resource || this.phase === 'reviewing') return; // no double-submit
     const id = this.resource.id;
     this.phase = 'reviewing';
     this.review = null;
     this.error = null;
-    this.approved = false; // a fresh review is not yet approved
+    this.approved = false; // a fresh promotion is not yet approved
+    this.pr = null;
     try {
-      const review = await postReview(id);
+      const res = await postPromote(id);
       if (this.resource?.id !== id) return; // selection changed mid-flight — drop the stale result
-      this.review = review;
+      this.review = res.review;
+      this.pr = res.pr;
       this.phase = 'reviewed';
     } catch (e) {
       if (this.resource?.id !== id) return;

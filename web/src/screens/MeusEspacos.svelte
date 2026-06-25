@@ -74,11 +74,11 @@
 
         <div>
           <Button
-            onclick={() => promotion.requestReview()}
+            onclick={() => promotion.requestPromotion()}
             disabled={!promotion.resource}
             loading={promotion.phase === 'reviewing'}
           >
-            {promotion.phase === 'reviewing' ? 'Revisando…' : 'Solicitar promoção →'}
+            {promotion.phase === 'reviewing' ? 'Solicitando…' : 'Solicitar promoção →'}
           </Button>
         </div>
       </div>
@@ -111,10 +111,19 @@
     </div>
   {:else if promotion.phase === 'error'}
     <div class="review-stub error-state" role="alert">
-      <span class="error">Não foi possível revisar: {promotion.error}</span>
-      <Button variant="outline" onclick={() => promotion.requestReview()}>Tentar novamente</Button>
+      <span class="error">Não foi possível solicitar a promoção: {promotion.error}</span>
+      <Button variant="outline" onclick={() => promotion.requestPromotion()}>Tentar novamente</Button>
     </div>
   {:else if promotion.phase === 'reviewed' && promotion.review}
+    {#if promotion.pr}
+      <div class="pr-banner" role="status">
+        <span class="pr-banner__dot" aria-hidden="true"></span>
+        <span>PR de promoção aberto: <strong>#{promotion.pr.number}</strong></span>
+        <a class="pr-banner__link" href={promotion.pr.url} target="_blank" rel="noopener noreferrer">
+          Ver no GitHub ↗
+        </a>
+      </div>
+    {/if}
     <ReviewPanel review={promotion.review} {userEmail} approved={promotion.approved}>
       {#snippet approval()}
         <ApprovalSection {promotion} />
@@ -175,6 +184,30 @@
     margin-top: var(--space-5);
     padding-top: var(--space-5);
     border-top: 1px solid var(--border);
+  }
+  .pr-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-5);
+    padding: var(--space-3) var(--space-4);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-radius: var(--radius-sm);
+    font-size: 0.9rem;
+  }
+  .pr-banner__dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+  .pr-banner__link {
+    margin-left: auto;
+    font-weight: 600;
+    color: var(--accent-hover);
+    white-space: nowrap;
   }
   .running-heading {
     display: flex;

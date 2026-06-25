@@ -271,6 +271,38 @@ def test_spa_placeholder_when_no_build(monkeypatch):
     assert "SPA build not found" in r.text
 
 
+def test_promote_threads_token_email_and_returns_review_and_pr(monkeypatch):
+    captured = {}
+
+    def fake_request_promotion(space_id, *a, user_token=None, requester_email=None, **k):
+        captured.update(space_id=space_id, user_token=user_token, requester_email=requester_email)
+        return {"review": {"gate": {"conclusion": "success"}}, "pr": {"number": 7, "url": "u"}}
+
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake_request_promotion)
+    r = client.post("/api/promote", json={"space_id": "s1"},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "m@x"})
+    assert r.status_code == 200
+    assert r.json()["pr"] == {"number": 7, "url": "u"}
+    assert captured == {"space_id": "s1", "user_token": "tok", "requester_email": "m@x"}
+
+
+def test_promote_requires_a_token():
+    assert client.post("/api/promote", json={"space_id": "s"}).status_code == 401
+
+
+def test_promote_github_error_maps_to_503(monkeypatch):
+    from github_app import GitHubError
+
+    def boom(space_id, *a, **k):
+        raise GitHubError(404, "create pull", {"message": "not installed"})
+
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", boom)
+    r = client.post("/api/promote", json={"space_id": "s"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 503
+    assert "not installed" not in r.text  # internal detail not leaked
+
+
 def test_spa_rejects_path_traversal(static_build):
     # The security-load-bearing guard: a `..` escape must NOT serve a file outside the static dir.
     # Call the route fn directly — httpx/Starlette would normalize `..` out of a URL before it

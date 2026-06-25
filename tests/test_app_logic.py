@@ -142,3 +142,65 @@ def test_client_app_sp_default(monkeypatch):
     seen = _capture_wc(monkeypatch)
     app_logic._client()  # no profile, no token -> app SP / default auth
     assert seen == {}
+
+
+# --- request_promotion (GH2): review + export (OBO) + open PR/comment (bot) ---
+
+class _FakeGitHubApp:
+    def __init__(self):
+        self.promo = None
+        self.comment = None
+
+    def open_or_update_promotion(self, **kw):
+        self.promo = kw
+        return {"number": 7, "html_url": "https://github.com/o/r/pull/7"}
+
+    def upsert_comment(self, number, marker, body):
+        self.comment = {"number": number, "marker": marker, "body": body}
+        return {"id": 1, "updated": False}
+
+
+_FULL_REVIEW = {
+    "findings": [{"rule_id": "EVAL-01", "severity": "BLOCKER", "message": "poucas perguntas"}],
+    "gate": {"conclusion": "failure", "blocker_count": 1, "summary": "🔴 bloqueada"},
+    "eval": {"status": "advisory", "summary": "🟡 x"},
+    "timeline": [{"key": "checks", "label": "Checagens", "status": "pass"}],
+    "allowlist_violations": [],
+    "consumer_group": "account users",
+    "prod_serialized": {"big": "payload should be dropped"},
+    "dev_serialized": {"display_name": "Recebíveis", "n": 2},  # what the PR commits
+}
+
+
+def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+
+    # returns the UI review subset (NOT the big prod_serialized/dev_serialized) + the PR coordinates
+    assert out["pr"] == {"number": 7, "url": "https://github.com/o/r/pull/7"}
+    assert set(out["review"]) == set(app_logic.REVIEW_FIELDS)
+    assert "prod_serialized" not in out["review"] and "dev_serialized" not in out["review"]
+
+    # commits the DEV-shaped export (reused from the review, no second export) to src/genie
+    assert gh.promo["path"] == "src/genie/receivables.serialized_space.json"
+    assert "display_name" in gh.promo["content"]
+    # the comment mirrors the review and attributes the human requester
+    assert gh.comment["number"] == 7
+    assert "malcoln@x" in gh.comment["body"] and "EVAL-01" in gh.comment["body"]
+
+
+def test_github_app_built_as_app_sp_never_user_token(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(app_logic, "_client",
+                        lambda profile=None, **k: seen.update(profile=profile, kwargs=k) or "wc")
+    monkeypatch.setattr(app_logic, "_secret", lambda w, scope, key: f"{key}-val")
+    gh = app_logic._github_app("prof")
+    assert "user_token" not in seen["kwargs"]  # the bot is the app SP, never the user
+    assert gh.owner == "malcolndandaro" and gh.repo == "genie-promote-cicd"
+
+
+def test_secret_decodes_base64_value():
+    import base64
+    fake = NS(secrets=NS(get_secret=lambda scope, key: NS(value=base64.b64encode(b"hello").decode())))
+    assert app_logic._secret(fake, "genie_promote", "github_app_id") == "hello"

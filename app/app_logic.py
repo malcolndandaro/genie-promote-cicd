@@ -30,14 +30,29 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _p in ("genie_reviewer", "scripts"):
     sys.path.insert(0, os.path.join(_ROOT, _p))
 
+import base64  # noqa: E402
+
 import eval_gate  # noqa: E402
 import grant_check  # noqa: E402
 import handbook_rules  # noqa: E402
 import pre_render  # noqa: E402
 import review_core  # noqa: E402
+from github_app import GitHubApp  # noqa: E402
+from promotion_comment import PROMOTION_COMMENT_MARKER, render_promotion_comment  # noqa: E402
 
 LLM = os.environ.get("APP_LLM_ENDPOINT", "databricks-claude-opus-4-8")
 DOMAIN = os.environ.get("APP_DOMAIN", "recebiveis")
+
+# GitHub PR integration (GH2). The committed source the promotion PR edits is the DEV-shaped
+# serialized_space; CI (scripts/render.sh) rebinds dev_->prod_ at validate/deploy — so the PR
+# touches src/, never build/. The bot's creds live in a Databricks secret scope the app SP reads.
+GH_REPO = os.environ.get("APP_GH_REPO", "malcolndandaro/genie-promote-cicd")
+GH_SECRET_SCOPE = os.environ.get("APP_GH_SECRET_SCOPE", "genie_promote")
+GH_PROMOTION_BRANCH = os.environ.get("APP_GH_PROMOTION_BRANCH", "promote/recebiveis")
+GH_SPACE_SRC_PATH = "src/genie/receivables.serialized_space.json"
+
+# The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
+REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group")
 
 
 def _client(profile: str | None = None, *, user_token: str | None = None) -> WorkspaceClient:
@@ -187,6 +202,9 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
         "allowlist_violations": violations, "consumer_group": consumer_group,
         "timeline": build_timeline(not violations, gate, eval_res, approved=False, deployed=False),
         "prod_serialized": prod_space,
+        # The DEV-shaped export (what the promotion PR commits to src/; CI rebinds dev_->prod_).
+        # Returned here so request_promotion reuses it instead of a second OBO export.
+        "dev_serialized": dev_serialized,
     }
 
 
@@ -197,3 +215,56 @@ def can_approve(persona: str, requester: str, approver: str) -> tuple[bool, str]
     if approver == requester:
         return False, "Segregação de funções: o solicitante não pode aprovar a própria promoção."
     return True, ""
+
+
+def _secret(w: WorkspaceClient, scope: str, key: str) -> str:
+    """Read a workspace secret value (the app SP has READ on the scope). Value is base64."""
+    return base64.b64decode(w.secrets.get_secret(scope=scope, key=key).value).decode()
+
+
+def _github_app(profile: str | None = None, *, client: WorkspaceClient | None = None) -> GitHubApp:
+    """Build the GitHub App (bot) client from the secret scope, authenticating to Databricks as the
+    APP SP (never the user) — the SP has READ on the scope. GitHub calls run as the bot."""
+    w = client or _client(profile)  # app SP / local profile — NOT the user token
+    owner, repo = GH_REPO.split("/", 1)
+    return GitHubApp(
+        owner=owner, repo=repo,
+        app_id=_secret(w, GH_SECRET_SCOPE, "github_app_id"),
+        installation_id=_secret(w, GH_SECRET_SCOPE, "github_installation_id"),
+        private_key=_secret(w, GH_SECRET_SCOPE, "github_app_private_key"),
+    )
+
+
+def request_promotion(space_id: str, profile: str | None = None, *, user_token: str | None = None,
+                      requester_email: str | None = None, domain: str = DOMAIN,
+                      github: GitHubApp | None = None) -> dict:
+    """GH2: open (or update) a real promotion PR for a space and post the attributed review comment.
+
+    Flow: review the space (OBO export + app-SP reviewer; reused for the PR comment) → export the
+    DEV-shaped serialized_space (OBO) → as the BOT, ensure the promotion branch, write the artifact
+    to src/ (CI rebinds dev_->prod_), open-or-find the PR, and upsert one comment that mirrors the
+    UI (steps + gate + findings/blockers) attributing the human requester.
+
+    Returns {review (UI fields), pr:{number,url}}. The PR opens regardless of findings — it's the
+    fix/approval loop; pr-checks + the Steward gate (GH4) enforce the outcome.
+    """
+    full = review_space(space_id, profile=profile, user_token=user_token, domain=domain)
+    review = {k: full[k] for k in REVIEW_FIELDS}
+
+    # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the
+    # TOCTOU window where the committed artifact could differ from the reviewed one).
+    content = json.dumps(full["dev_serialized"], ensure_ascii=False, indent=2) + "\n"
+
+    gh = github or _github_app(profile)  # the bot (app SP reads the scope)
+    who = requester_email or "usuário autenticado"
+    safe_id = "".join(c for c in space_id if c.isalnum() or c in "-_")  # title can't carry markup
+    pr = gh.open_or_update_promotion(
+        branch=GH_PROMOTION_BRANCH, path=GH_SPACE_SRC_PATH, content=content,
+        title=f"Promover Genie Space para produção ({safe_id})",
+        body=(f"Promoção solicitada por **{who}** via o app (bot abriu o PR em seu nome). "
+              f"Achados da revisão no comentário abaixo; `pr-checks` é o gate automático e o "
+              f"Steward libera o deploy de produção (segregação de funções)."),
+    )
+    gh.upsert_comment(pr["number"], PROMOTION_COMMENT_MARKER,
+                      render_promotion_comment(review, requester_email))
+    return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}}

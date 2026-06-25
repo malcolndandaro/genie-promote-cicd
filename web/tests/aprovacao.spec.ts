@@ -32,8 +32,10 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
+const PR = { number: 42, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/42' };
+
 async function reviewOnce(page: import('@playwright/test').Page, review: unknown) {
-  await page.route('**/api/review', (route) => route.fulfill({ json: review }));
+  await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
   await page.goto('/');
   await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
   await page.getByRole('button', { name: /Solicitar promoção/ }).click();

@@ -35,6 +35,7 @@ from pydantic import BaseModel
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "app"))
 import app_logic  # noqa: E402
+from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 
 logger = logging.getLogger("engine_api")
 app = FastAPI(title="genie-promote app")
@@ -56,6 +57,10 @@ def _engine_call(label: str, fn: Callable):
     except PermissionDenied:
         logger.info("OBO permission denied in %s", label)
         raise HTTPException(status_code=403, detail="Sem permissão para este recurso (OBO).")
+    except GitHubError:
+        # The bot couldn't reach GitHub / the App isn't installed/authorized — actionable, not a bug.
+        logger.exception("GitHub op failed in %s", label)
+        raise HTTPException(status_code=503, detail="Integração GitHub indisponível — verifique a instalação do app.")
     except Exception:  # noqa: BLE001
         logger.exception("engine call failed: %s", label)
         raise HTTPException(status_code=502, detail=f"engine error: {label}")
@@ -140,6 +145,31 @@ def review(
         return {k: result[k] for k in _REVIEW_FIELDS}
 
     return _engine_call("review_space", _run)
+
+
+class PromoteRequest(BaseModel):
+    space_id: str
+
+
+@api.post("/promote")
+def promote(
+    body: PromoteRequest,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+    x_forwarded_email: str | None = Header(default=None),
+) -> dict:
+    """GH2: open (or update) a real promotion PR for a space + post the attributed review comment.
+    Reviews as the user (OBO) + reviewer SP; opens the PR + comments as the GitHub App (bot). The
+    human requester (x-forwarded-email, display-only) is attributed in the PR/comment content.
+    Returns `{review, pr:{number,url}}`."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    return _engine_call(
+        "request_promotion",
+        lambda: app_logic.request_promotion(
+            body.space_id, user_token=token, requester_email=x_forwarded_email),
+    )
 
 
 # Mount the API twice: at root (legacy engine-API contract) and under /api (what the SPA calls).

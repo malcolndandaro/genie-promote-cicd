@@ -3,3 +3,6 @@
 databricks-sdk>=0.111.0
 fastapi
 uvicorn
+# GitHub App (bot) auth for the PR integration — mint the App JWT (RS256).
+pyjwt>=2.8.0
+cryptography>=42.0.0

@@ -59,3 +59,28 @@ export async function postReview(resourceId: string): Promise<Review> {
   if (!r.ok) throw await toError(r);
   return (await r.json()) as Review;
 }
+
+/** The opened/updated promotion PR (GH2). */
+export interface PullRequestRef {
+  number: number;
+  url: string;
+}
+
+export interface PromoteResult {
+  review: Review;
+  pr: PullRequestRef;
+}
+
+/**
+ * Request a promotion: review the resource AND open (or update) a real GitHub PR with the
+ * attributed review comment. Reviews as the user (OBO); opens the PR + comments as the bot.
+ */
+export async function postPromote(resourceId: string): Promise<PromoteResult> {
+  const r = await fetch('/api/promote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ space_id: resourceId }),
+  });
+  if (!r.ok) throw await toError(r);
+  return (await r.json()) as PromoteResult;
+}
