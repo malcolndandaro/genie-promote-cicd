@@ -22,6 +22,7 @@ import os
 import sys
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.core import Config
 from databricks.sdk.service.catalog import SecurableType
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
@@ -39,20 +40,32 @@ LLM = os.environ.get("APP_LLM_ENDPOINT", "databricks-claude-opus-4-8")
 DOMAIN = os.environ.get("APP_DOMAIN", "recebiveis")
 
 
-def _client(profile: str | None = None) -> WorkspaceClient:
-    """Build a Databricks SDK WorkspaceClient.
+def _client(profile: str | None = None, *, user_token: str | None = None) -> WorkspaceClient:
+    """Build a Databricks SDK WorkspaceClient for one of three auth contexts.
 
-    Locally a CLI profile (``~/.databrickscfg``) selects the workspace. On the
-    deployed Databricks App ``profile`` is None and auth is automatic — the app's
-    service principal is injected via env, so ``WorkspaceClient()`` just works.
+    - ``user_token`` (deployed app, OBO): act *as the logged-in user* via their forwarded
+      OAuth token (the ``x-forwarded-access-token`` header). Host comes from the
+      auto-injected env. Used for user-facing reads so the app respects the user's own
+      data access (and the audit trail is per-user), never the app's broader rights.
+    - ``profile`` (local dev): select a workspace from ``~/.databrickscfg``.
+    - neither (deployed app, shared ops): the app's service principal authenticates
+      automatically via injected env — used for the LLM reviewer + the prod grant preview.
+
     Construction is lazy (no network call), so this is safe to build offline.
     """
+    if user_token:
+        # auth_type="pat" so the SDK uses ONLY the forwarded user token. Without it the app
+        # SP's auto-injected OAuth env (DATABRICKS_CLIENT_ID/SECRET) collides with the token
+        # -> "more than one authorization method configured: oauth and pat".
+        return WorkspaceClient(host=Config().host, token=user_token, auth_type="pat")
     return WorkspaceClient(profile=profile) if profile else WorkspaceClient()
 
 
-def list_spaces(profile: str, client: WorkspaceClient | None = None) -> list[dict]:
-    """The author's Genie Spaces (id + title). ``client`` is injectable for tests."""
-    w = client or _client(profile)
+def list_spaces(profile: str | None = None, *, client: WorkspaceClient | None = None,
+                user_token: str | None = None) -> list[dict]:
+    """The author's Genie Spaces (id + title). Acts as the logged-in user via ``user_token``
+    (OBO) on the deployed app, or a local ``profile``. ``client`` is injectable for tests."""
+    w = client or _client(profile, user_token=user_token)
     resp = w.genie.list_spaces()
     return [{"space_id": s.space_id, "title": s.title or "(sem título)"}
             for s in (resp.spaces or [])]
@@ -113,21 +126,24 @@ def _effective_grants(profile: str, full_name: str, client: WorkspaceClient | No
     return out
 
 
-def review_space(space_id: str, profile: str, to_env: str = "prod", domain: str = DOMAIN,
-                 consumer_group: str | None = None, grant_profile: str | None = None) -> dict:
+def review_space(space_id: str, profile: str | None = None, to_env: str = "prod", domain: str = DOMAIN,
+                 consumer_group: str | None = None, grant_profile: str | None = None,
+                 user_token: str | None = None) -> dict:
     """The hero flow: export -> pre-render -> allowlist (ENV-01) + grant check (GRANT-01)
     -> agent review (EVAL-01 deterministic) -> eval gate. Deterministic findings own their
     rule_id (no double-count). Returns findings/gate/eval/allowlist_violations/timeline/prod_serialized.
 
-    GRANT-01 queries the TARGET (prod) workspace — the prod catalog is workspace-isolated
-    from dev — so it uses grant_profile (APP_PROD_PROFILE), falling back to `profile`.
-    Best-effort: if prod isn't reachable, the grant check is skipped (no false finding).
+    The in-app GRANT-01 preview only runs when an explicit, reachable prod target is
+    configured (grant_profile arg or APP_PROD_PROFILE locally) — the prod catalog is
+    workspace-isolated, so the dev-hosted app can't see it. On the deployed app it's skipped;
+    the AUTHORITATIVE GRANT-01 runs in CI (pr-checks) as the prod SP (scripts/check_grants.py).
     """
     consumer_group = consumer_group or os.environ.get("APP_CONSUMER_GROUP", "account users")
-    grant_profile = grant_profile or os.environ.get("APP_PROD_PROFILE", profile)
-    # One client per workspace, reused across calls: `w` for the source/dev ops (export +
-    # agent review) and `gw` for the prod grant check (built lazily inside the try below).
-    w = _client(profile)
+    grant_profile = grant_profile or os.environ.get("APP_PROD_PROFILE")  # None -> skip preview
+    # Auth split (see _client): `w` acts as the user (OBO) / local profile for the Genie
+    # export so we respect the user's own access; `gw` (built in the try) and the LLM
+    # reviewer run as the app SP — shared/cross-workspace ops that aren't user data.
+    w = _client(profile, user_token=user_token)
     dev_serialized = export_serialized(space_id, profile, client=w)
     rendered = pre_render.rebind(json.dumps(dev_serialized, ensure_ascii=False), "dev", to_env, domain)
     prod_space = json.loads(rendered)
@@ -142,19 +158,30 @@ def review_space(space_id: str, profile: str, to_env: str = "prod", domain: str 
          "suggestion": "Remover/pré-renderizar a referência de outro ambiente."}
         for v in violations
     ]
-    try:
-        gw = _client(grant_profile)  # built here so a bad/unreachable prod profile can't break the review
-        deterministic += grant_check.check_grants(
-            prod_space, consumer_group, lambda fq: _effective_grants(grant_profile, fq, client=gw))
-    except Exception:  # noqa: BLE001 — grant check is best-effort; never break the review
-        pass
+    if grant_profile:  # only preview when a reachable prod target is configured (else CI owns it)
+        try:
+            gw = _client(grant_profile)  # built here so a bad/unreachable prod profile can't break the review
+            deterministic += grant_check.check_grants(
+                prod_space, consumer_group, lambda fq: _effective_grants(grant_profile, fq, client=gw))
+        except Exception:  # noqa: BLE001 — grant check is best-effort; never break the review
+            pass
 
     ctx = review_core.build_space_context(prod_space)
     system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, deterministic)
-    review = review_core.parse_review(_claude(system, user, profile, client=w))
+    # LLM reviewer = shared operation -> app SP (a serving scope isn't part of OBO; the
+    # reviewer agent doesn't read the user's data). Locally (no OBO) `w` is the profile client.
+    sp = _client(profile) if user_token else w
+    review = review_core.parse_review(_claude(system, user, profile, client=sp))
     findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"])
     gate = review_core.decide_gate(findings)
-    eval_res = eval_gate.run_eval_gate(space_id, profile)
+    try:
+        # eval_gate still uses the `databricks` CLI — absent on the Apps container, and
+        # profile is None under OBO. It's advisory by design, so degrade (never break the
+        # review). The authoritative eval-run gate runs in CI with a real profile.
+        eval_res = eval_gate.run_eval_gate(space_id, profile)
+    except Exception:  # noqa: BLE001
+        eval_res = eval_gate.decide_eval(None, available=False,
+                                         reason="eval-run indisponível neste ambiente (sem CLI)")
     return {
         "findings": findings, "gate": gate, "eval": eval_res,
         "allowlist_violations": violations, "consumer_group": consumer_group,

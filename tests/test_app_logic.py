@@ -109,3 +109,36 @@ def test_claude_returns_first_choice_content():
 def test_claude_empty_when_no_choices():
     fake = NS(serving_endpoints=NS(query=lambda name, messages, max_tokens: NS(choices=[])))
     assert app_logic._claude("sys", "usr", "p", client=fake) == ""
+
+
+# --- _client auth-context branching (OBO / local profile / app SP) — offline ---
+
+def _capture_wc(monkeypatch):
+    """Patch WorkspaceClient to record ctor kwargs instead of connecting."""
+    seen = {}
+
+    class FakeWC:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(app_logic, "WorkspaceClient", FakeWC)
+    return seen
+
+
+def test_client_obo_uses_user_token(monkeypatch):
+    seen = _capture_wc(monkeypatch)
+    monkeypatch.setattr(app_logic, "Config", lambda: NS(host="https://dev.example"))
+    app_logic._client(profile="ignored-when-token", user_token="tok-123")
+    assert seen == {"host": "https://dev.example", "token": "tok-123", "auth_type": "pat"}
+
+
+def test_client_local_profile(monkeypatch):
+    seen = _capture_wc(monkeypatch)
+    app_logic._client(profile="cerc-mlops-dev")
+    assert seen == {"profile": "cerc-mlops-dev"}
+
+
+def test_client_app_sp_default(monkeypatch):
+    seen = _capture_wc(monkeypatch)
+    app_logic._client()  # no profile, no token -> app SP / default auth
+    assert seen == {}

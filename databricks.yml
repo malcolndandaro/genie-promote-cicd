@@ -35,6 +35,23 @@ targets:
     variables:
       env: dev
       warehouse_id: your-dev-warehouse-id
+    # The authoring front door is a DEV-only resource: authors review dev spaces here and
+    # request promotion; the gated CI prod-deploy (SP) never touches it. Deployed from the
+    # repo root (source_code_path: .) so it can import genie_reviewer/ + scripts/; runtime
+    # command + env come from the root app.yaml. Auth: OBO for user reads, app SP for the
+    # LLM reviewer / grant preview (see app/app_logic.py::_client).
+    resources:
+      apps:
+        promotor:
+          name: "genie-promote-app"
+          description: "Front door: autor lista/cria Genie spaces e solicita promoção (OBO)."
+          source_code_path: .
+          # OBO scope: the app acts as the signed-in user for Genie reads (list_spaces/
+          # get_space). Only non-default scopes are settable — the iam.current-user:read /
+          # iam.access-control:read defaults are auto-applied. The LLM reviewer + grant
+          # preview run as the app SP, which needs no user scope.
+          user_api_scopes:
+            - dashboards.genie
 
   prod:
     variables:

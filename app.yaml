@@ -1,0 +1,25 @@
+# Databricks App deploy manifest (root). The app is deployed from the REPO ROOT so it can
+# import the engine packages genie_reviewer/ + scripts/ (app_logic resolves them relative to
+# the repo root). Hence the entrypoint is app/app.py, not app.py.
+#
+# Auth: NO APP_PROFILE here — on the deployed app there is no ~/.databrickscfg. User-facing
+# Genie reads use On-Behalf-Of (the platform forwards x-forwarded-access-token); the LLM
+# reviewer + prod grant preview use the app's service principal automatically. APP_PROFILE
+# is only for LOCAL dev. (See app/app.py::_auth and app/app_logic.py::_client.)
+# Bare command: the Apps platform auto-configures Streamlit's port/address (it binds
+# DATABRICKS_APP_PORT). Passing --server.port ${...} fails — app.yaml doesn't expand bash
+# defaulting syntax, so Streamlit would get a literal string for the port and crash.
+command:
+  - streamlit
+  - run
+  - app/app.py
+env:
+  - name: APP_DOMAIN
+    value: "recebiveis"
+  - name: APP_STEWARD
+    value: "pedro.perdomo@databricks.com"
+  # CORS+XSRF off: the reverse-proxy origin differs from the workspace origin.
+  - name: STREAMLIT_SERVER_ENABLE_CORS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+    value: "false"

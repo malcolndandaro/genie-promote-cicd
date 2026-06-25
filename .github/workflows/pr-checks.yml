@@ -36,3 +36,9 @@ jobs:
         run: bash scripts/render.sh prod
       - name: Validate bundle (prod target)
         run: databricks bundle validate -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
+      - name: GRANT-01 — consumer group can SELECT the prod tables (governance gate)
+        # Runs as the prod SP (job env), so it has the prod-catalog visibility the dev-hosted
+        # app lacks. Fails the PR if the consumer group is missing SELECT on any space table.
+        run: |
+          python3 -m pip install -q 'databricks-sdk>=0.111.0'
+          python3 scripts/check_grants.py build/genie/receivables.serialized_space.json "${{ vars.DATABRICKS_CONSUMER_GROUP || 'account users' }}"

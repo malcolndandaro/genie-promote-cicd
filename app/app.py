@@ -13,13 +13,38 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import app_logic
 import streamlit as st
 
-PROFILE = os.environ.get("APP_PROFILE", "databricks-dev")  # local; deployed app uses its SP
-# Identities are config, not literals (ADR-0004). GO-LIVE: derive the requester from the
-# app's authenticated principal header (x-forwarded-email), not a constant/persona radio.
-REQUESTER = os.environ.get("APP_REQUESTER", "malcoln.dandaro@databricks.com")
+# Identities are config, not literals (ADR-0004). The Steward is config; the REQUESTER is
+# the authenticated user (derived below from the OBO principal header on the deployed app).
 STEWARD = os.environ.get("APP_STEWARD", "pedro.perdomo@databricks.com")
 
 st.set_page_config(page_title="Acme · Promotor de Genie/AI-BI", layout="wide")
+
+
+def _auth() -> tuple[str | None, str | None, str]:
+    """Return (profile, user_token, requester) for the current context.
+
+    Deployed app -> On-Behalf-Of: the platform forwards the signed-in user's OAuth token
+    (`x-forwarded-access-token`) and email (`x-forwarded-email`), so the app acts as the
+    user and respects their own data access. Local dev -> a CLI profile (APP_PROFILE) and
+    a configured requester. (Headers only exist when deployed.)
+    """
+    # NB: st.context.headers is case-insensitive — call .get() on it directly. Do NOT
+    # dict()-convert first: the proxy sends Title-Cased keys (X-Forwarded-Access-Token) and
+    # a plain dict lookup with a lowercase key would miss.
+    try:
+        headers = st.context.headers
+    except Exception:  # noqa: BLE001
+        headers = None
+    token = headers.get("x-forwarded-access-token") if headers else None
+    email = headers.get("x-forwarded-email") if headers else None
+    if token:
+        return None, token, (email or "usuário autenticado")
+    return (os.environ.get("APP_PROFILE") or None), None, \
+        os.environ.get("APP_REQUESTER", "malcoln.dandaro@databricks.com")
+
+
+PROFILE, USER_TOKEN, REQUESTER = _auth()
+ON_BEHALF = USER_TOKEN is not None
 ss = st.session_state
 ss.setdefault("review", None)
 ss.setdefault("approved", False)
@@ -28,7 +53,8 @@ ss.setdefault("approved", False)
 st.title("Acme · Promotor de Genie/AI-BI")
 persona_label = st.sidebar.radio("Logado como", ["Malcoln · Autor", "Pedro · Steward"])
 persona = "steward" if "Steward" in persona_label else "author"
-st.sidebar.caption(f"Workspace de origem: `{PROFILE}` · domínio: `{app_logic.DOMAIN}`")
+_origem = f"OBO · {REQUESTER}" if ON_BEHALF else (PROFILE or "auth padrão")
+st.sidebar.caption(f"Origem: `{_origem}` · domínio: `{app_logic.DOMAIN}`")
 st.sidebar.caption("Segregação de funções: Autor ≠ Steward ≠ service principal (ADR-0002).")
 
 tab_spaces, tab_new = st.tabs(["Meus espaços", "＋ Novo Genie Space"])
@@ -36,7 +62,7 @@ tab_spaces, tab_new = st.tabs(["Meus espaços", "＋ Novo Genie Space"])
 # --- Meus espaços (S8) ----------------------------------------------------------
 with tab_spaces:
     try:
-        spaces = app_logic.list_spaces(PROFILE)
+        spaces = app_logic.list_spaces(PROFILE, user_token=USER_TOKEN)
     except Exception as e:  # noqa: BLE001
         st.error(f"Não foi possível listar os espaços: {e}")
         spaces = []
@@ -50,7 +76,7 @@ with tab_spaces:
         if st.button("Solicitar promoção →", type="primary"):
             with st.spinner("Pré-renderizando, rodando allowlist + grants e a revisão do agente…"):
                 try:
-                    ss.review = app_logic.review_space(sel["space_id"], PROFILE)
+                    ss.review = app_logic.review_space(sel["space_id"], PROFILE, user_token=USER_TOKEN)
                     ss.approved = False
                 except Exception as e:  # noqa: BLE001 — surface friendly PT, never a traceback
                     st.error(f"Não foi possível revisar o espaço: {e}")

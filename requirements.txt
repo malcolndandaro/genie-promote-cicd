@@ -1,0 +1,5 @@
+# Root deploy manifest deps (app deployed from repo root). Streamlit is pre-installed on the
+# Apps runtime; databricks-sdk is pinned >=0.111 for the genie get_space(include_serialized_space)
+# + grants.get_effective string-securable behavior the app relies on.
+streamlit
+databricks-sdk>=0.111.0
