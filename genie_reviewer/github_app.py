@@ -33,6 +33,43 @@ class GitHubError(RuntimeError):
         self.body = body
 
 
+_NO_DEPLOY = {"status": "none", "conclusion": None, "waiting_approval": False, "run_url": None,
+              "run_id": None}
+
+
+def _aggregate_checks(runs: list) -> str:
+    """Aggregate PR check-runs into one verdict: none / pending / success / failure."""
+    if not runs:
+        return "none"
+    if any(r.get("status") != "completed" for r in runs):
+        return "pending"
+    conclusions = [r.get("conclusion") for r in runs]
+    if any(c == "action_required" for c in conclusions):  # a check awaiting a human, not a failure
+        return "pending"
+    if any(c not in ("success", "neutral", "skipped") for c in conclusions):
+        return "failure"
+    return "success"
+
+
+def _derive_phase(pr_state: str | None, merged: bool, checks: str, deploy: dict) -> str:
+    """A single phase the UI maps to a badge — reflects where the promotion actually is."""
+    if merged:
+        if deploy["waiting_approval"]:
+            return "awaiting_approval"
+        if deploy["status"] in ("queued", "in_progress"):
+            return "deploying"
+        if deploy["status"] == "completed":
+            return "deployed" if deploy["conclusion"] == "success" else "deploy_failed"
+        return "merged"
+    if pr_state == "closed":
+        return "closed"
+    if checks == "pending":
+        return "checks_running"
+    if checks == "failure":
+        return "checks_failed"
+    return "open"  # checks success or not-yet-started (runner idle)
+
+
 def _urllib_transport(method: str, url: str, headers: dict, body: dict | None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
@@ -160,6 +197,44 @@ class GitHubApp:
         _, pr = self._api("POST", self._repo_path("/pulls"), "create pull",
                           {"title": title, "head": branch, "base": self.base, "body": body})
         return {"number": pr["number"], "html_url": pr["html_url"]}
+
+    # --- live status (GH3): reflect, never assert ---------------------------
+    def get_status(self, number: int) -> dict:
+        """Read the live promotion state from GitHub (as the bot): PR check conclusion, merge
+        state, and — once merged — the prod deploy run + whether its Environment gate is waiting.
+        Reflects GitHub; it never asserts a deploy that didn't happen."""
+        _, pr = self._api("GET", self._repo_path(f"/pulls/{number}"), "get pull")
+        head_sha = pr["head"]["sha"]
+        merged = bool(pr.get("merged"))
+        _, cr = self._api("GET", self._repo_path(f"/commits/{head_sha}/check-runs"), "check runs")
+        checks = _aggregate_checks((cr or {}).get("check_runs", []))
+        deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
+        return {
+            "pr_state": pr.get("state"), "merged": merged, "checks": checks,
+            "deploy": deploy, "pr_url": pr.get("html_url"),
+            "phase": _derive_phase(pr.get("state"), merged, checks, deploy),
+        }
+
+    def _deploy_status(self, merge_sha: str | None = None) -> dict:
+        """THIS promotion's `deploy` run + whether its gate is waiting. Correlated to the PR's
+        merge commit so a concurrent/unrelated push to base can't be mistaken for our deploy;
+        falls back to the latest `deploy` run only when no merge-sha match is found."""
+        _, runs = self._api(
+            "GET", self._repo_path(f"/actions/runs?branch={self.base}&event=push&per_page=20"),
+            "actions runs")
+        deploys = [r for r in (runs or {}).get("workflow_runs", [])
+                   if "/deploy.yml" in (r.get("path") or "") or r.get("name") == "deploy"]
+        wf = None
+        if merge_sha:
+            wf = next((r for r in deploys if r.get("head_sha") == merge_sha), None)
+        if wf is None:
+            wf = deploys[0] if deploys else None  # fallback: most recent deploy run
+        if not wf:
+            return dict(_NO_DEPLOY)
+        status = wf.get("status")  # queued | in_progress | completed | waiting (gate pending)
+        return {"status": status, "conclusion": wf.get("conclusion"),
+                "waiting_approval": status == "waiting", "run_url": wf.get("html_url"),
+                "run_id": wf.get("id")}
 
     # --- comment (one canonical, updated in place) --------------------------
     def upsert_comment(self, number: int, marker: str, body: str) -> dict:

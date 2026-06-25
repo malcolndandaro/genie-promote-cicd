@@ -84,3 +84,35 @@ export async function postPromote(resourceId: string): Promise<PromoteResult> {
   if (!r.ok) throw await toError(r);
   return (await r.json()) as PromoteResult;
 }
+
+/** Live promotion phases (GH3) — where the PR actually is, read from GitHub by the bot. */
+export type PromotePhase =
+  | 'open'
+  | 'checks_running'
+  | 'checks_failed'
+  | 'awaiting_approval'
+  | 'deploying'
+  | 'deployed'
+  | 'deploy_failed'
+  | 'merged'
+  | 'closed';
+
+export interface PromoteStatus {
+  pr_state: string;
+  merged: boolean;
+  checks: 'none' | 'pending' | 'success' | 'failure';
+  deploy: {
+    status: string;
+    conclusion: string | null;
+    waiting_approval: boolean;
+    run_url: string | null;
+    run_id?: number | null;
+  };
+  pr_url: string;
+  phase: PromotePhase;
+}
+
+/** Read the live status of a promotion PR (bot read; reflects GitHub, never asserts a deploy). */
+export function getPromoteStatus(prNumber: number): Promise<PromoteStatus> {
+  return getJSON<PromoteStatus>(`/api/promote/${prNumber}/status`);
+}

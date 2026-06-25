@@ -172,6 +172,13 @@ def promote(
     )
 
 
+@api.get("/promote/{number}/status")
+def promote_status(number: int) -> dict:
+    """GH3: live status of a promotion PR (checks + merge + prod deploy/gate). Read as the BOT
+    (app SP) — no OBO token required; the platform proxy already gates who reaches the app."""
+    return _engine_call("promotion_status", lambda: app_logic.promotion_status(number))
+
+
 # Mount the API twice: at root (legacy engine-API contract) and under /api (what the SPA calls).
 app.include_router(api)
 app.include_router(api, prefix="/api")

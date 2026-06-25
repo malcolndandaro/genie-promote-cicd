@@ -190,6 +190,15 @@ def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
     assert "malcoln@x" in gh.comment["body"] and "EVAL-01" in gh.comment["body"]
 
 
+def test_promotion_status_reads_via_injected_bot():
+    class FakeGH:
+        def get_status(self, number):
+            return {"phase": "awaiting_approval", "number": number, "merged": True}
+
+    out = app_logic.promotion_status(6, github=FakeGH())
+    assert out == {"phase": "awaiting_approval", "number": 6, "merged": True}
+
+
 def test_github_app_built_as_app_sp_never_user_token(monkeypatch):
     seen = {}
     monkeypatch.setattr(app_logic, "_client",

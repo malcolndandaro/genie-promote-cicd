@@ -61,6 +61,28 @@ test('promoting renders the review (finding + AI-trust + pipeline + gate) and th
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
 });
 
+test('reflects the live PR status (polled) as a badge in the PR banner', async ({ page }) => {
+  await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
+  await page.route(`**/api/promote/${PR.number}/status`, (route) =>
+    route.fulfill({
+      json: {
+        pr_state: 'open',
+        merged: false,
+        checks: 'pending',
+        deploy: { status: 'none', conclusion: null, waiting_approval: false, run_url: null },
+        pr_url: PR.url,
+        phase: 'checks_running',
+      },
+    }),
+  );
+  await page.goto('/');
+  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
+  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Checagens em execução')).toBeVisible(); // live phase badge (polled)
+});
+
 test('shows the animated running pipeline while the promotion is in flight', async ({ page }) => {
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => (release = r));

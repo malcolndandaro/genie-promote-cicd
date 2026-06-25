@@ -12,7 +12,7 @@
  * the git integration lands, `approve()` is replaced by "approve the open PR".
  */
 import type { PromotableResource, Review } from './types';
-import { postPromote, type PullRequestRef } from './api';
+import { postPromote, getPromoteStatus, type PullRequestRef, type PromoteStatus } from './api';
 
 export type PromotionPhase = 'idle' | 'reviewing' | 'reviewed' | 'error';
 export type Persona = 'author' | 'steward';
@@ -27,6 +27,8 @@ export class Promotion {
   error = $state<string | null>(null);
   /** The opened/updated promotion PR (GH2) — set once the bot opens it. */
   pr = $state<PullRequestRef | null>(null);
+  /** Live PR/CI/deploy status (GH3) — polled from GitHub via the bot; reflects, never asserts. */
+  liveStatus = $state<PromoteStatus | null>(null);
 
   // --- separation of duties (SV4) ---
   /** Demo persona toggle: act as the Autor (requester) or the Steward (approver). */
@@ -91,6 +93,19 @@ export class Promotion {
     this.phase = 'idle';
     this.approved = false;
     this.pr = null;
+    this.liveStatus = null;
+  }
+
+  /** Poll the live status of the open PR (bot read). Keeps the last value on a transient error. */
+  async refreshStatus(): Promise<void> {
+    const pr = this.pr;
+    if (!pr) return;
+    try {
+      const s = await getPromoteStatus(pr.number);
+      if (this.pr?.number === pr.number) this.liveStatus = s; // ignore if the PR changed mid-flight
+    } catch {
+      /* transient — keep the last known status */
+    }
   }
 
   /**
@@ -105,6 +120,7 @@ export class Promotion {
     this.error = null;
     this.approved = false; // a fresh promotion is not yet approved
     this.pr = null;
+    this.liveStatus = null;
     try {
       const res = await postPromote(id);
       if (this.resource?.id !== id) return; // selection changed mid-flight — drop the stale result

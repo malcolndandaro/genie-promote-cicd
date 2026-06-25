@@ -303,6 +303,24 @@ def test_promote_github_error_maps_to_503(monkeypatch):
     assert "not installed" not in r.text  # internal detail not leaked
 
 
+def test_promote_status_returns_bot_read(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "promotion_status",
+                        lambda number, *a, **k: {"phase": "deployed", "merged": True, "number": number})
+    r = client.get("/api/promote/6/status")
+    assert r.status_code == 200
+    assert r.json() == {"phase": "deployed", "merged": True, "number": 6}
+
+
+def test_promote_status_github_error_maps_to_503(monkeypatch):
+    from github_app import GitHubError
+
+    def boom(number, *a, **k):
+        raise GitHubError(503, "actions runs", None)
+
+    monkeypatch.setattr(engine_api.app_logic, "promotion_status", boom)
+    assert client.get("/api/promote/6/status").status_code == 503
+
+
 def test_spa_rejects_path_traversal(static_build):
     # The security-load-bearing guard: a `..` escape must NOT serve a file outside the static dir.
     # Call the route fn directly — httpx/Starlette would normalize `..` out of a URL before it

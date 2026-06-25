@@ -268,3 +268,10 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     gh.upsert_comment(pr["number"], PROMOTION_COMMENT_MARKER,
                       render_promotion_comment(review, requester_email))
     return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}}
+
+
+def promotion_status(number: int, profile: str | None = None, *, github: GitHubApp | None = None) -> dict:
+    """GH3: the live state of a promotion PR (checks + merge + prod deploy/gate), read as the BOT
+    (app SP) — no user token needed, the bot reads GitHub regardless of which user is viewing."""
+    gh = github or _github_app(profile)
+    return gh.get_status(number)

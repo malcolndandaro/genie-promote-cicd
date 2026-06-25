@@ -166,6 +166,110 @@ def test_github_error_raised_on_non_2xx():
     assert e.value.status == 422
 
 
+def _status_transport(pull, check_runs, workflow_runs):
+    def t(method, url, headers, body):
+        p = url.split("api.github.com")[-1]
+        if p.endswith("/access_tokens"):
+            return 201, {"token": "x"}
+        if "/pulls/" in p and p.split("/pulls/")[1].split("?")[0].isdigit():
+            return 200, pull
+        if "/check-runs" in p:
+            return 200, {"check_runs": check_runs}
+        if "/actions/runs" in p:
+            return 200, {"workflow_runs": workflow_runs}
+        return 500, {"message": f"unhandled {method} {p}"}
+
+    return GitHubApp(owner="o", repo="r", transport=t, token_provider=lambda: "tok")
+
+
+_OPEN_PR = {"number": 1, "state": "open", "merged": False, "head": {"sha": "s"}, "html_url": "u"}
+_MERGED_PR = {"number": 1, "state": "closed", "merged": True, "head": {"sha": "s"}, "html_url": "u"}
+
+
+def test_status_checks_running_when_open():
+    s = _status_transport(_OPEN_PR, [{"status": "in_progress", "conclusion": None}], []).get_status(1)
+    assert s["checks"] == "pending" and s["merged"] is False and s["phase"] == "checks_running"
+    assert s["deploy"]["status"] == "none"
+
+
+def test_status_checks_failed():
+    s = _status_transport(_OPEN_PR, [{"status": "completed", "conclusion": "failure"}], []).get_status(1)
+    assert s["checks"] == "failure" and s["phase"] == "checks_failed"
+
+
+def test_status_open_when_checks_pass_pre_merge():
+    s = _status_transport(_OPEN_PR, [{"status": "completed", "conclusion": "success"}], []).get_status(1)
+    assert s["checks"] == "success" and s["phase"] == "open"
+
+
+def test_status_awaiting_approval_after_merge():
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "waiting", "conclusion": None, "html_url": "r", "id": 9}],
+    ).get_status(1)
+    assert s["merged"] and s["deploy"]["waiting_approval"] and s["phase"] == "awaiting_approval"
+
+
+def test_status_deployed_after_successful_run():
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "success", "html_url": "r", "id": 9}],
+    ).get_status(1)
+    assert s["phase"] == "deployed"
+
+
+def test_status_deploying_when_run_in_progress():
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "in_progress", "conclusion": None, "html_url": "r", "id": 9}],
+    ).get_status(1)
+    assert s["phase"] == "deploying"
+
+
+def test_status_deploy_failed():
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "r", "id": 9}],
+    ).get_status(1)
+    assert s["phase"] == "deploy_failed"
+
+
+def test_status_closed_not_merged():
+    pr = {"number": 1, "state": "closed", "merged": False, "head": {"sha": "s"}, "html_url": "u"}
+    s = _status_transport(pr, [{"status": "completed", "conclusion": "success"}], []).get_status(1)
+    assert s["phase"] == "closed"
+
+
+def test_status_merged_no_deploy_run_yet():
+    # Merged but the push hasn't spawned a deploy run (runner idle) — honest "merged", no false deploy.
+    s = _status_transport(_MERGED_PR, [{"status": "completed", "conclusion": "success"}], []).get_status(1)
+    assert s["deploy"]["status"] == "none" and s["phase"] == "merged"
+
+
+def test_deploy_run_matched_by_merge_commit_sha_not_just_latest():
+    # A concurrent/unrelated deploy run is the latest; ours is correlated by merge_commit_sha.
+    pr = {"number": 1, "state": "closed", "merged": True, "head": {"sha": "s"},
+          "merge_commit_sha": "MINE", "html_url": "u"}
+    runs = [
+        {"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "other",
+         "id": 1, "head_sha": "OTHER"},
+        {"name": "deploy", "status": "waiting", "conclusion": None, "html_url": "mine",
+         "id": 2, "head_sha": "MINE"},
+    ]
+    s = _status_transport(pr, [{"status": "completed", "conclusion": "success"}], runs).get_status(1)
+    assert s["deploy"]["run_url"] == "mine" and s["phase"] == "awaiting_approval"
+
+
+def test_aggregate_checks_edges():
+    from github_app import _aggregate_checks
+    assert _aggregate_checks([]) == "none"
+    assert _aggregate_checks([{"status": "completed", "conclusion": "action_required"}]) == "pending"
+    assert _aggregate_checks([{"status": "completed", "conclusion": "neutral"},
+                              {"status": "completed", "conclusion": "skipped"}]) == "success"
+    assert _aggregate_checks([{"status": "completed", "conclusion": "success"},
+                              {"status": "completed", "conclusion": "failure"}]) == "failure"
+
+
 def test_installation_token_is_cached_across_calls():
     fg = FakeGitHub()
     n = {"c": 0}

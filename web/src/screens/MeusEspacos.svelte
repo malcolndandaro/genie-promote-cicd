@@ -10,6 +10,7 @@
   import { getResources, isAuthError } from '../lib/api';
   import { kindMeta } from '../lib/resources';
   import { pendingTimeline } from '../lib/pipeline';
+  import { PHASE_LABEL, phaseTone } from '../lib/status';
   import type { Promotion } from '../lib/promotion.svelte';
   import type { PromotableResource } from '../lib/types';
 
@@ -19,6 +20,20 @@
     onGoToNew?: () => void;
   }
   let { promotion, userEmail, onGoToNew }: Props = $props();
+
+  // Poll the live PR/CI/deploy status while a promotion PR is open (GH3). The effect depends on
+  // `promotion.pr`, so it (re)starts when a PR opens and stops/cleans up when it changes or
+  // unmounts. Polling stops once the promotion reaches a terminal phase (no point hitting GitHub).
+  const TERMINAL = new Set(['deployed', 'closed', 'deploy_failed']);
+  $effect(() => {
+    if (!promotion.pr) return;
+    promotion.refreshStatus();
+    const id = setInterval(async () => {
+      await promotion.refreshStatus();
+      if (promotion.liveStatus && TERMINAL.has(promotion.liveStatus.phase)) clearInterval(id);
+    }, 5000);
+    return () => clearInterval(id);
+  });
 
   // The user's promotable resources (OBO). In $state so an error is retryable.
   let resourcesP = $state(getResources());
@@ -119,6 +134,11 @@
       <div class="pr-banner" role="status">
         <span class="pr-banner__dot" aria-hidden="true"></span>
         <span>PR de promoção aberto: <strong>#{promotion.pr.number}</strong></span>
+        {#if promotion.liveStatus}
+          <Badge tone={phaseTone(promotion.liveStatus.phase)}>
+            {PHASE_LABEL[promotion.liveStatus.phase]}
+          </Badge>
+        {/if}
         <a class="pr-banner__link" href={promotion.pr.url} target="_blank" rel="noopener noreferrer">
           Ver no GitHub ↗
         </a>
