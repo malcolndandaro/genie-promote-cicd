@@ -30,3 +30,9 @@ build/
 
 # pytest
 .pytest_cache/
+
+# Local planning tracker (PRDs + AFK issue slices) — stays local, not in the public repo
+.scratch/
+
+# Playwright MCP artifacts
+.playwright-mcp/
