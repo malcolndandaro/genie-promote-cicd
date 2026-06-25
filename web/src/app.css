@@ -55,6 +55,10 @@
   --destructive-soft: #fbe9e7;
   --muted: var(--cerc-gray-100);
 
+  /* loading shimmer */
+  --skeleton-base: var(--cerc-gray-100);
+  --skeleton-highlight: var(--cerc-gray-200);
+
   /* shape + depth */
   --radius: 14px;
   --radius-sm: 10px;
