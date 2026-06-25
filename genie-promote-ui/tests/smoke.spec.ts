@@ -56,7 +56,7 @@ test('smoke test - review renders findings + AI-trust', async ({ page }) => {
   );
 
   await page.goto('/');
-  await page.getByRole('combobox').click();
+  await page.getByRole('combobox', { name: 'Espaço' }).click();
   await page.getByRole('option', { name: 'Test Space' }).click();
   await page.getByRole('button', { name: 'Solicitar promoção →' }).click();
 
@@ -65,6 +65,51 @@ test('smoke test - review renders findings + AI-trust', async ({ page }) => {
   await expect(page.getByText('BLOCKER', { exact: true })).toBeVisible();
   await expect(page.getByText('Achados gerados por IA — verifique antes de aprovar.')).toBeVisible();
   await expect(page.getByText('promoção bloqueada', { exact: false })).toBeVisible();
+
+  // SoD: even as the Steward, a promotion with a BLOCKER cannot be approved.
+  await page.getByRole('combobox', { name: 'Persona' }).click();
+  await page.getByRole('option', { name: 'Steward' }).click();
+  await expect(page.getByText('resolva (ex.: /genie-fix) antes de aprovar', { exact: false })).toBeVisible();
+});
+
+test('smoke test - steward approves a clean review (SoD)', async ({ page }) => {
+  await page.route('**/api/whoami', (route) =>
+    route.fulfill({ json: { email: 'author@example.com', steward: 'steward@example.com' } }),
+  );
+  await page.route('**/api/spaces', (route) =>
+    route.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Test Space' }] } }),
+  );
+  await page.route('**/api/review', (route) =>
+    route.fulfill({
+      json: {
+        findings: [],
+        gate: { conclusion: 'success', blocker_count: 0, summary: '✅ Sem achados.' },
+        eval: { status: 'advisory', summary: '🟡 advisory' },
+        timeline: [
+          { key: 'checks', label: 'Checagens', status: 'pass' },
+          { key: 'review', label: 'Revisão', status: 'pass' },
+          { key: 'eval', label: 'Eval-run', status: 'pass' },
+          { key: 'approval', label: 'Aprovação do Steward', status: 'running' },
+          { key: 'deploy', label: 'Deploy em produção', status: 'pending' },
+        ],
+        allowlist_violations: [],
+        consumer_group: 'account users',
+      },
+    }),
+  );
+
+  await page.goto('/');
+  await page.getByRole('combobox', { name: 'Persona' }).click();
+  await page.getByRole('option', { name: 'Steward' }).click();
+  await page.getByRole('combobox', { name: 'Espaço' }).click();
+  await page.getByRole('option', { name: 'Test Space' }).click();
+  await page.getByRole('button', { name: 'Solicitar promoção →' }).click();
+
+  // A distinct Steward (≠ requester) can approve a clean review; approval advances the timeline.
+  const approve = page.getByRole('button', { name: '✔ Aprovar promoção' });
+  await expect(approve).toBeVisible();
+  await approve.click();
+  await expect(page.getByText('Aprovado pelo Steward', { exact: false })).toBeVisible();
 });
 
 // ── Lifecycle hooks ─────────────────────────────────────────────────────────

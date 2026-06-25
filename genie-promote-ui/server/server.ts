@@ -28,7 +28,10 @@ createApp({
       // proxy-trust-only — display only, never an authorization input.
       app.get('/api/whoami', (req, res) => {
         const raw = req.headers['x-forwarded-email'];
-        res.json({ email: (Array.isArray(raw) ? raw[0] : raw) ?? null });
+        res.json({
+          email: (Array.isArray(raw) ? raw[0] : raw) ?? null,
+          steward: process.env.APP_STEWARD ?? null, // config: the distinct approver (SoD)
+        });
       });
 
       // The signed-in user's Genie spaces (OBO) — proxied to the engine API.

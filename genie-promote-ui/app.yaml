@@ -1,5 +1,8 @@
 command: ['npm', 'run', 'start']
 env:
+  # Separation of duties: the configured Steward (distinct from the requester) who can approve.
+  - name: APP_STEWARD
+    value: 'pedro.perdomo@databricks.com'
   # The engine API base URL. The Express proxy forwards the user's OBO token here (https only).
   # Bounded ADR-0004 deviation: dev-only literal (workspace-id in host). Portability follow-up
   # (fold with AK4's): a DABs var / reference to the engine app's URL.
