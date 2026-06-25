@@ -7,3 +7,5 @@ databricks-sdk>=0.111.0
 # on the Apps runtime. Plain uvicorn is enough for uvicorn.run(app) — no need for the extras.
 fastapi
 uvicorn
+# Streamlit app -> engine API HTTP client (AK4). Also a transitive databricks-sdk dep.
+requests

@@ -18,6 +18,14 @@ env:
     value: "recebiveis"
   - name: APP_STEWARD
     value: "pedro.perdomo@databricks.com"
+  # AK4: call the engine API over HTTP (forwarding the user's OBO token) instead of in-process.
+  # Unset this to fall back to the in-process engine. The literal host is a bounded ADR-0004
+  # deviation: this manifest is used ONLY by the DEV-only `promotor` app, so prod never inherits
+  # it (and engine_client refuses any non-https value). Portability follow-up (do before any
+  # prod use / fold into AK5): make this a DABs var / reference to the engine app's URL via the
+  # promotor resource's inline config.env (app.yaml itself is not DABs-templated).
+  - name: APP_ENGINE_URL
+    value: "https://genie-engine-api-7474659480509540.aws.databricksapps.com"
   # CORS+XSRF off: the reverse-proxy origin differs from the workspace origin.
   - name: STREAMLIT_SERVER_ENABLE_CORS
     value: "false"

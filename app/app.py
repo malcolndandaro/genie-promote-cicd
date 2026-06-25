@@ -11,11 +11,26 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import app_logic
+import engine_client
 import streamlit as st
 
 # Identities are config, not literals (ADR-0004). The Steward is config; the REQUESTER is
 # the authenticated user (derived below from the OBO principal header on the deployed app).
 STEWARD = os.environ.get("APP_STEWARD", "pedro.perdomo@databricks.com")
+# When APP_ENGINE_URL is set, call the engine API over HTTP (forwarding the user's OBO token);
+# otherwise use the in-process engine. app_logic stays imported for build_timeline/can_approve
+# (pure helpers) and the in-process path.
+VIA_API = engine_client.enabled()
+
+
+def _list_spaces():
+    return engine_client.list_spaces(USER_TOKEN) if VIA_API \
+        else app_logic.list_spaces(PROFILE, user_token=USER_TOKEN)
+
+
+def _review_space(space_id: str):
+    return engine_client.review_space(space_id, USER_TOKEN) if VIA_API \
+        else app_logic.review_space(space_id, PROFILE, user_token=USER_TOKEN)
 
 st.set_page_config(page_title="Acme · Promotor de Genie/AI-BI", layout="wide")
 
@@ -54,7 +69,8 @@ st.title("Acme · Promotor de Genie/AI-BI")
 persona_label = st.sidebar.radio("Logado como", ["Malcoln · Autor", "Pedro · Steward"])
 persona = "steward" if "Steward" in persona_label else "author"
 _origem = f"OBO · {REQUESTER}" if ON_BEHALF else (PROFILE or "auth padrão")
-st.sidebar.caption(f"Origem: `{_origem}` · domínio: `{app_logic.DOMAIN}`")
+_motor = "engine API" if VIA_API else "in-process"
+st.sidebar.caption(f"Origem: `{_origem}` · domínio: `{app_logic.DOMAIN}` · motor: `{_motor}`")
 st.sidebar.caption("Segregação de funções: Autor ≠ Steward ≠ service principal (ADR-0002).")
 
 tab_spaces, tab_new = st.tabs(["Meus espaços", "＋ Novo Genie Space"])
@@ -62,7 +78,7 @@ tab_spaces, tab_new = st.tabs(["Meus espaços", "＋ Novo Genie Space"])
 # --- Meus espaços (S8) ----------------------------------------------------------
 with tab_spaces:
     try:
-        spaces = app_logic.list_spaces(PROFILE, user_token=USER_TOKEN)
+        spaces = _list_spaces()
     except Exception as e:  # noqa: BLE001
         st.error(f"Não foi possível listar os espaços: {e}")
         spaces = []
@@ -76,7 +92,7 @@ with tab_spaces:
         if st.button("Solicitar promoção →", type="primary"):
             with st.spinner("Pré-renderizando, rodando allowlist + grants e a revisão do agente…"):
                 try:
-                    ss.review = app_logic.review_space(sel["space_id"], PROFILE, user_token=USER_TOKEN)
+                    ss.review = _review_space(sel["space_id"])
                     ss.approved = False
                 except Exception as e:  # noqa: BLE001 — surface friendly PT, never a traceback
                     st.error(f"Não foi possível revisar o espaço: {e}")
