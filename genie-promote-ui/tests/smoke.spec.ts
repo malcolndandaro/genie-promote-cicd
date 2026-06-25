@@ -2,42 +2,9 @@ import { test, expect } from '@playwright/test';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-// ── Templated configuration (resolved by `databricks apps init`) ────────────
-const APP_CONFIG = {
-  name: 'genie-promote-ui',
-  plugins: [
-  ],
-} as const;
-
-interface PluginPage {
-  navLabel: string;
-  path: string;
-  expectedTexts: string[];
-}
-
-const PLUGIN_PAGES: Record<string, PluginPage> = {
-  analytics: {
-    navLabel: 'Analytics',
-    path: '/analytics',
-    expectedTexts: ['SQL Query Result', 'Sales Data Filter'],
-  },
-  lakebase: {
-    navLabel: 'Lakebase',
-    path: '/lakebase',
-    expectedTexts: ['Todo List'],
-  },
-  genie: {
-    navLabel: 'Genie',
-    path: '/genie',
-    expectedTexts: ['Ask questions about your data using Databricks AI/BI Genie'],
-  },
-};
-
-const enabledPages = Object.entries(PLUGIN_PAGES).filter(
-  ([key]) => APP_CONFIG.plugins.includes(key),
-);
-
 // ── Tests ───────────────────────────────────────────────────────────────────
+// This app uses no AppKit data plugins (custom Express proxy to the engine API), so there are
+// no per-plugin pages to smoke — just the home screen's static UI.
 
 let testArtifactsDir: string;
 let consoleLogs: string[] = [];
@@ -50,23 +17,11 @@ test('smoke test - app loads and displays home page', async ({ page }) => {
 
   // Static UI (renders regardless of the engine API / OBO — the local smoke has no user token).
   await expect(page.getByRole('heading', { name: 'Promotor de Genie/AI-BI' })).toBeVisible();
-  await expect(page.getByText('Meus espaços')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Meus espaços' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '＋ Novo Genie Space' })).toBeVisible();
 
   await expect(page.getByRole('link', { name: 'Home' })).toBeVisible();
-  for (const [, plugin] of enabledPages) {
-    await expect(page.getByRole('link', { name: plugin.navLabel })).toBeVisible();
-  }
 });
-
-for (const [name, plugin] of enabledPages) {
-  test(`smoke test - ${name} page loads`, async ({ page }) => {
-    await page.goto(plugin.path);
-
-    for (const text of plugin.expectedTexts) {
-      await expect(page.getByText(text)).toBeVisible();
-    }
-  });
-}
 
 // ── Lifecycle hooks ─────────────────────────────────────────────────────────
 

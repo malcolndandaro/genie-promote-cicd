@@ -1,15 +1,31 @@
 import { createBrowserRouter, RouterProvider, NavLink, Outlet } from 'react-router';
 import { useState, useEffect } from 'react';
 import {
+  Alert,
+  AlertDescription,
   Button,
   Card,
   CardContent,
   CardHeader,
   CardTitle,
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   Sheet,
   SheetContent,
   SheetHeader,
   SheetTitle,
+  Skeleton,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
   useIsMobile,
 } from '@databricks/appkit-ui/react';
 import { Menu } from 'lucide-react';
@@ -98,11 +114,31 @@ interface Space {
   title: string;
 }
 
-// AK5: minimal "Meus espaços" view — fetches the user's Genie spaces via the Express proxy
-// (/api/spaces), which forwards the OBO token to the engine API. AK6 builds the full screen.
+interface Review {
+  findings: {
+    rule_id: string;
+    severity: string;
+    message: string;
+    citation?: string;
+    suggestion?: string;
+  }[];
+  gate: { conclusion: string; blocker_count: number; summary: string };
+  eval: { status: string; summary: string; pass_rate?: number | null; n?: number };
+  allowlist_violations: string[];
+  consumer_group: string;
+  timeline: { key: string; label: string; status: string }[];
+}
+
+// AK6: "Meus espaços" — list the user's Genie spaces (OBO via /api/spaces), pick one, and
+// request a promotion review (POST /api/review). The review result is shown minimally here;
+// AK7 builds the full timeline + findings + AI-trust panel.
 function HomePage() {
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string>('');
+  const [review, setReview] = useState<Review | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/spaces')
@@ -111,33 +147,111 @@ function HomePage() {
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
 
+  const requestPromotion = async () => {
+    if (!selected) return;
+    setReviewing(true);
+    setReview(null);
+    setReviewError(null);
+    try {
+      const r = await fetch('/api/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ space_id: selected }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setReview((await r.json()) as Review);
+    } catch (e: unknown) {
+      setReviewError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setReviewing(false);
+    }
+  };
+
   return (
-    <div className="max-w-2xl mx-auto space-y-6 mt-8">
-      <Card className="shadow-lg">
-        <CardHeader>
-          <CardTitle>Meus espaços</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {error && (
-            <p className="text-sm text-destructive">Não foi possível listar os espaços: {error}</p>
-          )}
-          {!error && spaces === null && (
-            <p className="text-sm text-muted-foreground">Carregando…</p>
-          )}
-          {!error && spaces?.length === 0 && (
-            <p className="text-sm text-muted-foreground">Nenhum Genie Space encontrado.</p>
-          )}
-          {!error && spaces && spaces.length > 0 && (
-            <ul className="space-y-2 text-sm">
-              {spaces.map((s) => (
-                <li key={s.space_id} className="text-foreground">
-                  {s.title} <span className="text-muted-foreground">· {s.space_id.slice(0, 8)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
+    <div className="max-w-3xl mx-auto mt-6">
+      <Tabs defaultValue="spaces">
+        <TabsList>
+          <TabsTrigger value="spaces">Meus espaços</TabsTrigger>
+          <TabsTrigger value="new">＋ Novo Genie Space</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="spaces">
+          <Card>
+            <CardHeader>
+              <CardTitle>Meus espaços</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {error && (
+                <Alert variant="destructive">
+                  <AlertDescription>Não foi possível listar os espaços: {error}</AlertDescription>
+                </Alert>
+              )}
+              {!error && spaces === null && <Skeleton className="h-10 w-full" />}
+              {!error && spaces?.length === 0 && (
+                <Empty>
+                  <EmptyHeader>
+                    <EmptyTitle>Nenhum Genie Space encontrado</EmptyTitle>
+                    <EmptyDescription>
+                      Crie um na aba “＋ Novo Genie Space” para começar a promover.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              )}
+              {!error && spaces && spaces.length > 0 && (
+                <div className="space-y-3">
+                  <Select
+                    value={selected}
+                    onValueChange={(v) => {
+                      setSelected(v);
+                      setReview(null); // clear a prior space's verdict so it can't mislead
+                      setReviewError(null);
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Selecione um espaço" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {spaces.map((s) => (
+                        <SelectItem key={s.space_id} value={s.space_id}>
+                          {s.title}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button onClick={() => void requestPromotion()} disabled={!selected || reviewing}>
+                    {reviewing ? 'Revisando…' : 'Solicitar promoção →'}
+                  </Button>
+                </div>
+              )}
+
+              {/* Minimal result — AK7 replaces this with the full timeline + findings + AI-trust. */}
+              {reviewError && (
+                <Alert variant="destructive">
+                  <AlertDescription>Não foi possível revisar o espaço: {reviewError}</AlertDescription>
+                </Alert>
+              )}
+              {review && (
+                <Alert variant={review.gate.conclusion === 'failure' ? 'destructive' : 'default'}>
+                  <AlertDescription>{review.gate.summary}</AlertDescription>
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="new">
+          <Card>
+            <CardHeader>
+              <CardTitle>Novo Genie Space</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">
+                Em breve — assistente de criação (autoria rica acontece no Genie nativo).
+              </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
