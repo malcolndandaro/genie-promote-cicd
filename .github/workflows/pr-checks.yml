@@ -32,6 +32,10 @@ jobs:
       - uses: databricks/setup-cli@main
         with:
           version: 1.4.0
+      - name: Unit tests (engine + engine API)
+        run: |
+          python3 -m pip install -q 'databricks-sdk>=0.111.0' fastapi uvicorn httpx pytest
+          python3 -m pytest tests/ -q
       - name: Pre-render + identifier allowlist (rejects foreign-env / cross-domain refs)
         run: bash scripts/render.sh prod
       - name: Validate bundle (prod target)

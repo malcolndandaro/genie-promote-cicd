@@ -3,3 +3,7 @@
 # + grants.get_effective string-securable behavior the app relies on.
 streamlit
 databricks-sdk>=0.111.0
+# Engine API (FastAPI + ASGI server). Listed for local dev + version certainty; FastAPI is also
+# on the Apps runtime. Plain uvicorn is enough for uvicorn.run(app) — no need for the extras.
+fastapi
+uvicorn

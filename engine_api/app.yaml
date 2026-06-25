@@ -1,0 +1,12 @@
+# REFERENCE ONLY — local dev + the canonical command/env for the engine API. This file is NOT
+# read by the platform when the app deploys: the engine API must deploy with source_code_path =
+# the REPO ROOT (so it can import app/ + genie_reviewer/), and the platform reads app.yaml from
+# that root — which is the Streamlit app's. So AK2 wires THIS command/env via the DABs apps
+# resource's INLINE `config` block (command + env), NOT a second root app.yaml. Keep this file in
+# sync with that inline config. The entrypoint reads DATABRICKS_APP_PORT in code (run.py).
+command:
+  - python
+  - engine_api/run.py
+env:
+  - name: APP_DOMAIN
+    value: "recebiveis"
