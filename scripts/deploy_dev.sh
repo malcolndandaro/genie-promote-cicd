@@ -8,8 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-bash scripts/build_engine_app.sh
+bash scripts/build_engine_app.sh   # legacy engine-only API (genie-engine-api), retired at SV5
+bash scripts/build_promote_app.sh  # single front-door app (genie-promote-app): FastAPI + Svelte
 bash scripts/render.sh dev
 
 DATABRICKS_BUNDLE_ENGINE=direct databricks bundle deploy -t dev "$@"
-echo "Deployed dev. Start/refresh the engine API with: databricks bundle run engine_api -t dev $*"
+echo "Deployed dev. Start/refresh the single app with: databricks bundle run promote_app -t dev $*"

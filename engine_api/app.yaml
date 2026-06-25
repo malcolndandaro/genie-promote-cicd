@@ -1,11 +1,17 @@
-# Engine API (FastAPI) manifest. scripts/build_engine_app.sh copies this to the assembled engine
-# app source root (build/engine_app/app.yaml), which IS what the platform reads at deploy. The
-# engine API deploys from that assembled dir (shared engine + engine_api/) because DABs forbids
-# two apps sharing a source_code_path with the Streamlit app. Entrypoint reads DATABRICKS_APP_PORT
-# in code (run.py), so no app.yaml env substitution is needed.
+# App manifest for the LEGACY engine-only API (genie-engine-api), read by the platform from the
+# app's source root (scripts/build_engine_app.sh copies it there). This app is proxied to by the
+# AppKit app via `Authorization: Bearer`, so it enables the Bearer OBO fallback. Retired at SV5;
+# the single front-door app (scripts/build_promote_app.sh) ships its OWN manifest WITHOUT Bearer.
+# The entrypoint reads DATABRICKS_APP_PORT in code (run.py) — no app.yaml env substitution needed.
 command:
   - python
   - engine_api/run.py
 env:
   - name: APP_DOMAIN
     value: "recebiveis"
+  # The configured Steward (separation of duties): the distinct approver, surfaced by /whoami.
+  - name: APP_STEWARD
+    value: "pedro.perdomo@databricks.com"
+  # Legacy: honor the cross-app `Authorization: Bearer` OBO token from the AppKit proxy.
+  - name: APP_ALLOW_BEARER_OBO
+    value: "1"

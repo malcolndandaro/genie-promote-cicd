@@ -1,7 +1,10 @@
-"""Unit tests for the engine API (AK1). FastAPI TestClient + a mocked engine — no network.
+"""Unit tests for the single-app FastAPI engine (AK1 + SV1). FastAPI TestClient + a mocked engine
+— no network.
 
-Verifies the transport + OBO plumbing: the user token is resolved from either header source
-and threaded to the engine as `user_token`; the missing-token path is a 401.
+Verifies (1) the transport + OBO plumbing: the user token is resolved from either header source
+and threaded to the engine as `user_token`; the missing-token path is a 401; (2) the API is
+served at BOTH `/` and `/api/*`; (3) the SPA catch-all serves index.html for non-API routes
+WITHOUT shadowing the API.
 """
 import os
 import sys
@@ -9,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine_api"))
 import main as engine_api  # engine_api/main.py  # noqa: E402
+import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(engine_api.app)
@@ -19,11 +23,18 @@ def test_health_no_auth():
     assert r.status_code == 200 and r.json() == {"status": "ok"}
 
 
-def test_whoami_reflects_forwarded_identity():
-    r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x",
-                                        "x-forwarded-user": "u-1"})
+def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
+    monkeypatch.setenv("APP_STEWARD", "steward@x")
+    r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
-    assert r.json() == {"email": "malcoln@x", "user": "u-1"}
+    assert r.json() == {"email": "malcoln@x", "steward": "steward@x"}
+
+
+def test_whoami_steward_none_when_unset(monkeypatch):
+    monkeypatch.delenv("APP_STEWARD", raising=False)
+    r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
+    assert r.status_code == 200
+    assert r.json() == {"email": "malcoln@x", "steward": None}
 
 
 def test_spaces_threads_proxy_header_token(monkeypatch):
@@ -41,6 +52,7 @@ def test_spaces_threads_proxy_header_token(monkeypatch):
 
 
 def test_spaces_threads_bearer_token(monkeypatch):
+    monkeypatch.setenv("APP_ALLOW_BEARER_OBO", "1")  # legacy app-to-app path
     captured = {}
 
     def fake_list_spaces(profile=None, *, client=None, user_token=None):
@@ -53,7 +65,16 @@ def test_spaces_threads_bearer_token(monkeypatch):
     assert captured["user_token"] == "tok-bearer"
 
 
+def test_spaces_ignores_bearer_when_flag_off(monkeypatch):
+    # The single front-door app does NOT enable Bearer — a client-supplied Authorization is
+    # ignored (no x-forwarded-access-token -> 401), so it can't be used to spoof OBO.
+    monkeypatch.delenv("APP_ALLOW_BEARER_OBO", raising=False)
+    r = client.get("/spaces", headers={"authorization": "Bearer attacker-token"})
+    assert r.status_code == 401
+
+
 def test_spaces_proxy_header_wins_over_bearer(monkeypatch):
+    monkeypatch.setenv("APP_ALLOW_BEARER_OBO", "1")
     captured = {}
     monkeypatch.setattr(engine_api.app_logic, "list_spaces",
                         lambda profile=None, *, client=None, user_token=None:
@@ -68,13 +89,27 @@ def test_spaces_requires_a_token():
     assert r.status_code == 401
 
 
-def test_spaces_rejects_authorization_without_bearer_scheme():
+def test_spaces_rejects_authorization_without_bearer_scheme(monkeypatch):
+    monkeypatch.setenv("APP_ALLOW_BEARER_OBO", "1")
     r = client.get("/spaces", headers={"authorization": "tok-no-scheme"})
     assert r.status_code == 401
 
 
-def test_spaces_rejects_empty_bearer():
+def test_spaces_rejects_empty_bearer(monkeypatch):
+    monkeypatch.setenv("APP_ALLOW_BEARER_OBO", "1")
     r = client.get("/spaces", headers={"authorization": "Bearer "})
+    assert r.status_code == 401
+
+
+def test_spaces_obo_auth_failure_maps_to_401(monkeypatch):
+    # A bad/expired OBO token is the user's problem (re-auth), NOT a 502 engine outage.
+    from databricks.sdk.errors import Unauthenticated
+
+    def boom(profile=None, *, client=None, user_token=None):
+        raise Unauthenticated("token expired")
+
+    monkeypatch.setattr(engine_api.app_logic, "list_spaces", boom)
+    r = client.get("/spaces", headers={"x-forwarded-access-token": "stale"})
     assert r.status_code == 401
 
 
@@ -152,3 +187,98 @@ def test_review_contract_drift_maps_to_502(monkeypatch):
     r = client.post("/review", json={"space_id": "x"},
                     headers={"x-forwarded-access-token": "tok"})
     assert r.status_code == 502
+
+
+# --- /api/* mount (SV1): the SPA calls the API under /api; same handlers as the legacy paths ---
+
+
+def test_api_prefix_health():
+    r = client.get("/api/health")
+    assert r.status_code == 200 and r.json() == {"status": "ok"}
+
+
+def test_api_prefix_whoami(monkeypatch):
+    monkeypatch.setenv("APP_STEWARD", "steward@x")
+    r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
+    assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x"}
+
+
+def test_api_prefix_spaces_threads_token(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(engine_api.app_logic, "list_spaces",
+                        lambda profile=None, *, client=None, user_token=None:
+                        captured.update(user_token=user_token) or [{"space_id": "a", "title": "T"}])
+    r = client.get("/api/spaces", headers={"x-forwarded-access-token": "tok-api"})
+    assert r.status_code == 200
+    assert r.json() == {"spaces": [{"space_id": "a", "title": "T"}]}
+    assert captured["user_token"] == "tok-api"
+
+
+def test_api_prefix_spaces_requires_token():
+    assert client.get("/api/spaces").status_code == 401
+
+
+# --- SPA static serving (SV1): index.html fallback for non-API routes, real files served ---
+
+
+@pytest.fixture()
+def static_build(tmp_path, monkeypatch):
+    """A fake built SPA dir (index.html + one asset), wired via APP_STATIC_DIR."""
+    (tmp_path / "index.html").write_text("<!doctype html><div id=app>SPA-ROOT</div>")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "app.js").write_text("console.log('hi')")
+    monkeypatch.setenv("APP_STATIC_DIR", str(tmp_path))
+    return tmp_path
+
+
+def test_spa_serves_index_at_root(static_build):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "SPA-ROOT" in r.text
+    assert "text/html" in r.headers["content-type"]
+
+
+def test_spa_serves_index_for_deep_link(static_build):
+    r = client.get("/revisao/qualquer-rota")
+    assert r.status_code == 200 and "SPA-ROOT" in r.text
+
+
+def test_spa_serves_real_asset_file(static_build):
+    r = client.get("/assets/app.js")
+    assert r.status_code == 200 and "console.log" in r.text
+
+
+def test_spa_does_not_shadow_api(static_build):
+    # Even with the SPA mounted, the API still answers (not the index shell).
+    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/api/health").json() == {"status": "ok"}
+    assert client.get("/api/spaces").status_code == 401  # API 401, not an HTML shell
+
+
+def test_spa_unknown_api_path_is_json_404(static_build):
+    r = client.get("/api/does-not-exist")
+    assert r.status_code == 404
+    assert r.json() == {"detail": "not found"}
+    assert "SPA-ROOT" not in r.text
+
+
+def test_spa_placeholder_when_no_build(monkeypatch):
+    # No static dir resolvable -> a 200 placeholder, never a 500.
+    monkeypatch.setenv("APP_STATIC_DIR", "/nonexistent/path/xyz")
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "SPA build not found" in r.text
+
+
+def test_spa_rejects_path_traversal(static_build):
+    # The security-load-bearing guard: a `..` escape must NOT serve a file outside the static dir.
+    # Call the route fn directly — httpx/Starlette would normalize `..` out of a URL before it
+    # reaches the route, so this asserts the guard itself rather than the client's normalization.
+    secret = static_build.parent / "secret.txt"
+    secret.write_text("TOP-SECRET")
+    resp = engine_api.spa("../secret.txt")
+    # Falls through the traversal guard to the SPA shell (index.html), never the secret file.
+    body = resp.path if hasattr(resp, "path") else ""
+    assert "secret.txt" not in str(body)
+    assert str(body).endswith("index.html")

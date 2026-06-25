@@ -18,6 +18,7 @@ include:
 sync:
   include:
     - build/engine_app/**
+    - build/promote_app/**
 
 variables:
   domain:
@@ -42,15 +43,26 @@ targets:
     variables:
       env: dev
       warehouse_id: your-dev-warehouse-id
-    # DEV-only resources. The front door is the AppKit app `genie-promote-ui` (its own bundle
-    # under genie-promote-ui/); this bundle owns the engine API it calls. The Streamlit app was
-    # retired at AK9 cutover. The gated CI prod-deploy (SP) never touches these dev resources.
+    # DEV-only resources. The front door is migrating to the SINGLE app `genie-promote-app`
+    # (FastAPI serving a Svelte SPA, in-process OBO). The AppKit app `genie-promote-ui` and the
+    # standalone engine API `genie-engine-api` stay live until the SV5 parity cutover, then retire.
+    # The gated CI prod-deploy (SP) never touches these dev resources.
     resources:
       apps:
-        # The engine API (FastAPI) — the HTTP boundary over the Python engine (AK1/AK2).
-        # DABs forbids two apps sharing a source_code_path, so the engine API deploys from an
-        # ASSEMBLED dir (shared engine + engine_api/ + its own app.yaml), built by
-        # scripts/build_engine_app.sh BEFORE deploy. Distinct from the Streamlit repo-root source.
+        # The SINGLE front-door app (SV1): one FastAPI process serves the JSON API AND the built
+        # Svelte SPA from the same origin, so OBO is read in-process (no cross-app Bearer hop).
+        # Deploys from an ASSEMBLED dir (shared engine + engine_api/ + Svelte static/ + app.yaml),
+        # built by scripts/build_promote_app.sh BEFORE deploy. DABs forbids two apps sharing a
+        # source_code_path, so this has its own assembled dir distinct from build/engine_app.
+        promote_app:
+          name: "genie-promote-app"
+          description: "Single front door (FastAPI + Svelte SPA): OBO Genie reads, review, SoD."
+          source_code_path: ./build/promote_app
+          user_api_scopes:
+            - dashboards.genie
+
+        # The legacy engine-only API (FastAPI) — the HTTP boundary the AppKit app proxied to
+        # (AK1/AK2). Kept live until SV5 parity, then retired with the AppKit app.
         engine_api:
           name: "genie-engine-api"
           description: "Engine API (FastAPI): OBO Genie reads + review behind an HTTP boundary."
