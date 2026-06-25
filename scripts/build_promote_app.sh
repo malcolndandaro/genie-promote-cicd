@@ -46,7 +46,6 @@ cp -R web/dist "$OUT/static"
 # 3. Hygiene: never ship compiled bytecode (stale .pyc can mask source changes) or build/CI scripts.
 find "$OUT" -name __pycache__ -type d -prune -exec rm -rf {} +
 find "$OUT" -name '*.pyc' -delete
-rm -f "$OUT/scripts/build_engine_app.sh" "$OUT/scripts/build_promote_app.sh" \
-  "$OUT/scripts/provision_ci.sh"
+rm -f "$OUT/scripts/build_promote_app.sh" "$OUT/scripts/provision_ci.sh"
 
 echo "assembled single-app source at $OUT (FastAPI + Python engine + Svelte static)"

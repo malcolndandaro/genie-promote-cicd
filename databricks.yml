@@ -12,12 +12,11 @@ bundle:
 include:
   - resources/*.yml
 
-# build/ is gitignored (generated), but the engine API app's source_code_path points into it
-# (build/engine_app, assembled by scripts/build_engine_app.sh). Force the sync to upload it so
+# build/ is gitignored (generated), but the single app's source_code_path points into it
+# (build/promote_app, assembled by scripts/build_promote_app.sh). Force the sync to upload it so
 # the app's source resolves in the workspace.
 sync:
   include:
-    - build/engine_app/**
     - build/promote_app/**
 
 variables:
@@ -43,30 +42,19 @@ targets:
     variables:
       env: dev
       warehouse_id: your-dev-warehouse-id
-    # DEV-only resources. The front door is migrating to the SINGLE app `genie-promote-app`
-    # (FastAPI serving a Svelte SPA, in-process OBO). The AppKit app `genie-promote-ui` and the
-    # standalone engine API `genie-engine-api` stay live until the SV5 parity cutover, then retire.
-    # The gated CI prod-deploy (SP) never touches these dev resources.
+    # DEV-only resource. The SINGLE app `genie-promote-app` is the sole front door (SV5 cutover):
+    # one FastAPI process serves the JSON API AND the built Svelte SPA from the same origin, so OBO
+    # is read in-process (no cross-app Bearer hop). The legacy AppKit app `genie-promote-ui` and the
+    # standalone engine API `genie-engine-api` were retired at SV5. The gated CI prod-deploy (SP)
+    # never touches this dev resource.
     resources:
       apps:
-        # The SINGLE front-door app (SV1): one FastAPI process serves the JSON API AND the built
-        # Svelte SPA from the same origin, so OBO is read in-process (no cross-app Bearer hop).
         # Deploys from an ASSEMBLED dir (shared engine + engine_api/ + Svelte static/ + app.yaml),
-        # built by scripts/build_promote_app.sh BEFORE deploy. DABs forbids two apps sharing a
-        # source_code_path, so this has its own assembled dir distinct from build/engine_app.
+        # built by scripts/build_promote_app.sh BEFORE deploy.
         promote_app:
           name: "genie-promote-app"
           description: "Single front door (FastAPI + Svelte SPA): OBO Genie reads, review, SoD."
           source_code_path: ./build/promote_app
-          user_api_scopes:
-            - dashboards.genie
-
-        # The legacy engine-only API (FastAPI) — the HTTP boundary the AppKit app proxied to
-        # (AK1/AK2). Kept live until SV5 parity, then retired with the AppKit app.
-        engine_api:
-          name: "genie-engine-api"
-          description: "Engine API (FastAPI): OBO Genie reads + review behind an HTTP boundary."
-          source_code_path: ./build/engine_app
           user_api_scopes:
             - dashboards.genie
 

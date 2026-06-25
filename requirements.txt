@@ -1,5 +1,5 @@
-# Engine API (FastAPI) deps — assembled into build/engine_app by scripts/build_engine_app.sh.
-# (The Streamlit app was retired at AK9; streamlit/requests are no longer needed.)
+# Single front-door app (FastAPI + Svelte) deps — assembled into build/promote_app by
+# scripts/build_promote_app.sh. (Streamlit retired at AK9; the engine-only API + AppKit at SV5.)
 databricks-sdk>=0.111.0
 fastapi
 uvicorn
