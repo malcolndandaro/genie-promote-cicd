@@ -8,15 +8,20 @@
   import { Promotion } from './lib/promotion.svelte';
   import type { Whoami } from './lib/types';
 
-  // OBO identity (drives the header badge + the review AI-trust badge + SV4's SoD). Display-only,
-  // so a failure is silent — the spaces error surfaces any re-auth need.
-  let who = $state<Whoami | null>(null);
-  getWhoami()
-    .then((w) => (who = w))
-    .catch(() => {});
-
   // The shared promotion flow state (selection → review → approval).
   const promotion = new Promotion();
+
+  // OBO identity (drives the header badge + the review AI-trust badge + SV4's SoD). Display-only,
+  // so a failure is silent — the spaces error surfaces any re-auth need. The requester/steward
+  // identities feed the separation-of-duties model.
+  let who = $state<Whoami | null>(null);
+  getWhoami()
+    .then((w) => {
+      who = w;
+      promotion.requesterEmail = w.email;
+      promotion.steward = w.steward;
+    })
+    .catch(() => {});
 
   let tab = $state('spaces');
   const TABS: Tab[] = [

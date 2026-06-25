@@ -8,6 +8,7 @@
     loading?: boolean;
     onclick?: (e: MouseEvent) => void;
     class?: string;
+    ariaDescribedby?: string;
     children: Snippet;
   }
 
@@ -18,6 +19,7 @@
     loading = false,
     onclick,
     class: cls = '',
+    ariaDescribedby,
     children,
   }: Props = $props();
 </script>
@@ -26,6 +28,7 @@
   {type}
   {onclick}
   disabled={disabled || loading}
+  aria-describedby={ariaDescribedby}
   class={['btn', `btn--${variant}`, loading && 'btn--loading', cls]}
 >
   {#if loading}<span class="btn__spinner" aria-hidden="true"></span>{/if}

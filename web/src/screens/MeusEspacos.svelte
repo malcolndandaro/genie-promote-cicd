@@ -6,6 +6,7 @@
   import Select from '../lib/components/Select.svelte';
   import Pipeline from '../lib/components/Pipeline.svelte';
   import ReviewPanel from '../lib/components/ReviewPanel.svelte';
+  import ApprovalSection from '../lib/components/ApprovalSection.svelte';
   import { getResources, isAuthError } from '../lib/api';
   import { kindMeta } from '../lib/resources';
   import { pendingTimeline } from '../lib/pipeline';
@@ -114,7 +115,11 @@
       <Button variant="outline" onclick={() => promotion.requestReview()}>Tentar novamente</Button>
     </div>
   {:else if promotion.phase === 'reviewed' && promotion.review}
-    <ReviewPanel review={promotion.review} {userEmail} />
+    <ReviewPanel review={promotion.review} {userEmail} approved={promotion.approved}>
+      {#snippet approval()}
+        <ApprovalSection {promotion} />
+      {/snippet}
+    </ReviewPanel>
   {/if}
 </Card>
 

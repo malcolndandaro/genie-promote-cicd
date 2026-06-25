@@ -8,14 +8,24 @@
   interface Props {
     review: Review;
     userEmail: string | null;
+    /** Once the steward approves, advance the approval + deploy timeline rows to pass. */
+    approved?: boolean;
     /** Optional steward-approval section rendered below the review (wired in SV4). */
     approval?: import('svelte').Snippet;
   }
-  let { review, userEmail, approval }: Props = $props();
+  let { review, userEmail, approved = false, approval }: Props = $props();
 
   let failed = $derived(review.gate.conclusion === 'failure');
   // Findings have no stable id; the list never reorders, so a rule_id+index key is unique & safe.
   let keyed = $derived(review.findings.map((f, i) => ({ ...f, _k: `${f.rule_id}-${i}` })));
+  // Approving advances the approval + deploy rows (build_timeline isn't re-fetched over HTTP).
+  let timeline = $derived(
+    approved
+      ? review.timeline.map((t) =>
+          t.key === 'approval' || t.key === 'deploy' ? { ...t, status: 'pass' as const } : t,
+        )
+      : review.timeline,
+  );
 </script>
 
 <div class="review">
@@ -31,10 +41,10 @@
     </p>
   </div>
 
-  <!-- Pipeline timeline (real per-step verdicts from the server). -->
+  <!-- Pipeline timeline (real per-step verdicts from the server; advances on approval). -->
   <section>
     <h3 class="review__heading">Pipeline de promoção</h3>
-    <Pipeline steps={review.timeline} />
+    <Pipeline steps={timeline} />
   </section>
 
   <!-- Gate summary (role so the verdict isn't conveyed by colour alone; failure = alert). -->
