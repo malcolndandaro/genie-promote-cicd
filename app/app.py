@@ -112,7 +112,7 @@ with tab_spaces:
         if persona == "steward":
             st.subheader("Aprovação do Steward")
             if gate["conclusion"] == "failure":
-                st.warning("A promoção está bloqueada por hallazgos BLOCKER — resolva (ex.: /genie-fix) antes de aprovar.")
+                st.warning("A promoção está bloqueada por achados BLOCKER — resolva (ex.: /genie-fix) antes de aprovar.")
             elif ok and st.button("✔ Aprovar promoção", type="primary"):
                 ss.approved = True
             if ss.approved:

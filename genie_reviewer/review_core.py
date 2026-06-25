@@ -55,7 +55,7 @@ _SYSTEM = (
     "Você é o Genie Reviewer, um revisor automático de Genie Spaces da Acme. Você revisa "
     "a definição (serialized_space) de um espaço que está sendo PROMOVIDO PARA PRODUÇÃO, "
     "ÚNICA E EXCLUSIVAMENTE contra as regras do Genie Promotion Handbook fornecidas. Não invente "
-    "regras. Cada hallazgo DEVE citar um rule_id da lista. Responda em PORTUGUÊS.\n\n"
+    "regras. Cada achado DEVE citar um rule_id da lista. Responda em PORTUGUÊS.\n\n"
     "Checagens determinísticas (schema, bundle validate, allowlist de catálogo, verificação "
     "de grants) JÁ rodam no PR. Concentre-se na camada SEMÂNTICA/de política que elas não "
     "veem: catálogos de outro ambiente em SQL, ausência de perguntas de benchmark, instruções "
@@ -99,7 +99,7 @@ def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[d
         f"joins: {', '.join(context.get('joins', [])) or '(nenhum)'}\n\n"
         "ACHADOS DETERMINÍSTICOS DE GRANTS (considere como BLOCKER GRANT-01 se houver):\n"
         f"{grant_block}\n\n"
-        "Devolva o JSON de hallazgos."
+        "Devolva o JSON de achados."
     )
     return _SYSTEM, user
 
@@ -180,12 +180,12 @@ def decide_gate(findings: list[dict]) -> dict:
     n_block = sum(1 for f in valid if f["severity"] == "BLOCKER")
     if n == 0:
         return {"conclusion": "success", "blocker_count": 0,
-                "summary": "✅ Sem hallazgos contra o Genie Promotion Handbook."}
+                "summary": "✅ Sem achados contra o Genie Promotion Handbook."}
     if n_block:
         return {"conclusion": "failure", "blocker_count": n_block,
-                "summary": f"🔴 {n_block} de {n} hallazgo(s) são BLOCKER — promoção bloqueada."}
+                "summary": f"🔴 {n_block} de {n} achado(s) são BLOCKER — promoção bloqueada."}
     return {"conclusion": "neutral", "blocker_count": 0,
-            "summary": f"🟡 {n} hallazgo(s) assessor(es) — não bloqueiam."}
+            "summary": f"🟡 {n} achado(s) assessor(es) — não bloqueiam."}
 
 
 # --- Core 5: merge deterministic findings into the gate -------------------------
