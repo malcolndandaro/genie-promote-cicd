@@ -1,5 +1,4 @@
 <script lang="ts">
-  import Button from './Button.svelte';
   import type { Promotion, Persona } from '../promotion.svelte';
 
   interface Props {
@@ -11,12 +10,17 @@
     { value: 'author', label: 'Autor' },
     { value: 'steward', label: 'Steward' },
   ];
+
+  // The live PR/deploy state drives the Steward's action (GH4): the gate to approve only exists
+  // once the PR is merged and the prod deployment is waiting.
+  let phase = $derived(promotion.liveStatus?.phase ?? null);
+  let approver = $derived(promotion.liveStatus?.deploy?.approver ?? null);
+  let deployRunUrl = $derived(promotion.liveStatus?.deploy?.run_url ?? null);
 </script>
 
 <div class="approval">
   <h3 class="approval__heading">Aprovação do Steward</h3>
 
-  <!-- Demo persona toggle: act as the requester (Autor) or the approver (Steward). -->
   <div class="approval__row">
     <span class="text-sm muted">Agir como:</span>
     <div class="seg" role="group" aria-label="Agir como">
@@ -45,23 +49,40 @@
     <div class="msg msg--fail" role="alert">
       Promoção bloqueada por achados BLOCKER — resolva (ex.: /genie-fix) antes de aprovar.
     </div>
-  {:else if promotion.approval.state === 'approved'}
-    <p class="msg msg--ok" role="status">
-      ✓ Aprovado pelo Steward — o gate de produção é liberado; o service principal faz o deploy.
-    </p>
   {:else if promotion.approval.state === 'sod'}
     <p class="text-sm muted">
       Segregação de funções: o solicitante não pode aprovar a própria promoção.
     </p>
+  {:else if phase === 'awaiting_approval' && deployRunUrl}
+    <!-- The Steward approves on GitHub with their OWN identity (prevent_self_review holds). -->
+    <a
+      class="approve-link"
+      href={deployRunUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-describedby="approval-identities"
+    >
+      ✔ Aprovar no GitHub ↗
+    </a>
+  {:else if phase === 'deployed'}
+    <p class="msg msg--ok" role="status">
+      ✓ Implantado em produção{approver ? ` — aprovado por ${approver}` : ''}.
+    </p>
+  {:else if phase === 'deploying'}
+    <p class="text-sm muted">⏳ Implantando em produção…</p>
+  {:else if phase === 'deploy_failed'}
+    <div class="msg msg--fail" role="alert">
+      Falha no deploy de produção — verifique o run no GitHub.
+    </div>
   {:else}
-    <Button variant="accent" ariaDescribedby="approval-identities" onclick={() => promotion.approve()}>
-      ✔ Aprovar promoção
-    </Button>
+    <p class="text-sm muted">
+      Após o merge do PR (checagens verdes), o deploy de produção aguardará a sua aprovação aqui.
+    </p>
   {/if}
 
   <p class="text-xs muted approval__note">
-    A aprovação aqui é uma prévia da política; a separação de funções é imposta no CI/CD (GitHub
-    Environment: revisor obrigatório + auto-revisão bloqueada).
+    A aprovação acontece no GitHub com a sua identidade; a separação de funções é imposta no CI/CD
+    (GitHub Environment: revisor obrigatório + auto-revisão bloqueada).
   </p>
 </div>
 
@@ -124,6 +145,23 @@
   .msg--ok {
     margin: 0;
     color: var(--success);
+  }
+  .approve-link {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0.6rem 1.25rem;
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+    color: var(--accent-foreground);
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background-color 0.15s ease;
+  }
+  .approve-link:hover {
+    background: var(--accent-hover);
   }
   .approval__note {
     margin: 0;

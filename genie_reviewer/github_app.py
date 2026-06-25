@@ -34,7 +34,7 @@ class GitHubError(RuntimeError):
 
 
 _NO_DEPLOY = {"status": "none", "conclusion": None, "waiting_approval": False, "run_url": None,
-              "run_id": None}
+              "run_id": None, "approver": None}
 
 
 def _aggregate_checks(runs: list) -> str:
@@ -232,9 +232,28 @@ class GitHubApp:
         if not wf:
             return dict(_NO_DEPLOY)
         status = wf.get("status")  # queued | in_progress | completed | waiting (gate pending)
-        return {"status": status, "conclusion": wf.get("conclusion"),
+        conclusion = wf.get("conclusion")
+        run_id = wf.get("id")
+        # Who released the gate (GH4) — only fetch once the deploy has SUCCEEDED (the only state the
+        # UI renders the approver), so polling doesn't re-hit /approvals every tick. Best-effort.
+        approver = (self._deploy_approver(run_id)
+                    if run_id and status == "completed" and conclusion == "success" else None)
+        return {"status": status, "conclusion": conclusion,
                 "waiting_approval": status == "waiting", "run_url": wf.get("html_url"),
-                "run_id": wf.get("id")}
+                "run_id": run_id, "approver": approver}
+
+    def _deploy_approver(self, run_id: int) -> str | None:
+        """The GitHub login that approved the deployment (the Steward) — read from the run's
+        approvals. Best-effort: the bot reads it; SoD itself is enforced by the Environment gate."""
+        status, body = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/actions/runs/{run_id}/approvals')}",
+            self._headers(self._token()), None)
+        if status != 200 or not body:
+            return None
+        for a in body:
+            if a.get("state") == "approved":
+                return (a.get("user") or {}).get("login")
+        return None
 
     # --- comment (one canonical, updated in place) --------------------------
     def upsert_comment(self, number: int, marker: str, body: str) -> dict:

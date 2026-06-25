@@ -107,6 +107,7 @@ export interface PromoteStatus {
     waiting_approval: boolean;
     run_url: string | null;
     run_id?: number | null;
+    approver?: string | null;
   };
   pr_url: string;
   phase: PromotePhase;

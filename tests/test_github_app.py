@@ -166,7 +166,7 @@ def test_github_error_raised_on_non_2xx():
     assert e.value.status == 422
 
 
-def _status_transport(pull, check_runs, workflow_runs):
+def _status_transport(pull, check_runs, workflow_runs, approvals=None):
     def t(method, url, headers, body):
         p = url.split("api.github.com")[-1]
         if p.endswith("/access_tokens"):
@@ -175,6 +175,8 @@ def _status_transport(pull, check_runs, workflow_runs):
             return 200, pull
         if "/check-runs" in p:
             return 200, {"check_runs": check_runs}
+        if "/approvals" in p:  # must precede the /actions/runs check (it's a sub-path)
+            return 200, approvals or []
         if "/actions/runs" in p:
             return 200, {"workflow_runs": workflow_runs}
         return 500, {"message": f"unhandled {method} {p}"}
@@ -224,6 +226,15 @@ def test_status_deploying_when_run_in_progress():
         [{"name": "deploy", "status": "in_progress", "conclusion": None, "html_url": "r", "id": 9}],
     ).get_status(1)
     assert s["phase"] == "deploying"
+
+
+def test_status_deployed_reports_approver_login():
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "success", "html_url": "r", "id": 9}],
+        approvals=[{"state": "approved", "user": {"login": "pedro-gh"}}],
+    ).get_status(1)
+    assert s["phase"] == "deployed" and s["deploy"]["approver"] == "pedro-gh"
 
 
 def test_status_deploy_failed():

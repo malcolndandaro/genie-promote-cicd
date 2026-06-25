@@ -1,15 +1,16 @@
 /**
  * Promotion flow state — a small reactive state machine shared across the screens.
  *
- * Using a class with `$state` fields (per Svelte best practice) lets SV2 (select + request),
- * SV3 (render the review) and SV4 (steward approval) all read/drive one source of truth.
+ * Using a class with `$state` fields (per Svelte best practice) lets the screens read/drive one
+ * source of truth: selection + review (SV2/SV3), the opened PR (GH2), and the live PR/CI/deploy
+ * status polled from GitHub (GH3/GH4).
  *
- * Phases today: idle → reviewing → reviewed (or error). The flow is intentionally modeled as a
- * machine so the FUTURE git integration drops in as new phases without reshaping callers:
- *   reviewed → requesting_pr → pr_open → approved (PR approved by steward) → deploying → deployed
- * SV4 adds the in-app approval (a faithful preview of the policy); the REAL separation-of-duties
- * enforcement is the CI/CD GitHub Environment gate (required reviewer + prevent_self_review). When
- * the git integration lands, `approve()` is replaced by "approve the open PR".
+ * `phase` is the local request lifecycle: idle → reviewing → reviewed (or error). The REAL
+ * promotion lifecycle (PR checks → merge → prod Environment gate → deploy) lives on GitHub and is
+ * reflected via `liveStatus` (see `PromoteStatus.phase`). The Steward approval is NOT done in-app:
+ * SoD is the GitHub Environment gate (required reviewer + prevent_self_review), and the UI only
+ * deep-links the Steward there + reflects the result. `approval` below is a faithful PREVIEW of
+ * that policy (the documented future `/api/approve` would re-check it server-side from the token).
  */
 import type { PromotableResource, Review } from './types';
 import { postPromote, getPromoteStatus, type PullRequestRef, type PromoteStatus } from './api';
@@ -17,8 +18,9 @@ import { postPromote, getPromoteStatus, type PullRequestRef, type PromoteStatus 
 export type PromotionPhase = 'idle' | 'reviewing' | 'reviewed' | 'error';
 export type Persona = 'author' | 'steward';
 
-/** Why approval is/ isn't available — mirrors app_logic.can_approve + the BLOCKER gate. */
-export type ApprovalState = 'author' | 'blocked' | 'sod' | 'ready' | 'approved';
+/** Whether the Steward MAY release the gate — mirrors app_logic.can_approve + the BLOCKER gate.
+ * The actual approval happens on GitHub (the Environment gate), reflected via `liveStatus`. */
+export type ApprovalState = 'author' | 'blocked' | 'sod' | 'ready';
 
 export class Promotion {
   resource = $state<PromotableResource | null>(null);
@@ -30,11 +32,9 @@ export class Promotion {
   /** Live PR/CI/deploy status (GH3) — polled from GitHub via the bot; reflects, never asserts. */
   liveStatus = $state<PromoteStatus | null>(null);
 
-  // --- separation of duties (SV4) ---
+  // --- separation of duties (SV4/GH4) ---
   /** Demo persona toggle: act as the Autor (requester) or the Steward (approver). */
   persona = $state<Persona>('author');
-  /** Whether the steward has approved this review (advances the approval + deploy timeline rows). */
-  approved = $state(false);
   /** The OBO requester identity (from /api/whoami) — never a constant. */
   requesterEmail = $state<string | null>(null);
   /** The configured Steward (from /api/whoami.steward) — the distinct approver. */
@@ -65,7 +65,6 @@ export class Promotion {
    * endpoint that resolves the approver from the OBO TOKEN server-side and re-checks can_approve.
    */
   get approval(): { state: ApprovalState; canApprove: boolean } {
-    if (this.approved) return { state: 'approved', canApprove: false };
     if (this.persona !== 'steward') return { state: 'author', canApprove: false };
     if (this.hasBlocker) return { state: 'blocked', canApprove: false };
     // SoD: the requester can never approve their own promotion (also blocks a null/misconfigured
@@ -74,24 +73,16 @@ export class Promotion {
     return { state: 'ready', canApprove: true };
   }
 
-  // Toggling persona does NOT reset `approved`: an approval is a decision, not a view state, so it
-  // persists across the demo toggle. Stale approvals across resources are cleared in select()/review.
   setPersona(p: Persona): void {
     this.persona = p;
   }
 
-  /** Steward approval (gated by `approval.canApprove`). */
-  approve(): void {
-    if (this.approval.canApprove) this.approved = true;
-  }
-
-  /** Pick a resource. A new selection invalidates any prior verdict + approval so nothing misleads. */
+  /** Pick a resource. A new selection invalidates any prior verdict so nothing misleads. */
   select(resource: PromotableResource | null): void {
     this.resource = resource;
     this.review = null;
     this.error = null;
     this.phase = 'idle';
-    this.approved = false;
     this.pr = null;
     this.liveStatus = null;
   }
@@ -118,7 +109,6 @@ export class Promotion {
     this.phase = 'reviewing';
     this.review = null;
     this.error = null;
-    this.approved = false; // a fresh promotion is not yet approved
     this.pr = null;
     this.liveStatus = null;
     try {

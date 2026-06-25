@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 
+const PR = { number: 42, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/42' };
+const RUN_URL = 'https://github.com/malcolndandaro/genie-promote-cicd/actions/runs/9';
+
 const cleanReview = {
   findings: [],
   gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
@@ -22,6 +25,23 @@ const blockerReview = {
   timeline: cleanReview.timeline.map((t) => (t.key === 'review' ? { ...t, status: 'fail' } : t)),
 };
 
+const deployStatus = (phase: string, extra: Record<string, unknown> = {}) => ({
+  pr_state: 'closed',
+  merged: true,
+  checks: 'success',
+  deploy: {
+    status: phase === 'deployed' ? 'completed' : 'waiting',
+    conclusion: phase === 'deployed' ? 'success' : null,
+    waiting_approval: phase === 'awaiting_approval',
+    run_url: RUN_URL,
+    run_id: 9,
+    approver: null,
+    ...extra,
+  },
+  pr_url: PR.url,
+  phase,
+});
+
 // Distinct requester (malcoln) and steward (pedro) — the SoD precondition.
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (route) =>
@@ -32,10 +52,15 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-const PR = { number: 42, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/42' };
-
-async function reviewOnce(page: import('@playwright/test').Page, review: unknown) {
+async function promote(
+  page: import('@playwright/test').Page,
+  review: unknown,
+  status?: unknown,
+) {
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
+  if (status) {
+    await page.route(`**/api/promote/${PR.number}/status`, (route) => route.fulfill({ json: status }));
+  }
   await page.goto('/');
   await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
   await page.getByRole('button', { name: /Solicitar promoção/ }).click();
@@ -43,63 +68,71 @@ async function reviewOnce(page: import('@playwright/test').Page, review: unknown
 }
 
 test('author cannot approve their own promotion (SoD)', async ({ page }) => {
-  await reviewOnce(page, cleanReview);
-  // Persona defaults to Autor: SoD message, no approve button.
+  await promote(page, cleanReview);
   await expect(page.getByText(/não pode aprovar a própria promoção/)).toBeVisible();
-  await expect(page.getByRole('button', { name: /Aprovar promoção/ })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
 test('steward is blocked from approving while a BLOCKER finding stands', async ({ page }) => {
-  await reviewOnce(page, blockerReview);
+  await promote(page, blockerReview);
   await page.getByRole('button', { name: 'Steward' }).click();
   await expect(page.getByText(/bloqueada por achados BLOCKER/)).toBeVisible();
-  await expect(page.getByRole('button', { name: /Aprovar promoção/ })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
-test('a distinct steward can approve a clean review and it advances the timeline', async ({
+test('a distinct steward gets the "Aprovar no GitHub" deep-link when the gate is waiting', async ({
   page,
 }) => {
-  await reviewOnce(page, cleanReview);
+  await promote(page, cleanReview, deployStatus('awaiting_approval'));
   await page.getByRole('button', { name: 'Steward' }).click();
+  const link = page.getByRole('link', { name: /Aprovar no GitHub/ });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute('href', RUN_URL); // the bot never approves — the human does, on GitHub
+});
 
-  const approveBtn = page.getByRole('button', { name: /Aprovar promoção/ });
-  await expect(approveBtn).toBeVisible();
+test('reflects a completed deploy with the approver login', async ({ page }) => {
+  await promote(page, cleanReview, deployStatus('deployed', { approver: 'pedro-gh' }));
+  await page.getByRole('button', { name: 'Steward' }).click();
+  await expect(page.getByText(/Implantado em produção — aprovado por pedro-gh/)).toBeVisible();
+  await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
+});
 
-  // Before approval, the deploy step is pending.
-  const deployRow = page.getByRole('listitem').filter({ hasText: 'Deploy em produção' });
-  await expect(deployRow).toContainText('pendente');
+test('reflects a failed deploy (no approve link)', async ({ page }) => {
+  await promote(
+    page,
+    cleanReview,
+    deployStatus('deploy_failed', { status: 'completed', conclusion: 'failure' }),
+  );
+  await page.getByRole('button', { name: 'Steward' }).click();
+  await expect(page.getByText(/Falha no deploy de produção/)).toBeVisible();
+  await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
+});
 
-  await approveBtn.click();
-
-  await expect(page.getByText(/Aprovado pelo Steward/)).toBeVisible();
-  // The approval + deploy rows advance to concluído.
-  await expect(deployRow).toContainText('concluído');
+test('pre-merge, a distinct steward sees the "after merge" state (no premature deep-link)', async ({
+  page,
+}) => {
+  await promote(page, cleanReview, {
+    pr_state: 'open',
+    merged: false,
+    checks: 'pending',
+    deploy: { status: 'none', conclusion: null, waiting_approval: false, run_url: null },
+    pr_url: PR.url,
+    phase: 'checks_running',
+  });
+  await page.getByRole('button', { name: 'Steward' }).click();
+  await expect(page.getByText(/Após o merge do PR/)).toBeVisible();
+  await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
 test('a steward configured as the requester (misconfig) still cannot self-approve (SoD)', async ({
   page,
 }) => {
-  // APP_STEWARD === the OBO user → the SoD guard must still block.
   await page.unroute('**/api/whoami');
   await page.route('**/api/whoami', (route) =>
     route.fulfill({ json: { email: 'malcoln@databricks.com', steward: 'malcoln@databricks.com' } }),
   );
-  await reviewOnce(page, cleanReview);
+  await promote(page, cleanReview, deployStatus('awaiting_approval'));
   await page.getByRole('button', { name: 'Steward' }).click();
-
   await expect(page.getByText(/o solicitante não pode aprovar a própria promoção/)).toBeVisible();
-  await expect(page.getByRole('button', { name: /Aprovar promoção/ })).toHaveCount(0);
-});
-
-test('an approval persists across a persona toggle (a decision, not view state)', async ({
-  page,
-}) => {
-  await reviewOnce(page, cleanReview);
-  await page.getByRole('button', { name: 'Steward' }).click();
-  await page.getByRole('button', { name: /Aprovar promoção/ }).click();
-  await expect(page.getByText(/Aprovado pelo Steward/)).toBeVisible();
-
-  // Toggling back to Autor keeps the approval fact visible (it doesn't reset).
-  await page.getByRole('button', { name: 'Autor' }).click();
-  await expect(page.getByText(/Aprovado pelo Steward/)).toBeVisible();
+  await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
