@@ -14,9 +14,7 @@ include:
 
 # build/ is gitignored (generated), but the engine API app's source_code_path points into it
 # (build/engine_app, assembled by scripts/build_engine_app.sh). Force the sync to upload it so
-# the app's source resolves in the workspace. (Tradeoff: the Streamlit app's repo-root upload
-# then also carries a redundant copy of build/engine_app — harmless, it reads its own root
-# app.yaml; acceptable for the demo. Clean long-term fix: per-app sync.paths.)
+# the app's source resolves in the workspace.
 sync:
   include:
     - build/engine_app/**
@@ -44,23 +42,11 @@ targets:
     variables:
       env: dev
       warehouse_id: your-dev-warehouse-id
-    # The authoring front door is a DEV-only resource: authors review dev spaces here and
-    # request promotion; the gated CI prod-deploy (SP) never touches it. Deployed from the
-    # repo root (source_code_path: .) so it can import genie_reviewer/ + scripts/; runtime
-    # command + env come from the root app.yaml. Auth: OBO for user reads, app SP for the
-    # LLM reviewer / grant preview (see app/app_logic.py::_client).
+    # DEV-only resources. The front door is the AppKit app `genie-promote-ui` (its own bundle
+    # under genie-promote-ui/); this bundle owns the engine API it calls. The Streamlit app was
+    # retired at AK9 cutover. The gated CI prod-deploy (SP) never touches these dev resources.
     resources:
       apps:
-        promotor:
-          name: "genie-promote-app"
-          description: "Front door: autor lista/cria Genie spaces e solicita promoção (OBO)."
-          source_code_path: .
-          # OBO scope: the app acts as the signed-in user for Genie reads (list_spaces/
-          # get_space). Only non-default scopes are settable — the iam.current-user:read /
-          # iam.access-control:read defaults are auto-applied. The LLM reviewer + grant
-          # preview run as the app SP, which needs no user scope.
-          user_api_scopes:
-            - dashboards.genie
         # The engine API (FastAPI) — the HTTP boundary over the Python engine (AK1/AK2).
         # DABs forbids two apps sharing a source_code_path, so the engine API deploys from an
         # ASSEMBLED dir (shared engine + engine_api/ + its own app.yaml), built by

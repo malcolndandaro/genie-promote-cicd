@@ -12,4 +12,4 @@ bash scripts/build_engine_app.sh
 bash scripts/render.sh dev
 
 DATABRICKS_BUNDLE_ENGINE=direct databricks bundle deploy -t dev "$@"
-echo "Deployed dev. Start/refresh apps with: databricks bundle run <promotor|engine_api> -t dev $*"
+echo "Deployed dev. Start/refresh the engine API with: databricks bundle run engine_api -t dev $*"

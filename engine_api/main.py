@@ -1,7 +1,7 @@
 """FastAPI "engine API" — a thin HTTP boundary over the Python review engine (AK1).
 
 Reuses app/app_logic.py + genie_reviewer/* UNCHANGED; it only adds transport + OBO plumbing,
-so the frontend (Streamlit today, AppKit next) can be a mere client of the same engine.
+so the frontend (the AppKit app `genie-promote-ui`) is a mere client of the same engine.
 
 OBO: the user token is read from EITHER the proxy-injected `x-forwarded-access-token` header
 (a direct/proxied call) OR an `Authorization: Bearer <token>` header (an app-to-app call from a

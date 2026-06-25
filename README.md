@@ -2,8 +2,9 @@
 
 A reference pipeline that lets a **business user author a Genie Space in a dev workspace
 and promote it to a prod workspace** through a governed CI/CD flow — with an **LLM reviewer
-agent**, deterministic checks, an eval-run quality gate, and a **Streamlit app** front door
-so non-technical users never touch Git or the CLI.
+agent**, deterministic checks, an eval-run quality gate, and an **AppKit (React) front door**
+— a thin UI over a FastAPI engine API that acts on the user's behalf (OBO) — so non-technical
+users never touch Git or the CLI.
 
 Sample domain: `recebiveis` (Brazilian *receivables*) — swap it for your own.
 
@@ -33,10 +34,12 @@ versioned in Git. The pipeline rebinds `dev_<domain>` → `prod_<domain>` at dep
 |---|---|
 | `databricks.yml` | DABs bundle: dev/prod targets, catalogs/schemas, the prod-only `genie_spaces` + `dashboards` resources |
 | `genie_reviewer/` | the reviewer agent — `review_core` (parse + prompt + gate), `handbook_rules`, `grant_check`, `eval_gate`, `fix_core`, `agent` |
-| `scripts/` | `pre_render.py` (rebind + allowlist), `render.sh`, `provision_ci.sh`, `verify_*.py` |
-| `app/` | Streamlit front door (`app_logic.py` + `app.py`) |
+| `scripts/` | `pre_render.py` (rebind + allowlist), `render.sh`, `build_engine_app.sh`, `deploy_dev.sh`, `provision_ci.sh`, `verify_*.py`, `check_grants.py` |
+| `app/` | shared review engine (`app_logic.py`) — consumed by the engine API |
+| `engine_api/` | FastAPI engine API (HTTP boundary over the engine; OBO via forwarded token) |
+| `genie-promote-ui/` | AppKit (TS/React + Express) front door — calls the engine API |
 | `resources/`, `src/` | DABs resources, setup/seed job, the serialized_space + dashboard artifacts |
-| `tests/` | 53 unit tests (pure cores; no workspace needed) |
+| `tests/` | unit tests (pure cores + engine API; no workspace needed) |
 | `docs/adr/` | architecture decisions |
 
 ## Use it on your workspaces

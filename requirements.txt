@@ -1,11 +1,5 @@
-# Root deploy manifest deps (app deployed from repo root). Streamlit is pre-installed on the
-# Apps runtime; databricks-sdk is pinned >=0.111 for the genie get_space(include_serialized_space)
-# + grants.get_effective string-securable behavior the app relies on.
-streamlit
+# Engine API (FastAPI) deps — assembled into build/engine_app by scripts/build_engine_app.sh.
+# (The Streamlit app was retired at AK9; streamlit/requests are no longer needed.)
 databricks-sdk>=0.111.0
-# Engine API (FastAPI + ASGI server). Listed for local dev + version certainty; FastAPI is also
-# on the Apps runtime. Plain uvicorn is enough for uvicorn.run(app) — no need for the extras.
 fastapi
 uvicorn
-# Streamlit app -> engine API HTTP client (AK4). Also a transitive databricks-sdk dep.
-requests
