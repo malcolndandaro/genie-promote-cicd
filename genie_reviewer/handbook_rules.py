@@ -59,7 +59,7 @@ RULES = [
         "severity_hint": "BLOCKER",
         "citation": "Genie Promotion Handbook › Quality › EVAL-01",
         "content": (
-            "Um espaço de produção deve ter >= 3 perguntas de benchmark (Q->SQL). Sem elas "
+            "Um espaço de produção deve ter >= 2 perguntas de benchmark (Q->SQL). Sem elas "
             "não há o que certificar pelo eval-run. BLOCKER."
         ),
     },

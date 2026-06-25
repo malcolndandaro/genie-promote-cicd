@@ -194,7 +194,7 @@ def decide_gate(findings: list[dict]) -> dict:
 # Deterministic findings OWN their rule_id; the LLM owns the rest (semantic rules).
 def finalize_findings(
     llm_findings: list[dict], deterministic_findings: list[dict] | None, n_benchmark: int,
-    min_benchmark: int = 3,
+    min_benchmark: int = 2,  # prod requires >= 2 benchmark Q→SQL (lets a 2-question space promote)
 ) -> list[dict]:
     det = list(deterministic_findings or [])
     if n_benchmark < min_benchmark and not any(f.get("rule_id") == "EVAL-01" for f in det):

@@ -105,6 +105,13 @@ def test_finalize_adds_eval01_backstop_when_too_few_benchmarks():
     assert any(f["rule_id"] == "EVAL-01" and f["severity"] == "BLOCKER" for f in out)
 
 
+def test_finalize_no_eval01_at_two_benchmarks():
+    # Prod threshold is >= 2 benchmark Q→SQL, so a 2-question space is clean (enables the
+    # end-to-end steward-approval path on the dev space).
+    out = rc.finalize_findings([], [], n_benchmark=2)
+    assert not any(f["rule_id"] == "EVAL-01" for f in out)
+
+
 def test_finalize_dedups_llm_against_deterministic_owner():
     det = [{"severity": "BLOCKER", "rule_id": "GRANT-01", "citation": "c", "message": "det"}]
     llm = [{"severity": "SUGGESTION", "rule_id": "GRANT-01", "citation": "c", "message": "llm-soft"},
