@@ -57,3 +57,30 @@ or just use the wrapper **`bash scripts/deploy_dev.sh`** which assembles then de
 ## Verify (after go-live)
 Open a PR that touches a resource → `pr-checks` validates → merge → `deploy-prod`
 pauses on the prod gate → Pedro approves → SP runs `bundle deploy -t prod`.
+
+## GitHub App (bot) for the in-app PR integration (GH1)
+
+The app opens promotion PRs + posts review comments as a **GitHub App (bot)** — never a human PAT
+or the Databricks SP. To provision (one-time, HITL):
+
+1. **github.com/settings/apps → New GitHub App.** Name `genie-promote-bot`; disable the webhook;
+   repository permissions: **Contents: RW, Pull requests: RW, Issues: RW, Deployments: RO,
+   Actions: RO** (Metadata RO is automatic). Install scope: only this account.
+2. **Generate a private key** (downloads a `.pem`) and **Install** the App on `genie-promote-cicd`.
+3. Capture the **App ID** (app page) and **Installation ID** (`GET /app/installations` as the App,
+   or the install URL). The app slug here is `genie-promote-bot` (App ID 4146857, installation
+   142628812 on `malcolndandaro`).
+4. **Store the three values** in a Databricks secret scope the app's SP can read:
+   ```
+   databricks secrets create-scope genie_promote -p cerc-mlops-dev
+   databricks secrets put-secret  genie_promote github_app_id          --string-value <APP_ID>          -p cerc-mlops-dev
+   databricks secrets put-secret  genie_promote github_installation_id --string-value <INSTALLATION_ID> -p cerc-mlops-dev
+   databricks secrets put-secret  genie_promote github_app_private_key --string-value "$(cat key.pem)"  -p cerc-mlops-dev
+   databricks secrets put-acl     genie_promote <app-sp-client-id> READ -p cerc-mlops-dev
+   ```
+   The app SP is `databricks apps get genie-promote-app -o json | .service_principal_client_id`.
+5. **Verify** the bot can authenticate: mint an App JWT (RS256, iss=App ID) → `GET /app` →
+   `POST /app/installations/<id>/access_tokens` → `GET /repos/.../<repo>` returns 200.
+
+The app reads these at runtime (GH2 wires the read path: app.yaml `valueFrom` / runtime SDK). Never
+commit the `.pem`; if it ever transits an insecure channel, regenerate it in the App's settings.
