@@ -24,6 +24,13 @@ createApp({
   plugins: [server()],
   onPluginsReady(appkit) {
     appkit.server.extend((app) => {
+      // The signed-in user's identity (for the AI-trust badge). x-forwarded-email is
+      // proxy-trust-only — display only, never an authorization input.
+      app.get('/api/whoami', (req, res) => {
+        const raw = req.headers['x-forwarded-email'];
+        res.json({ email: (Array.isArray(raw) ? raw[0] : raw) ?? null });
+      });
+
       // The signed-in user's Genie spaces (OBO) — proxied to the engine API.
       app.get('/api/spaces', async (req, res) => {
         if (!engineConfigured()) {

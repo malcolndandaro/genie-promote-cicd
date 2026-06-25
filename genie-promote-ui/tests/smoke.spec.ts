@@ -23,6 +23,50 @@ test('smoke test - app loads and displays home page', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Home' })).toBeVisible();
 });
 
+test('smoke test - review renders findings + AI-trust', async ({ page }) => {
+  // Mock the proxy endpoints (the local smoke has no engine / OBO token).
+  await page.route('**/api/whoami', (route) =>
+    route.fulfill({ json: { email: 'tester@example.com' } }),
+  );
+  await page.route('**/api/spaces', (route) =>
+    route.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Test Space' }] } }),
+  );
+  await page.route('**/api/review', (route) =>
+    route.fulfill({
+      json: {
+        findings: [
+          {
+            rule_id: 'EVAL-01',
+            severity: 'BLOCKER',
+            message: 'Apenas 2 pergunta(s) de benchmark; produção exige >= 3.',
+            citation: 'Genie Promotion Handbook › Quality › EVAL-01',
+            suggestion: 'Adicionar perguntas de benchmark.',
+          },
+        ],
+        gate: { conclusion: 'failure', blocker_count: 1, summary: '🔴 1 de 1 achado(s) são BLOCKER — promoção bloqueada.' },
+        eval: { status: 'advisory', summary: '🟡 eval-run advisory' },
+        timeline: [
+          { key: 'checks', label: 'Checagens determinísticas', status: 'pass' },
+          { key: 'review', label: 'Revisão do agente', status: 'fail' },
+        ],
+        allowlist_violations: [],
+        consumer_group: 'account users',
+      },
+    }),
+  );
+
+  await page.goto('/');
+  await page.getByRole('combobox').click();
+  await page.getByRole('option', { name: 'Test Space' }).click();
+  await page.getByRole('button', { name: 'Solicitar promoção →' }).click();
+
+  // The full Revisão panel: a finding card, the gate verdict, and the persistent AI disclaimer.
+  await expect(page.getByText('EVAL-01', { exact: true })).toBeVisible();
+  await expect(page.getByText('BLOCKER', { exact: true })).toBeVisible();
+  await expect(page.getByText('Achados gerados por IA — verifique antes de aprovar.')).toBeVisible();
+  await expect(page.getByText('promoção bloqueada', { exact: false })).toBeVisible();
+});
+
 // ── Lifecycle hooks ─────────────────────────────────────────────────────────
 
 test.beforeEach(async ({ page }) => {

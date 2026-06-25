@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import {
   Alert,
   AlertDescription,
+  Badge,
   Button,
   Card,
   CardContent,
@@ -28,7 +29,7 @@ import {
   TabsTrigger,
   useIsMobile,
 } from '@databricks/appkit-ui/react';
-import { Menu } from 'lucide-react';
+import { CheckCircle2, Circle, Clock, Menu, XCircle } from 'lucide-react';
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
@@ -129,9 +130,107 @@ interface Review {
   timeline: { key: string; label: string; status: string }[];
 }
 
+const TIMELINE_ICON: Record<string, { Icon: typeof CheckCircle2; cls: string }> = {
+  pass: { Icon: CheckCircle2, cls: 'text-success' },
+  fail: { Icon: XCircle, cls: 'text-destructive' },
+  running: { Icon: Clock, cls: 'text-warning' },
+  pending: { Icon: Circle, cls: 'text-muted-foreground' },
+};
+
+const SEVERITY_VARIANT: Record<string, 'destructive' | 'secondary' | 'outline'> = {
+  BLOCKER: 'destructive',
+  SUGGESTION: 'secondary',
+  STYLE: 'outline',
+};
+
+// AK7: the full review result — pipeline timeline + gate + findings cards + AI-trust.
+function ReviewPanel({ review, userEmail }: { review: Review; userEmail: string | null }) {
+  const failed = review.gate.conclusion === 'failure';
+  return (
+    <div className="space-y-4 border-t pt-4">
+      {/* AI-trust: who it ran as + that findings are AI-generated. */}
+      <div className="rounded-md border p-3 space-y-1">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <Badge variant="secondary">{userEmail ?? 'usuário autenticado'}</Badge>
+          <span className="text-muted-foreground">
+            Achados gerados por IA — verifique antes de aprovar.
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Leitura dos espaços executa como você (OBO); o revisor (LLM) e a checagem de grants
+          executam como o service principal do app.
+        </p>
+      </div>
+
+      {/* Pipeline timeline. */}
+      <div>
+        <h3 className="text-sm font-semibold text-foreground mb-2">Pipeline de promoção</h3>
+        <ul className="space-y-1">
+          {review.timeline.map((t) => {
+            const { Icon, cls } = TIMELINE_ICON[t.status] ?? TIMELINE_ICON.pending;
+            return (
+              <li key={t.key} className="flex items-center gap-2 text-sm text-foreground">
+                <Icon className={`h-4 w-4 shrink-0 ${cls}`} aria-hidden />
+                <span>{t.label}</span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {/* Gate summary (Alert has no success variant, so render non-failure with a token color). */}
+      {failed ? (
+        <Alert variant="destructive">
+          <AlertDescription>{review.gate.summary}</AlertDescription>
+        </Alert>
+      ) : (
+        <p
+          className={`text-sm font-medium ${
+            review.gate.conclusion === 'success' ? 'text-success' : 'text-warning'
+          }`}
+        >
+          {review.gate.summary}
+        </p>
+      )}
+
+      {/* Findings. */}
+      <div>
+        <h3 className="text-sm font-semibold text-foreground mb-2">Achados do Genie Reviewer</h3>
+        {review.findings.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nenhum achado — espaço limpo.</p>
+        ) : (
+          <div className="space-y-2">
+            {review.findings.map((f, i) => (
+              // Findings have no id and a (rule_id, message) pair isn't guaranteed unique; the
+              // list is static and never reordered, so the index is a safe, unique key here.
+              // eslint-disable-next-line react/no-array-index-key
+              <Card key={`${f.rule_id}:${i}`}>
+                <CardContent className="py-3 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Badge variant={SEVERITY_VARIANT[f.severity] ?? 'secondary'}>{f.severity}</Badge>
+                    <span className="font-medium text-foreground">{f.rule_id}</span>
+                  </div>
+                  <p className="text-sm text-foreground">{f.message}</p>
+                  {f.suggestion && (
+                    <p className="text-sm text-muted-foreground">↳ {f.suggestion}</p>
+                  )}
+                  {f.citation && (
+                    <p className="text-xs italic text-muted-foreground">{f.citation}</p>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="text-xs text-muted-foreground">eval-run: {review.eval.summary}</p>
+    </div>
+  );
+}
+
 // AK6: "Meus espaços" — list the user's Genie spaces (OBO via /api/spaces), pick one, and
-// request a promotion review (POST /api/review). The review result is shown minimally here;
-// AK7 builds the full timeline + findings + AI-trust panel.
+// request a promotion review (POST /api/review); AK7's ReviewPanel renders the result.
 function HomePage() {
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -139,12 +238,17 @@ function HomePage() {
   const [review, setReview] = useState<Review | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/spaces')
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((d: { spaces?: Space[] }) => setSpaces(d.spaces ?? []))
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    fetch('/api/whoami')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: { email?: string | null }) => setUserEmail(d.email ?? null))
+      .catch(() => setUserEmail(null));
   }, []);
 
   const requestPromotion = async () => {
@@ -224,17 +328,12 @@ function HomePage() {
                 </div>
               )}
 
-              {/* Minimal result — AK7 replaces this with the full timeline + findings + AI-trust. */}
               {reviewError && (
                 <Alert variant="destructive">
                   <AlertDescription>Não foi possível revisar o espaço: {reviewError}</AlertDescription>
                 </Alert>
               )}
-              {review && (
-                <Alert variant={review.gate.conclusion === 'failure' ? 'destructive' : 'default'}>
-                  <AlertDescription>{review.gate.summary}</AlertDescription>
-                </Alert>
-              )}
+              {review && <ReviewPanel review={review} userEmail={userEmail} />}
             </CardContent>
           </Card>
         </TabsContent>
