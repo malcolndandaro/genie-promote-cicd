@@ -48,8 +48,36 @@ DOMAIN = os.environ.get("APP_DOMAIN", "recebiveis")
 # touches src/, never build/. The bot's creds live in a Databricks secret scope the app SP reads.
 GH_REPO = os.environ.get("APP_GH_REPO", "malcolndandaro/genie-promote-cicd")
 GH_SECRET_SCOPE = os.environ.get("APP_GH_SECRET_SCOPE", "genie_promote")
-GH_PROMOTION_BRANCH = os.environ.get("APP_GH_PROMOTION_BRANCH", "promote/recebiveis")
-GH_SPACE_SRC_PATH = "src/genie/receivables.serialized_space.json"
+# PER-SPACE promotion: each Genie space promotes on its OWN branch + committed file, so concurrent
+# promotions of different spaces never collide on a shared PR. A space's SLUG keys the branch, the
+# committed artifact path, AND the generated prod genie_spaces resource (scripts/render.sh). Friendly/
+# legacy slugs are pinned via APP_SPACE_SLUGS (JSON {space_id: slug}) — e.g. the canonical demo space
+# keeps "receivables" so its existing file/PR/resource are preserved; otherwise the slug is derived
+# from the id (prefixed so it's a valid branch + DABs resource key).
+GH_PROMOTION_BRANCH_PREFIX = os.environ.get("APP_GH_PROMOTION_BRANCH_PREFIX", "promote")
+GH_GENIE_SRC_DIR = "src/genie"
+try:
+    _SPACE_SLUGS = json.loads(os.environ.get("APP_SPACE_SLUGS") or "{}")
+except (ValueError, TypeError):
+    _SPACE_SLUGS = {}
+
+
+def space_slug(space_id: str) -> str:
+    """Stable, branch/path/identifier-safe slug for a space. A pinned slug (APP_SPACE_SLUGS) wins;
+    otherwise derive from the id (alnum/underscore only, guaranteed to start with a letter)."""
+    pinned = _SPACE_SLUGS.get(space_id)
+    if pinned:
+        return pinned
+    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in space_id)
+    return safe if safe[:1].isalpha() else f"s_{safe}"
+
+
+def branch_for(slug: str) -> str:
+    return f"{GH_PROMOTION_BRANCH_PREFIX}/{slug}"
+
+
+def src_path_for(slug: str) -> str:
+    return f"{GH_GENIE_SRC_DIR}/{slug}.serialized_space.json"
 
 # The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
 REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group")
@@ -243,8 +271,8 @@ def github_app_factory(profile: str | None = None) -> GitHubApp:
 
 
 def request_promotion(space_id: str, profile: str | None = None, *, user_token: str | None = None,
-                      requester_email: str | None = None, domain: str = DOMAIN,
-                      github: GitHubApp | None = None) -> dict:
+                      requester_email: str | None = None, resource_title: str | None = None,
+                      domain: str = DOMAIN, github: GitHubApp | None = None) -> dict:
     """GH2: open (or update) a real promotion PR for a space and post the attributed review comment.
 
     Flow: review the space (OBO export + app-SP reviewer; reused for the PR comment) → export the
@@ -265,16 +293,22 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     gh = github or _github_app(profile)  # the bot (app SP reads the scope)
     who = requester_email or "usuário autenticado"
     safe_id = "".join(c for c in space_id if c.isalnum() or c in "-_")  # title can't carry markup
+    slug = space_slug(space_id)            # per-space: this space's own branch + committed file
+    branch, path = branch_for(slug), src_path_for(slug)
+    # A per-space title sidecar so render.sh can name the generated prod genie_spaces resource (and so
+    # the prod space keeps a friendly title). Committed next to the artifact; no shared manifest, so
+    # concurrent per-space PRs never conflict.
+    extra = {f"{GH_GENIE_SRC_DIR}/{slug}.title": (resource_title or safe_id) + "\n"}
     pr = gh.open_or_update_promotion(
-        branch=GH_PROMOTION_BRANCH, path=GH_SPACE_SRC_PATH, content=content,
+        branch=branch, path=path, content=content, extra_files=extra,
         title=f"Promover Genie Space para produção ({safe_id})",
         body=(f"Promoção solicitada por **{who}** via o app (bot abriu o PR em seu nome). "
-              f"Achados da revisão no comentário abaixo; `pr-checks` é o gate automático e o "
-              f"Steward libera o deploy de produção (segregação de funções)."),
+              f"Espaço `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo; `pr-checks` "
+              f"é o gate automático e o Steward libera o deploy de produção (segregação de funções)."),
     )
     gh.upsert_comment(pr["number"], PROMOTION_COMMENT_MARKER,
                       render_promotion_comment(review, requester_email))
-    return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}}
+    return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch}
 
 
 def promotion_status(number: int, profile: str | None = None, *, github: GitHubApp | None = None) -> dict:

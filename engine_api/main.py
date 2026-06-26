@@ -256,7 +256,7 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
             promotion = store.create_promotion(
                 resource_id=body.space_id, resource_kind=body.resource_kind or "genie_space",
                 resource_title=body.resource_title, requester_email=requester_email,
-                pr_number=pr["number"], pr_url=pr["url"], branch=app_logic.GH_PROMOTION_BRANCH,
+                pr_number=pr["number"], pr_url=pr["url"], branch=result.get("branch", ""),
                 current_phase="open", live_status=None)
             promotion_id, event = promotion.id, "requested"
         except DuplicatePRNumber:
@@ -302,7 +302,8 @@ def promote(
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
-            body.space_id, user_token=token, requester_email=x_forwarded_email),
+            body.space_id, user_token=token, requester_email=x_forwarded_email,
+            resource_title=body.resource_title),
     )
     store = getattr(app.state, "store", None)
     if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips

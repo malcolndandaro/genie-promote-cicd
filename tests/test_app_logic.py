@@ -175,19 +175,38 @@ _FULL_REVIEW = {
 def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
-    out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                      resource_title="Recebíveis", github=gh)
 
     # returns the UI review subset (NOT the big prod_serialized/dev_serialized) + the PR coordinates
     assert out["pr"] == {"number": 7, "url": "https://github.com/o/r/pull/7"}
     assert set(out["review"]) == set(app_logic.REVIEW_FIELDS)
     assert "prod_serialized" not in out["review"] and "dev_serialized" not in out["review"]
 
-    # commits the DEV-shaped export (reused from the review, no second export) to src/genie
-    assert gh.promo["path"] == "src/genie/receivables.serialized_space.json"
+    # PER-SPACE: commits to this space's OWN branch + file (slug derived from the id), not a shared one
+    assert gh.promo["branch"] == "promote/sp1" and out["branch"] == "promote/sp1"
+    assert gh.promo["path"] == "src/genie/sp1.serialized_space.json"
     assert "display_name" in gh.promo["content"]
+    # + a per-space title sidecar so render.sh can name the generated prod genie_spaces resource
+    assert gh.promo["extra_files"]["src/genie/sp1.title"].strip() == "Recebíveis"
     # the comment mirrors the review and attributes the human requester
     assert gh.comment["number"] == 7
     assert "malcoln@x" in gh.comment["body"] and "EVAL-01" in gh.comment["body"]
+
+
+def test_two_spaces_get_distinct_branches_and_paths():
+    # The core of the bug fix: different spaces never collide on a shared branch/PR/file.
+    assert app_logic.branch_for(app_logic.space_slug("aaa")) != app_logic.branch_for(app_logic.space_slug("bbb"))
+    assert app_logic.src_path_for(app_logic.space_slug("aaa")) != app_logic.src_path_for(app_logic.space_slug("bbb"))
+
+
+def test_space_slug_pinned_and_derived(monkeypatch):
+    # A pinned slug (APP_SPACE_SLUGS) wins; otherwise derive a valid identifier from the id.
+    monkeypatch.setattr(app_logic, "_SPACE_SLUGS", {"01f16e83": "receivables"})
+    assert app_logic.space_slug("01f16e83") == "receivables"
+    # an id starting with a digit is prefixed so it's a valid branch + DABs resource key
+    assert app_logic.space_slug("01f1717f") == "s_01f1717f"
+    assert app_logic.space_slug("my_space") == "my_space"
 
 
 def test_promotion_status_reads_via_injected_bot():

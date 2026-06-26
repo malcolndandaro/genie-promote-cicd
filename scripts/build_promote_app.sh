@@ -55,6 +55,12 @@ env:
   # disables it. Config-driven (ADR-0004).
   - name: APP_RECONCILE_INTERVAL_SEC
     value: "300"
+  # Per-space promotion slugs (config-driven, ADR-0004): each space promotes on its OWN branch + file
+  # keyed by its slug (default: derived from the space id). Pin a friendly/legacy slug here so a space
+  # keeps its existing committed file + prod resource — the canonical demo space stays "receivables".
+  # A new customer sets their own map (or leaves it empty -> id-derived slugs).
+  - name: APP_SPACE_SLUGS
+    value: '{"01f16e8322661161a83f7d1f2a1bec14": "receivables"}'
 YAML
 # The built SPA the FastAPI app serves (engine_api/main.py -> <app-root>/static).
 cp -R web/dist "$OUT/static"

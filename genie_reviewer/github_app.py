@@ -146,31 +146,38 @@ class GitHubApp:
 
     # --- promotion PR -------------------------------------------------------
     def open_or_update_promotion(self, *, branch: str, path: str, content: str,
-                                 title: str, body: str) -> dict:
-        """Write the artifact to the promotion branch and open-or-reuse the PR. Idempotent: while a
-        PR is open, re-requesting updates the same branch + PR (no spam). When there's NO open PR
-        (first request, or a prior promotion merged), the branch is reset to base first so the new
-        PR has a clean diff (avoids the stale-branch / 'no commits between' edge)."""
+                                 title: str, body: str, extra_files: dict | None = None) -> dict:
+        """Write the artifact (+ any extra_files, e.g. a per-space title sidecar) to the promotion
+        branch and open-or-reuse the PR. Idempotent: while a PR is open, re-requesting updates the
+        same branch + PR (no spam). When there's NO open PR (first request, or a prior promotion
+        merged), the branch is reset to base first so the new PR has a clean diff (avoids the
+        stale-branch / 'no commits between' edge)."""
         pr = self._find_open_pr(branch)
         if pr is None:
             self._reset_branch_to_base(branch)
         self._put_file(branch, path, content, f"promote: update {path}")
+        for p, c in (extra_files or {}).items():
+            self._put_file(branch, p, c, f"promote: update {p}")
         return pr if pr is not None else self._create_pr(branch, title, body)
 
     def _reset_branch_to_base(self, branch: str) -> None:
-        """Point the branch at the base sha (force), creating it if absent — a fresh start."""
+        """Point the branch at the base sha — creating it if absent (a fresh per-space branch) or
+        force-resetting it if it exists. Check existence with a GET first: GitHub returns 404 on a
+        missing ref for GET but 422 'Reference does not exist' on PATCH, so relying on the PATCH error
+        code mis-handles a brand-new branch (the per-space case)."""
         _, base_ref = self._api("GET", self._repo_path(f"/git/ref/heads/{self.base}"), "get base ref")
         sha = base_ref["object"]["sha"]
-        status, body = self._transport(
-            "PATCH", f"{_API}{self._repo_path(f'/git/refs/heads/{branch}')}",
-            self._headers(self._token()), {"sha": sha, "force": True})
-        if status == 200:
-            return
-        if status == 404:  # branch doesn't exist yet -> create it
+        exists, _ = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/git/ref/heads/{branch}')}", self._headers(self._token()), None)
+        if exists == 200:  # branch exists -> force-reset to base for a clean diff
+            status, body = self._transport(
+                "PATCH", f"{_API}{self._repo_path(f'/git/refs/heads/{branch}')}",
+                self._headers(self._token()), {"sha": sha, "force": True})
+            if status != 200:
+                raise GitHubError(status, "reset branch", body)
+        else:  # branch absent -> create it
             self._api("POST", self._repo_path("/git/refs"), "create branch",
                       {"ref": f"refs/heads/{branch}", "sha": sha})
-            return
-        raise GitHubError(status, "reset branch", body)
 
     def _put_file(self, branch: str, path: str, content: str, message: str) -> None:
         # If the file already exists on the branch we must pass its blob sha to update it.

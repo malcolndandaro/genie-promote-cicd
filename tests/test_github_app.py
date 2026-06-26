@@ -107,6 +107,36 @@ def test_open_creates_branch_file_and_pr():
     assert len(fg.pulls) == 1
 
 
+def test_open_creates_a_brand_new_branch_when_patch_returns_422():
+    # Regression: real GitHub returns 422 "Reference does not exist" (NOT 404) when PATCHing a ref
+    # that doesn't exist. A per-space branch is brand-new, so the bot must create it, not error.
+    fg = FakeGitHub()
+
+    def transport(method, url, headers, body):
+        path = url.split("api.github.com")[-1]
+        if method == "PATCH" and "/git/refs/heads/" in path:  # mimic GitHub on a missing ref
+            br = path.rsplit("/heads/", 1)[1]
+            if br not in fg.refs:
+                return 422, {"message": "Reference does not exist"}
+        return fg.transport(method, url, headers, body)
+
+    gh = GitHubApp(owner="o", repo="r", transport=transport, token_provider=lambda: "tok")
+    pr = gh.open_or_update_promotion(branch="promote/s_new", path="src/genie/s_new.json",
+                                     content="{}", title="t", body="b")
+    assert pr["number"] == 1 and "promote/s_new" in fg.refs   # branch created, PR opened — no error
+
+
+def test_open_commits_extra_files_alongside_the_artifact():
+    # The per-space title sidecar (and any extra files) are committed to the same branch + PR.
+    fg = FakeGitHub()
+    _app(fg).open_or_update_promotion(
+        branch="promote/x", path="src/genie/s.json", content="{}", title="t", body="b",
+        extra_files={"src/genie/s.title": "My Space\n"})
+    assert ("promote/x", "src/genie/s.json") in fg.files
+    assert ("promote/x", "src/genie/s.title") in fg.files
+    assert base64.b64decode(fg.files[("promote/x", "src/genie/s.title")]["content"]).decode() == "My Space\n"
+
+
 def test_idempotent_reuses_pr_and_updates_file_in_place():
     fg = FakeGitHub()
     gh = _app(fg)
