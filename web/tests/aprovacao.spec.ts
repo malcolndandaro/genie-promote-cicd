@@ -56,8 +56,7 @@ async function requestAsAuthor(page: Page, review: unknown, viewer = 'malcoln@da
   await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.route('**/api/promote', (r) => r.fulfill({ json: { review, pr: PR, promotion_id: 'p1' } }));
   await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
   await expect(page.getByRole('heading', { name: 'Aprovação do Steward' })).toBeVisible();
 }
 

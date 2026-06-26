@@ -112,7 +112,7 @@ test('no stored promotions -> normal selection flow (no recovery)', async ({ pag
     route.fulfill({ json: { promotions: [] } }),
   );
   await page.goto('/');
-  // Nothing recovered: the empty review area, the selector is ready to drive a fresh request.
+  // Nothing recovered: the empty review area, the space card is ready to drive a fresh request.
   await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
-  await expect(page.getByLabel('Recurso')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeVisible();
 });
