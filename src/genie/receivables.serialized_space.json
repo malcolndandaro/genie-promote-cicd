@@ -80,7 +80,7 @@
       {
         "id": "01f16e83e8191aca8d0cde8be58e61dd",
         "content": [
-          "Este espaço responde perguntas sobre RECEBÍVEIS registrados na Acme, usando\n",
+          "Este espaço responde perguntas sobre RECEBÍVEIS registrados na CERC, usando\n",
           "  exclusivamente as tabelas certificadas da camada `diamond` do catálogo de recebíveis.\n",
           "\n",
           "  Modelo de dados:\n",
@@ -135,15 +135,6 @@
           "  GROUP BY c.nome, c.uf\n",
           "  ORDER BY valor_total DESC\n",
           "  LIMIT 5;"
-        ]
-      },
-      {
-        "id": "01f16e84ffffffffffffffffffffffff",
-        "question": [
-          "Qual o ticket médio de recebível por bandeira?"
-        ],
-        "sql": [
-          "SELECT a.bandeira, AVG(f.valor) AS ticket_medio FROM dev_recebiveis.diamond.fato_recebiveis f JOIN dev_recebiveis.diamond.dim_arranjo a ON f.arranjo = a.arranjo GROUP BY a.bandeira ORDER BY ticket_medio DESC"
         ]
       }
     ],
