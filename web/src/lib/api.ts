@@ -3,7 +3,7 @@
  * same origin — the server reads the user's OBO token (`x-forwarded-access-token`) in-process and
  * NO token is ever handled client-side.
  */
-import type { Whoami, PromotableResource, Review } from './types';
+import type { Whoami, PromotableResource, Review, ResourceKind } from './types';
 import { spaceToResource } from './resources';
 
 /** A failed API call. `status` lets callers distinguish a 401 (re-auth) from a 502 (engine). */
@@ -73,16 +73,54 @@ export interface PromoteResult {
 
 /**
  * Request a promotion: review the resource AND open (or update) a real GitHub PR with the
- * attributed review comment. Reviews as the user (OBO); opens the PR + comments as the bot.
+ * attributed review comment. Reviews as the user (OBO); opens the PR + comments as the bot; the
+ * server persists the Promotion + Review Snapshot (LB3). The resource title/kind are sent so the
+ * stored Promotion (and the history/recovery view) shows the resource without a second lookup.
  */
-export async function postPromote(resourceId: string): Promise<PromoteResult> {
+export async function postPromote(resource: PromotableResource): Promise<PromoteResult> {
   const r = await fetch('/api/promote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ space_id: resourceId }),
+    body: JSON.stringify({
+      space_id: resource.id,
+      resource_title: resource.title,
+      resource_kind: resource.kind,
+    }),
   });
   if (!r.ok) throw await toError(r);
   return (await r.json()) as PromoteResult;
+}
+
+/** A persisted Promotion summary (LB3) — for recovery-on-load + the history view (LB5). */
+export interface PromotionSummary {
+  id: string;
+  resource_id: string;
+  resource_kind: ResourceKind;
+  resource_title: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  current_phase: string | null;
+  terminal: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A Promotion + its latest STORED Review Snapshot + PR ref — the recover-on-open payload. */
+export interface PromotionDetail {
+  promotion: PromotionSummary;
+  review: Review | null;
+  pr: PullRequestRef | null;
+}
+
+/** The caller's promotions, newest first (LB3 `scope=mine`; `scope=all` is role-gated in LB5). */
+export async function getPromotions(scope: 'mine' | 'all' = 'mine'): Promise<PromotionSummary[]> {
+  const data = await getJSON<{ promotions: PromotionSummary[] }>(`/api/promotions?scope=${scope}`);
+  return data.promotions ?? [];
+}
+
+/** A single promotion + its stored review + PR ref — renders WITHOUT re-running the reviewer. */
+export function getPromotionDetail(id: string): Promise<PromotionDetail> {
+  return getJSON<PromotionDetail>(`/api/promotions/${id}`);
 }
 
 /** Live promotion phases (GH3) — where the PR actually is, read from GitHub by the bot. */

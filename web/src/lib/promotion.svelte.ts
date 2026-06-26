@@ -13,7 +13,14 @@
  * that policy (the documented future `/api/approve` would re-check it server-side from the token).
  */
 import type { PromotableResource, Review } from './types';
-import { postPromote, getPromoteStatus, type PullRequestRef, type PromoteStatus } from './api';
+import {
+  postPromote,
+  getPromoteStatus,
+  getPromotions,
+  getPromotionDetail,
+  type PullRequestRef,
+  type PromoteStatus,
+} from './api';
 
 export type PromotionPhase = 'idle' | 'reviewing' | 'reviewed' | 'error';
 export type Persona = 'author' | 'steward';
@@ -111,8 +118,9 @@ export class Promotion {
     this.error = null;
     this.pr = null;
     this.liveStatus = null;
+    const resource = this.resource;
     try {
-      const res = await postPromote(id);
+      const res = await postPromote(resource);
       if (this.resource?.id !== id) return; // selection changed mid-flight — drop the stale result
       this.review = res.review;
       this.pr = res.pr;
@@ -121,6 +129,38 @@ export class Promotion {
       if (this.resource?.id !== id) return;
       this.error = e instanceof Error ? e.message : String(e);
       this.phase = 'error';
+    }
+  }
+
+  /**
+   * Recover the most-recent promotion on load (LB3): render its STORED Review Snapshot + PR ref
+   * from the durable store — WITHOUT re-running the LLM reviewer (no `/api/promote` call). The live
+   * PR/CI/deploy status still comes from the GitHub poll (the existing `refreshStatus` effect picks
+   * up once `pr` is set). Best-effort: any failure (no store, no promotions, parse error) is a
+   * silent no-op so the normal selection flow proceeds. Returns true if a promotion was restored.
+   */
+  async recover(): Promise<boolean> {
+    if (this.phase !== 'idle' || this.resource) return false; // don't clobber an active flow
+    try {
+      const list = await getPromotions('mine');
+      if (list.length === 0) return false;
+      // Prefer the newest IN-FLIGHT promotion (so a reload mid-promotion resumes it); fall back to
+      // the most recent overall so a just-finished one is still visible. (LB5 adds the full list.)
+      const summary = list.find((p) => !p.terminal) ?? list[0];
+      const detail = await getPromotionDetail(summary.id);
+      if (!detail.review || !detail.pr) return false;
+      if (this.phase !== 'idle' || this.resource) return false; // a selection raced in — yield to it
+      this.resource = {
+        id: summary.resource_id,
+        title: summary.resource_title ?? summary.resource_id,
+        kind: summary.resource_kind,
+      };
+      this.review = detail.review;
+      this.pr = detail.pr;
+      this.phase = 'reviewed';
+      return true;
+    } catch {
+      return false; // store unavailable / nothing to recover — proceed with the normal flow
     }
   }
 }

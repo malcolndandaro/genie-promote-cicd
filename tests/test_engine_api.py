@@ -321,6 +321,145 @@ def test_promote_status_github_error_maps_to_503(monkeypatch):
     assert client.get("/api/promote/6/status").status_code == 503
 
 
+# --- LB3: persistence on request + recover-on-open (no reviewer re-run) -----
+
+from promotion_store import InMemoryBackend, PromotionStore  # noqa: E402
+
+
+@pytest.fixture()
+def store():
+    """A real PromotionStore over the in-memory backend, wired into app.state for the request — so
+    the persistence + read endpoints are exercised end-to-end with no live Lakebase."""
+    s = PromotionStore(InMemoryBackend())
+    engine_api.app.state.store = s
+    yield s
+    engine_api.app.state.store = None
+
+
+def _fake_promote(review_gate="success", number=7):
+    def fn(space_id, *a, user_token=None, requester_email=None, **k):
+        return {"review": {"gate": {"conclusion": review_gate, "summary": "ok"},
+                           "findings": [{"rule_id": "ENV-01", "severity": "BLOCKER"}] if review_gate == "failure" else [],
+                           "eval": {"status": "pass", "summary": "n/a"},
+                           "timeline": [{"key": "review", "status": "pass"}]},
+                "pr": {"number": number, "url": f"https://gh/pr/{number}"}}
+    return fn
+
+
+def test_promote_persists_promotion_snapshot_and_requested_event(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
+    r = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis"},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    assert r.status_code == 200
+    pid = r.json()["promotion_id"]
+    p = store.get_promotion(pid)
+    assert p.pr_number == 7 and p.resource_title == "Recebíveis" and p.requester_email == "ana@x"
+    assert store.latest_snapshot(pid).gate_conclusion == "success"
+    events = store.list_audit_events(pid)
+    assert [e.event_type for e in events] == ["requested"]
+    assert events[0].actor_app_email == "ana@x"  # display-only attribution
+
+
+def test_promote_rerequest_adds_snapshot_and_re_reviewed_to_same_promotion(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=7))
+    h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
+    pid1 = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
+    pid2 = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
+    assert pid1 == pid2  # SAME Promotion (1:1 with the PR) — no fragmentation
+    assert len(store.list_snapshots(pid1)) == 2  # both snapshots retained
+    assert [e.event_type for e in store.list_audit_events(pid1)] == ["requested", "re_reviewed"]
+
+
+def test_list_promotions_scope_mine_filters_by_email(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))
+    client.post("/api/promote", json={"space_id": "s1"},
+                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"})
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=12))
+    client.post("/api/promote", json={"space_id": "s2"},
+                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "bob@x"})
+    r = client.get("/api/promotions?scope=mine", headers={"x-forwarded-email": "ana@x"})
+    assert r.status_code == 200
+    prs = [p["pr_number"] for p in r.json()["promotions"]]
+    assert prs == [11]  # only ana's
+
+
+def test_get_promotion_recovers_stored_review_without_calling_engine(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(review_gate="failure", number=9))
+    pid = client.post("/api/promote", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
+
+    # Recovery must NOT re-run the reviewer: blow up request_promotion so any call would fail.
+    def explode(*a, **k):
+        raise AssertionError("recovery must NOT call request_promotion (no reviewer re-run)")
+
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", explode)
+    r = client.get(f"/api/promotions/{pid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pr"] == {"number": 9, "url": "https://gh/pr/9"}
+    assert body["review"]["gate"]["conclusion"] == "failure"
+    assert body["review"]["gate"]["blocker_count"] == 1  # derived from the stored findings
+    assert body["review"]["timeline"] == [{"key": "review", "status": "pass"}]
+
+
+def test_promote_recovers_from_concurrent_create_race(monkeypatch, store):
+    # TOCTOU: a concurrent request created the Promotion for this PR between our find_by_pr and
+    # create. create raises DuplicatePRNumber; we must recover (treat as re_reviewed), not 500.
+    p = store.create_promotion(resource_id="s1", resource_kind="genie_space", resource_title="t",
+                               requester_email="ana@x", pr_number=7, pr_url="u", branch="b",
+                               current_phase="open", live_status=None)
+    real_find = store.find_by_pr
+    seq = {"n": 0}
+
+    def flaky_find(pr_number):  # None on the first lookup (the race window), real value after
+        seq["n"] += 1
+        return None if seq["n"] == 1 else real_find(pr_number)
+
+    monkeypatch.setattr(store, "find_by_pr", flaky_find)
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=7))
+    r = client.post("/api/promote", json={"space_id": "s1"},
+                    headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"})
+    assert r.status_code == 200
+    assert r.json()["promotion_id"] == p.id  # recovered onto the existing promotion, no 500
+    assert [e.event_type for e in store.list_audit_events(p.id)] == ["re_reviewed"]
+
+
+def test_re_review_only_requested_carries_app_email_and_bumps_updated_at(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=7))
+    h = {"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}
+    pid = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
+    created_at = store.get_promotion(pid).created_at
+    client.post("/api/promote", json={"space_id": "s1"}, headers=h)  # re-review
+    events = store.list_audit_events(pid)
+    assert events[0].event_type == "requested" and events[0].actor_app_email == "ana@x"
+    # re_reviewed carries NO app email (ADR-0005: actor_app_email only on `requested`)
+    assert events[1].event_type == "re_reviewed" and events[1].actor_app_email is None
+    assert store.get_promotion(pid).updated_at > created_at  # re-review bumped freshness
+
+
+def test_list_promotions_rejects_scope_all_until_lb5(store):
+    assert client.get("/api/promotions?scope=all").status_code == 400
+
+
+def test_get_promotion_404_for_unknown(store):
+    assert client.get("/api/promotions/nope").status_code == 404
+
+
+def test_promotions_endpoints_503_without_store():
+    engine_api.app.state.store = None  # explicit: no Lakebase bound
+    assert client.get("/api/promotions").status_code == 503
+    assert client.get("/api/promotions/x").status_code == 503
+
+
+def test_promote_still_works_without_store(monkeypatch):
+    # Local-without-Lakebase: the PR still opens; persistence is skipped (no promotion_id).
+    engine_api.app.state.store = None
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=42))
+    r = client.post("/api/promote", json={"space_id": "s"},
+                    headers={"x-forwarded-access-token": "t"})
+    assert r.status_code == 200 and "promotion_id" not in r.json()
+
+
 def test_spa_rejects_path_traversal(static_build):
     # The security-load-bearing guard: a `..` escape must NOT serve a file outside the static dir.
     # Call the route fn directly — httpx/Starlette would normalize `..` out of a URL before it

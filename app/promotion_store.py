@@ -151,6 +151,11 @@ class PromotionStore:
         self._b.insert_promotion(dataclasses.asdict(p))
         return p
 
+    def touch(self, promotion_id: str) -> None:
+        """Bump `updated_at` (e.g. on a re-review that adds a snapshot but no cache change), so
+        freshness/ordering reflect the activity even before the next reconcile."""
+        self._b.update_promotion(promotion_id, {"updated_at": self._clock()})
+
     def get_promotion(self, promotion_id: str) -> Optional[Promotion]:
         row = self._b.get_promotion(promotion_id)
         return _as(Promotion, row)

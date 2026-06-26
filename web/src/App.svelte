@@ -23,6 +23,10 @@
     })
     .catch(() => {});
 
+  // Recover-on-load (LB3): restore the most-recent promotion from its STORED snapshot — no reviewer
+  // re-run. Best-effort + independent of whoami; the live status resumes via the polling effect.
+  promotion.recover().catch(() => {});
+
   let tab = $state('spaces');
   const TABS: Tab[] = [
     { value: 'spaces', label: 'Meus espaços' },
