@@ -77,7 +77,7 @@ async function openFromHistory(
     r.fulfill({ json: { promotion: s, review, pr: PR, live_status: status, audit: [] } }));
   await page.route(`**/api/promote/${PR.number}/status`, (r) => r.fulfill({ json: status }));
   await page.goto('/');
-  await page.getByRole('tab', { name: 'Minhas promoções' }).click();
+  await page.getByRole('link', { name: 'Minhas promoções' }).click();
   await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();
   await page.getByRole('button', { name: /Abrir/ }).click();
   await expect(page.getByRole('heading', { name: 'Aprovação do Steward' })).toBeVisible();

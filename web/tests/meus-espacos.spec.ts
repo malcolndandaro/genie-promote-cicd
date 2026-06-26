@@ -16,9 +16,9 @@ test('lists the user spaces (OBO) and gates the request button until one is sele
   await page.route('**/api/spaces', oneSpace);
   await page.goto('/');
 
-  // Tabs shell present.
-  await expect(page.getByRole('tab', { name: 'Meus espaços' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: /Novo Genie Space/ })).toBeVisible();
+  // App shell sidebar present.
+  await expect(page.getByRole('link', { name: 'Meus espaços' })).toBeVisible();
+  await expect(page.getByRole('link', { name: /Novo Genie Space/ })).toBeVisible();
 
   // The space is listed as a select option.
   await expect(page.getByRole('option', { name: 'Recebíveis' })).toBeAttached();
@@ -33,10 +33,10 @@ test('lists the user spaces (OBO) and gates the request button until one is sele
   await expect(page.getByText('Genie Space', { exact: true })).toBeVisible();
 });
 
-test('switches to the "Novo Genie Space" tab and shows the placeholder', async ({ page }) => {
+test('navigates to the "Novo Genie Space" screen and shows the placeholder', async ({ page }) => {
   await page.route('**/api/spaces', oneSpace);
   await page.goto('/');
-  await page.getByRole('tab', { name: /Novo Genie Space/ }).click();
+  await page.getByRole('link', { name: /Novo Genie Space/ }).click();
   await expect(page.getByText('Em breve — assistente de criação', { exact: false })).toBeVisible();
 });
 

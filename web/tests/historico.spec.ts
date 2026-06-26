@@ -42,7 +42,7 @@ test('a non-admin sees only their promotions; opening a row shows the stored rev
   await page.route('**/api/promote', (r) => { promoteCalled = true; r.fulfill({ status: 500, json: {} }); });
   routes(page, { isAdmin: false });
   await page.goto('/');
-  await page.getByRole('tab', { name: 'Minhas promoções' }).click();
+  await page.getByRole('link', { name: 'Minhas promoções' }).click();
 
   await expect(page.getByText('Recebíveis')).toBeVisible();
   await expect(page.getByText('Todas (Steward/Admin)')).toHaveCount(0); // no scope toggle for a non-admin
@@ -57,7 +57,7 @@ test('a non-admin sees only their promotions; opening a row shows the stored rev
 test('an admin gets the scope toggle and can list all promotions', async ({ page }) => {
   routes(page, { isAdmin: true });
   await page.goto('/');
-  await page.getByRole('tab', { name: 'Minhas promoções' }).click();
+  await page.getByRole('link', { name: 'Minhas promoções' }).click();
 
   await expect(page.getByRole('button', { name: 'Todas (Steward/Admin)' })).toBeVisible();
   await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();

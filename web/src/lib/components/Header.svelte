@@ -1,3 +1,8 @@
+<!--
+  SUPERSEDED (UI1): the app shell's top bar is now an inline <header> in App.svelte (brand lives in
+  the Sidebar). This component is no longer mounted; UI2 will fold its remaining bits (identity,
+  role badge, GitHub link) into the shell header and then remove this file. Do not re-import it.
+-->
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
