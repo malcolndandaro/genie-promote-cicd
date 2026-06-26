@@ -77,6 +77,7 @@
       onPromote={promoteSpace}
       onOpenPromotion={openPromotion}
       onGoToNew={() => router.navigate('novo')}
+      promoting={promotion.phase === 'reviewing'}
     />
   {:else if router.route.id === 'espacos'}
     <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => router.navigate('novo')} />

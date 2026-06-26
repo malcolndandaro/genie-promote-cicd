@@ -60,7 +60,7 @@
       <Card>
         <div class="error-state" role="alert">
           <span class="error">Não foi possível abrir a promoção: {promotion.error}</span>
-          <Button variant="outline" onclick={() => detailId && promotion.openById(detailId)}>
+          <Button variant="outline" onclick={() => { if (detailId) void promotion.openById(detailId); }}>
             Tentar novamente
           </Button>
         </div>

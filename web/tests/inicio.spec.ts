@@ -74,6 +74,17 @@ test('a space card promote pre-selects the review flow on "Meus espaços"', asyn
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 });
 
+test('a COLD-LOAD of #/promocoes/:id opens the detail without re-running the reviewer', async ({ page }) => {
+  let promoteCalled = false;
+  await page.route('**/api/promote', (r) => { promoteCalled = true; r.fulfill({ status: 500, json: {} }); });
+  home(page);
+  await page.goto('/#/promocoes/promo-1'); // deep-link straight to the detail (recover path on load)
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('🟢 Pronto para promoção.')).toBeVisible();
+  await expect(page.getByRole('button', { name: '← Voltar para as promoções' })).toBeVisible();
+  expect(promoteCalled).toBe(false);
+});
+
 test('a recent promotion deep-links to its detail without re-running the reviewer', async ({ page }) => {
   let promoteCalled = false;
   await page.route('**/api/promote', (r) => { promoteCalled = true; r.fulfill({ status: 500, json: {} }); });

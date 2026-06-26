@@ -31,6 +31,7 @@
   {type}
   {onclick}
   disabled={disabled || loading}
+  aria-busy={loading}
   aria-describedby={ariaDescribedby}
   aria-label={ariaLabel}
   class={['btn', `btn--${variant}`, loading && 'btn--loading', cls]}

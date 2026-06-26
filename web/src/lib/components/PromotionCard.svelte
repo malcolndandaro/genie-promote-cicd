@@ -31,10 +31,12 @@
     </div>
     <div class="promo__meta">
       <StatusChip phase={p.current_phase} />
-      {#if p.pr_number}
-        <a class="promo__pr" href={p.pr_url ?? '#'} target="_blank" rel="noopener noreferrer">
+      {#if p.pr_number && p.pr_url}
+        <a class="promo__pr" href={p.pr_url} target="_blank" rel="noopener noreferrer">
           PR #{p.pr_number} ↗
         </a>
+      {:else if p.pr_number}
+        <span class="promo__pr promo__pr--plain">PR #{p.pr_number}</span>
       {/if}
       <time class="muted text-xs">{fmt(p.updated_at)}</time>
     </div>
@@ -94,5 +96,8 @@
     font-weight: 600;
     color: var(--accent-hover);
     white-space: nowrap;
+  }
+  .promo__pr--plain {
+    color: var(--muted-foreground);
   }
 </style>

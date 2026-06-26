@@ -92,7 +92,7 @@
     color: var(--muted-foreground);
     line-height: 1.45;
   }
-  @media (max-width: 720px) {
+  @media (max-width: 768px) {
     .flow {
       grid-template-columns: 1fr;
     }

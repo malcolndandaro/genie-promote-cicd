@@ -16,8 +16,10 @@
     onOpenPromotion: (summary: PromotionSummary) => void;
     /** Go to the authoring guide. */
     onGoToNew: () => void;
+    /** A promotion is already in flight — disable the cards to avoid a concurrent request. */
+    promoting?: boolean;
   }
-  let { onPromote, onOpenPromotion, onGoToNew }: Props = $props();
+  let { onPromote, onOpenPromotion, onGoToNew, promoting = false }: Props = $props();
 
   // Compose the existing OBO reads — no aggregate endpoint needed. Retryable via $state.
   // NB this duplicates the `getPromotions('mine')` that App's recover-on-load also issues; both are
@@ -67,7 +69,7 @@
       {:else}
         <div class="space-grid">
           {#each resources.slice(0, 6) as r (r.id)}
-            <SpaceCard resource={r} {onPromote} />
+            <SpaceCard resource={r} {onPromote} disabled={promoting} />
           {/each}
         </div>
       {/if}

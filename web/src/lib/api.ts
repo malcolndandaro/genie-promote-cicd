@@ -49,17 +49,6 @@ export async function getResources(): Promise<PromotableResource[]> {
   return (data.spaces ?? []).map(spaceToResource);
 }
 
-/** Run the full promotion review for a resource (OBO export + app-SP reviewer). */
-export async function postReview(resourceId: string): Promise<Review> {
-  const r = await fetch('/api/review', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ space_id: resourceId }),
-  });
-  if (!r.ok) throw await toError(r);
-  return (await r.json()) as Review;
-}
-
 /** The opened/updated promotion PR (GH2). */
 export interface PullRequestRef {
   number: number;
