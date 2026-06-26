@@ -84,3 +84,44 @@ or the Databricks SP. To provision (one-time, HITL):
 
 The app reads these at runtime (GH2 wires the read path: app.yaml `valueFrom` / runtime SDK). Never
 commit the `.pem`; if it ever transits an insecure channel, regenerate it in the App's settings.
+
+## Lakebase (durable promotion state / audit / cache) — provisioning + config (LB1, ADR-0005)
+
+The app persists promotions, review snapshots, and an append-only audit trail in **Lakebase
+(Databricks Postgres)** — a durable index + audit log + status cache over GitHub-as-truth (ADR-0005).
+It is provisioned **all-DABs, config-driven** (ADR-0004) and lives with the app (**dev target only** —
+the app is the dev front door; prod is just the promotion target, no app).
+
+**What deploys it:** the dev target in `databricks.yml` declares a `database_instances` resource
+(`promote_db`) and binds it to `promote_app` via the app's `database` resource. `bash
+scripts/deploy_dev.sh -p cerc-mlops-dev` (or `bundle deploy -t dev`) provisions the instance and the
+binding. The `/database/` API provisions an **autoscaling-backed** instance (CU_1 floor,
+scale-to-zero) — not a fixed bill.
+
+**Config knobs** (`databricks.yml` `variables:`, override with `--var` or per-target) — a new
+customer changes only these and redeploys:
+
+| Variable | Default | What |
+|---|---|---|
+| `lakebase_instance` | `genie-promote` | Lakebase instance name (isolation is per-workspace) |
+| `lakebase_database` | `databricks_postgres` | Postgres database the app uses |
+| `lakebase_capacity` | `CU_1` | instance SKU (autoscaling floor) |
+
+**How the app connects — no static password (US-11).** The app `database` binding grants the app SP
+`CAN_CONNECT_AND_CREATE` and makes the platform inject `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER`
+(the SP client id) / `PGSSLMODE`. The app mints a **short-lived OAuth credential** at connect time
+(`WorkspaceClient().database.generate_database_credential(instance_names=[…])`) and uses it as the
+Postgres password (`sslmode=require`). Nothing static is stored or committed.
+
+**Connectivity smoke** (`SELECT 1` via OAuth, no password):
+```bash
+python scripts/verify_lakebase.py --profile cerc-mlops-dev          # local operator (your identity)
+# on the deployed app the same logic runs as the SP off the injected PG* env
+```
+
+**First-deploy ordering / SP schema ownership.** DABs provisions the instance (waits for
+`AVAILABLE`) before binding the app (the binding references the instance via `${resources…}`). Per
+the `databricks-lakebase` skill, the SP must **create** the schema to own it — so **deploy the app
+before running it locally**; the app's idempotent startup migrations (LB2) create + own the schema as
+the SP. If you ran locally first and hit `permission denied for schema`, the schema is owned by your
+identity, not the SP — don't drop it without checking for data.
