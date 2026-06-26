@@ -9,6 +9,9 @@ export interface Whoami {
   email: string | null;
   steward: string | null;
   is_admin: boolean;
+  /** The source/CI repo the header's GitHub link points to (config-driven; the SPA falls back to a
+   * default if absent). */
+  repo_url?: string | null;
 }
 
 /**

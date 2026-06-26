@@ -39,9 +39,8 @@ test('promoting renders the review (finding + AI-trust + pipeline + gate) and th
   page,
 }) => {
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
-  await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 
   // The opened PR is surfaced with a link to GitHub.
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
@@ -75,9 +74,8 @@ test('reflects the live PR status (polled) as a badge in the PR banner', async (
       },
     }),
   );
-  await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   await expect(page.getByText('Checagens em execução')).toBeVisible(); // live phase badge (polled)
@@ -90,9 +88,8 @@ test('shows the animated running pipeline while the promotion is in flight', asy
     await gate;
     await route.fulfill({ json: { review, pr: PR } });
   });
-  await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 
   await expect(page.getByText('Executando pipeline de promoção…')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
@@ -123,9 +120,8 @@ test('renders a clean (success) review with no findings', async ({ page }) => {
       },
     }),
   );
-  await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 
   await expect(page.getByText('Nenhum achado — espaço limpo.')).toBeVisible();
   await expect(page.getByText('🟢 Pronto para promoção.')).toBeVisible();
@@ -147,9 +143,8 @@ test('a finding without suggestion/citation omits those lines', async ({ page })
       },
     }),
   );
-  await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 
   await expect(page.getByText('Referência fora do ambiente.')).toBeVisible();
   await expect(page.getByText('↳', { exact: false })).toHaveCount(0); // no suggestion line
@@ -159,9 +154,8 @@ test('shows an error state with retry when /api/promote fails', async ({ page })
   await page.route('**/api/promote', (route) =>
     route.fulfill({ status: 502, json: { detail: 'engine error: request_promotion' } }),
   );
-  await page.goto('/');
-  await page.getByLabel('Recurso').selectOption({ label: 'Recebíveis' });
-  await page.getByRole('button', { name: /Solicitar promoção/ }).click();
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 
   await expect(page.getByText(/Não foi possível solicitar a promoção/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();

@@ -175,6 +175,12 @@ def _is_admin(email: str | None) -> bool:
     return bool(email) and email.strip().lower() in _admin_emails()
 
 
+def _repo_url() -> str:
+    """The source/CI repo the header links to. Config-driven (`APP_REPO_URL`) with the accelerator's
+    own repo as the default — NO customer binding (ADR-0004): a fork sets its own URL + redeploys."""
+    return os.environ.get("APP_REPO_URL") or "https://github.com/malcolndandaro/genie-promote-cicd"
+
+
 @api.get("/whoami")
 def whoami(x_forwarded_email: str | None = Header(default=None)) -> dict:
     """The caller identity the platform forwards (OBO context) + the configured Steward + whether the
@@ -187,7 +193,7 @@ def whoami(x_forwarded_email: str | None = Header(default=None)) -> dict:
     server re-checks the role on `scope=all` (this flag is only a UI convenience).
     """
     return {"email": x_forwarded_email, "steward": os.environ.get("APP_STEWARD") or None,
-            "is_admin": _is_admin(x_forwarded_email)}
+            "is_admin": _is_admin(x_forwarded_email), "repo_url": _repo_url()}
 
 
 @api.get("/spaces")

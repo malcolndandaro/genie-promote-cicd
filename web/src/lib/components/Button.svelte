@@ -9,6 +9,8 @@
     onclick?: (e: MouseEvent) => void;
     class?: string;
     ariaDescribedby?: string;
+    /** Override the accessible name (e.g. to disambiguate identical-looking buttons in a grid). */
+    ariaLabel?: string;
     children: Snippet;
   }
 
@@ -20,6 +22,7 @@
     onclick,
     class: cls = '',
     ariaDescribedby,
+    ariaLabel,
     children,
   }: Props = $props();
 </script>
@@ -28,7 +31,9 @@
   {type}
   {onclick}
   disabled={disabled || loading}
+  aria-busy={loading}
   aria-describedby={ariaDescribedby}
+  aria-label={ariaLabel}
   class={['btn', `btn--${variant}`, loading && 'btn--loading', cls]}
 >
   {#if loading}<span class="btn__spinner" aria-hidden="true"></span>{/if}

@@ -1,20 +1,24 @@
 <script lang="ts">
-  import Header from './lib/components/Header.svelte';
-  import Tabs from './lib/components/Tabs.svelte';
-  import type { Tab } from './lib/components/Tabs.svelte';
+  import AppShell from './lib/components/AppShell.svelte';
+  import type { NavItem } from './lib/components/Sidebar.svelte';
+  import Topbar from './lib/components/Topbar.svelte';
+  import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
   import NovoEspaco from './screens/NovoEspaco.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
-  import type { Whoami } from './lib/types';
+  import { Router } from './lib/router.svelte';
+  import type { RouteId } from './lib/route';
+  import type { Whoami, PromotableResource } from './lib/types';
 
   // The shared promotion flow state (selection → review → approval).
   const promotion = new Promotion();
 
-  // OBO identity (drives the header badge + the review AI-trust badge + SV4's SoD). Display-only,
-  // so a failure is silent — the spaces error surfaces any re-auth need. The requester/steward
-  // identities feed the separation-of-duties model.
+  // Hash router — the URL is the single source of truth for the active screen.
+  const router = new Router();
+
+  // OBO identity (drives the header identity/role + the review AI-trust badge + SoD). Display-only.
   let who = $state<Whoami | null>(null);
   getWhoami()
     .then((w) => {
@@ -22,9 +26,9 @@
       promotion.viewerEmail = w.email;
       promotion.requesterEmail = w.email;
       promotion.steward = w.steward;
-      // Identity-derived role (replaces the old manual toggle): the viewer IS the Steward when their
-      // OBO email matches the configured steward. The approval view follows this + whether the
-      // promotion is theirs; the real SoD is still GitHub's gate.
+      // Identity-derived role: the viewer IS the Steward when their OBO email matches the configured
+      // steward. The approval view follows this + whether the promotion is theirs; the real SoD is
+      // still GitHub's gate.
       promotion.isSteward = !!(
         w.email && w.steward && w.email.toLowerCase() === w.steward.toLowerCase()
       );
@@ -32,63 +36,62 @@
     .catch(() => {});
 
   // Recover-on-load (LB3): restore the most-recent promotion from its STORED snapshot — no reviewer
-  // re-run. Best-effort + independent of whoami; the live status resumes via the polling effect.
-  promotion.recover().catch(() => {});
+  // re-run. ONLY on the "Meus espaços" screen, where the review renders in place. On the home the
+  // in-flight promotion shows in "Promoções recentes"; on a #/promocoes/:id deep-link openById loads
+  // the exact target — running recover there would race it and could surface the WRONG promotion.
+  if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  let tab = $state('spaces');
-  const TABS: Tab[] = [
-    { value: 'spaces', label: 'Meus espaços' },
-    { value: 'history', label: 'Minhas promoções' },
-    { value: 'new', label: '＋ Novo Genie Space' },
+  const NAV_ITEMS: NavItem[] = [
+    { id: 'inicio', label: 'Início', icon: 'home' },
+    { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
+    { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
+    { id: 'novo', label: '＋ Novo Genie Space', icon: 'plus-circle' },
   ];
 
-  // Open a promotion from the history list: load its stored snapshot + audit, then show it in the
-  // review view (the "Meus espaços" panel renders the active promotion). No reviewer re-run.
-  async function openFromHistory(summary: PromotionSummary): Promise<void> {
-    tab = 'spaces'; // switch first so the loading/review state renders in place (open() resets it)
-    await promotion.open(summary);
+  const SECTION_TITLE: Record<RouteId, string> = {
+    inicio: 'Início',
+    espacos: 'Meus espaços',
+    promocoes: 'Minhas promoções',
+    novo: 'Novo Genie Space',
+  };
+
+  // Start a promotion for a space and drop into the in-place review flow on "Meus espaços".
+  function promoteSpace(resource: PromotableResource): void {
+    promotion.select(resource);
+    promotion.requestPromotion();
+    router.navigate('espacos');
+  }
+
+  // Open a promotion's detail via its shareable deep-link (#/promocoes/:id) — the detail view loads
+  // the STORED snapshot (no reviewer re-run).
+  function openPromotion(summary: PromotionSummary): void {
+    router.navigate('promocoes', summary.id);
   }
 </script>
 
-<Header>
-  {#snippet right()}
-    {#if who?.email}
-      <span class="identity"><span class="identity__dot"></span>{who.email}</span>
-    {/if}
+<AppShell navItems={NAV_ITEMS} route={router.route}>
+  {#snippet header({ toggle, open })}
+    <Topbar title={SECTION_TITLE[router.route.id]} {who} {open} onToggle={toggle} />
   {/snippet}
-</Header>
 
-<main class="container page">
-  <div class="stack">
-    <Tabs tabs={TABS} bind:active={tab} idBase="promote" />
-    <div role="tabpanel" id={`promote-panel-${tab}`} aria-labelledby={`promote-tab-${tab}`} tabindex="-1">
-      {#if tab === 'spaces'}
-        <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => (tab = 'new')} />
-      {:else if tab === 'history'}
-        <MinhasPromocoes {who} onOpen={openFromHistory} />
-      {:else}
-        <NovoEspaco />
-      {/if}
-    </div>
-  </div>
-</main>
-
-<style>
-  .page {
-    padding-top: var(--space-6);
-    padding-bottom: var(--space-6);
-  }
-  .identity {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.92);
-  }
-  .identity__dot {
-    width: 0.5rem;
-    height: 0.5rem;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-</style>
+  {#if router.route.id === 'inicio'}
+    <Home
+      onPromote={promoteSpace}
+      onOpenPromotion={openPromotion}
+      onGoToNew={() => router.navigate('novo')}
+      promoting={promotion.phase === 'reviewing'}
+    />
+  {:else if router.route.id === 'espacos'}
+    <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => router.navigate('novo')} />
+  {:else if router.route.id === 'promocoes'}
+    <MinhasPromocoes
+      {who}
+      {promotion}
+      onOpen={openPromotion}
+      detailId={router.route.param}
+      onBack={() => router.navigate('promocoes')}
+    />
+  {:else}
+    <NovoEspaco />
+  {/if}
+</AppShell>

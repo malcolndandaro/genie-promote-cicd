@@ -35,6 +35,14 @@
   --primary: var(--cerc-ink);
   --primary-hover: var(--cerc-ink-600);
   --primary-foreground: #ffffff;
+  /* on-primary tints (sidebar + dark chrome) — kept as tokens so a light-sidebar theme overrides
+     in one place (ADR-0004), never as raw rgba/#fff in components. */
+  --primary-foreground-muted: rgba(255, 255, 255, 0.78);
+  --primary-foreground-faint: rgba(255, 255, 255, 0.55);
+  --primary-surface-hover: rgba(255, 255, 255, 0.07);
+  --primary-border: rgba(255, 255, 255, 0.08);
+  /* modal/drawer scrim — the ink color at 45% (same hue as the chrome). */
+  --scrim: color-mix(in srgb, var(--cerc-ink) 45%, transparent);
 
   --accent: var(--cerc-teal);
   --accent-hover: var(--cerc-teal-700);
@@ -77,6 +85,12 @@
   --space-4: 1rem;
   --space-5: 1.5rem;
   --space-6: 2rem;
+
+  /* app shell (UI1): the navigation rail width, the sticky header height, and the comfortable
+     reading width of the content column. */
+  --sidebar-w: 248px;
+  --header-h: 60px;
+  --content-max: 1000px;
 }
 
 *,

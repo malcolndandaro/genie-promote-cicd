@@ -46,6 +46,9 @@ env:
   # server unions APP_ADMINS + APP_STEWARDS + APP_STEWARD.
   - name: APP_ADMINS
     value: "malcoln.dandaro@databricks.com"
+  # NOTE: the GitHub icon's target is config-driven (ADR-0004) via APP_REPO_URL, which defaults in the
+  # backend (`engine_api/main.py:_repo_url`) to the accelerator's own repo — the SINGLE source of
+  # truth. A fork overrides it by setting APP_REPO_URL here; left unset, the default applies.
   # Lakebase is a HARD dependency (ADR-0005): require the durable store at startup, so a bundle that
   # drops the `database` binding (no PGHOST injected) fails fast + loud instead of silently degrading.
   - name: APP_REQUIRE_STORE

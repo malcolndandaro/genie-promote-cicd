@@ -87,7 +87,7 @@ test('recovers the stored promotion on load WITHOUT re-running the reviewer', as
     route.fulfill({ json: { audit } }),
   );
 
-  await page.goto('/');
+  await page.goto('/#/espacos');
 
   // The recovered promotion renders: PR banner + the stored finding + the live phase badge (polled).
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
@@ -111,8 +111,8 @@ test('no stored promotions -> normal selection flow (no recovery)', async ({ pag
   await page.route('**/api/promotions?scope=mine', (route) =>
     route.fulfill({ json: { promotions: [] } }),
   );
-  await page.goto('/');
-  // Nothing recovered: the empty review area, the selector is ready to drive a fresh request.
+  await page.goto('/#/espacos');
+  // Nothing recovered: the empty review area, the space card is ready to drive a fresh request.
   await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
-  await expect(page.getByLabel('Recurso')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeVisible();
 });
