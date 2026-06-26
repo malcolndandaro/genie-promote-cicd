@@ -22,6 +22,12 @@
       promotion.viewerEmail = w.email;
       promotion.requesterEmail = w.email;
       promotion.steward = w.steward;
+      // Identity-derived role (replaces the old manual toggle): the viewer IS the Steward when their
+      // OBO email matches the configured steward. The approval view follows this + whether the
+      // promotion is theirs; the real SoD is still GitHub's gate.
+      promotion.isSteward = !!(
+        w.email && w.steward && w.email.toLowerCase() === w.steward.toLowerCase()
+      );
     })
     .catch(() => {});
 

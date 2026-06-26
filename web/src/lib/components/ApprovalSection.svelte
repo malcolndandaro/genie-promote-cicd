@@ -1,15 +1,10 @@
 <script lang="ts">
-  import type { Promotion, Persona } from '../promotion.svelte';
+  import type { Promotion } from '../promotion.svelte';
 
   interface Props {
     promotion: Promotion;
   }
   let { promotion }: Props = $props();
-
-  const personas: { value: Persona; label: string }[] = [
-    { value: 'author', label: 'Autor' },
-    { value: 'steward', label: 'Steward' },
-  ];
 
   // The live PR/deploy state drives the Steward's action (GH4): the gate to approve only exists
   // once the PR is merged and the prod deployment is waiting.
@@ -21,38 +16,23 @@
 <div class="approval">
   <h3 class="approval__heading">Aprovação do Steward</h3>
 
-  <div class="approval__row">
-    <span class="text-sm muted">Agir como:</span>
-    <div class="seg" role="group" aria-label="Agir como">
-      {#each personas as p (p.value)}
-        <button
-          type="button"
-          class={['seg__btn', promotion.persona === p.value && 'seg__btn--active']}
-          aria-pressed={promotion.persona === p.value}
-          onclick={() => promotion.setPersona(p.value)}
-        >
-          {p.label}
-        </button>
-      {/each}
-    </div>
-  </div>
-
   <p id="approval-identities" class="text-xs muted approval__identities">
     Solicitante (OBO): {promotion.requesterEmail ?? '—'} · Steward: {promotion.steward ?? '—'}
+    {#if promotion.isSteward}· você é o Steward{/if}
   </p>
 
   {#if promotion.approval.state === 'author'}
-    <p class="text-sm muted">
-      Aguardando o Steward aprovar. Você é o solicitante — não pode aprovar a própria promoção (SoD).
-    </p>
+    {#if promotion.isMine}
+      <p class="text-sm muted">
+        Aguardando o Steward aprovar. Você é o solicitante — não pode aprovar a própria promoção (SoD).
+      </p>
+    {:else}
+      <p class="text-sm muted">Apenas o Steward aprova esta promoção.</p>
+    {/if}
   {:else if promotion.approval.state === 'blocked'}
     <div class="msg msg--fail" role="alert">
       Promoção bloqueada por achados BLOCKER — resolva (ex.: /genie-fix) antes de aprovar.
     </div>
-  {:else if promotion.approval.state === 'sod'}
-    <p class="text-sm muted">
-      Segregação de funções: o solicitante não pode aprovar a própria promoção.
-    </p>
   {:else if phase === 'awaiting_approval' && deployRunUrl}
     <!-- The Steward approves on GitHub with their OWN identity (prevent_self_review holds). -->
     <a
@@ -76,13 +56,13 @@
     </div>
   {:else}
     <p class="text-sm muted">
-      Após o merge do PR (checagens verdes), o deploy de produção aguardará a sua aprovação aqui.
+      Após o merge do PR (checagens verdes), o deploy de produção aguardará a aprovação do Steward aqui.
     </p>
   {/if}
 
   <p class="text-xs muted approval__note">
-    A aprovação acontece no GitHub com a sua identidade; a separação de funções é imposta no CI/CD
-    (GitHub Environment: revisor obrigatório + auto-revisão bloqueada).
+    A aprovação acontece no GitHub com a identidade do Steward; a separação de funções é imposta no
+    CI/CD (GitHub Environment: revisor obrigatório + auto-revisão bloqueada).
   </p>
 </div>
 
@@ -97,39 +77,8 @@
   .approval__heading {
     font-size: 0.95rem;
   }
-  .approval__row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-  }
   .approval__identities {
     margin: 0;
-  }
-  .seg {
-    display: inline-flex;
-    padding: 0.2rem;
-    background: var(--surface-inset);
-    border-radius: var(--radius-pill);
-  }
-  .seg__btn {
-    appearance: none;
-    border: none;
-    background: transparent;
-    font-family: inherit;
-    font-size: 0.82rem;
-    font-weight: 500;
-    color: var(--muted-foreground);
-    padding: 0.35rem 0.9rem;
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-    transition:
-      background-color 0.15s ease,
-      color 0.15s ease;
-  }
-  .seg__btn--active {
-    background: var(--surface);
-    color: var(--primary);
-    box-shadow: var(--shadow-sm);
   }
   .msg {
     border-radius: var(--radius-sm);

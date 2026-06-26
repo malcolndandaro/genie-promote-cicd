@@ -27,11 +27,10 @@ import {
 } from './api';
 
 export type PromotionPhase = 'idle' | 'reviewing' | 'reviewed' | 'error';
-export type Persona = 'author' | 'steward';
 
-/** Whether the Steward MAY release the gate — mirrors app_logic.can_approve + the BLOCKER gate.
+/** The approval view for the CURRENT promotion + viewer (mirrors can_approve + the BLOCKER gate).
  * The actual approval happens on GitHub (the Environment gate), reflected via `liveStatus`. */
-export type ApprovalState = 'author' | 'blocked' | 'sod' | 'ready';
+export type ApprovalState = 'author' | 'blocked' | 'ready';
 
 export class Promotion {
   resource = $state<PromotableResource | null>(null);
@@ -48,16 +47,17 @@ export class Promotion {
   audit = $state<AuditEvent[]>([]);
 
   // --- separation of duties (SV4/GH4) ---
-  /** Demo persona toggle: act as the Autor (requester) or the Steward (approver). */
-  persona = $state<Persona>('author');
   /** The requester of the CURRENT promotion view (display-only): the signed-in viewer for a fresh
-   * request, or the stored requester when a promotion is opened from history (so an admin's
+   * request, or the stored requester when a promotion is opened from history (so a Steward's
    * cross-user view attributes the real requester, not themselves). */
   requesterEmail = $state<string | null>(null);
   /** The signed-in viewer's OBO email (from /api/whoami) — the baseline requester for a fresh flow. */
   viewerEmail = $state<string | null>(null);
-  /** The configured Steward (from /api/whoami.steward) — the distinct approver. */
+  /** The configured Steward (from /api/whoami.steward) — the distinct approver, shown in the UI. */
   steward = $state<string | null>(null);
+  /** Whether the SIGNED-IN viewer IS the Steward (identity-derived from /api/whoami, not a toggle).
+   * Drives whether the approval view is shown — replaces the old manual Autor/Steward switch. */
+  isSteward = $state(false);
 
   /** The selected resource id (or '' for none) — convenient for binding a Select. */
   get selectedId(): string {
@@ -69,31 +69,25 @@ export class Promotion {
     return this.review?.gate.conclusion === 'failure';
   }
 
-  /** Who would approve given the current persona. */
-  get approver(): string | null {
-    return this.persona === 'steward' ? this.steward : this.requesterEmail;
+  /** Whether the CURRENT promotion was requested by the signed-in viewer (it's "mine"). */
+  get isMine(): boolean {
+    return !!(this.viewerEmail && this.requesterEmail &&
+              this.viewerEmail.toLowerCase() === this.requesterEmail.toLowerCase());
   }
 
   /**
-   * The approval decision (mirrors can_approve + the BLOCKER gate).
+   * The approval view for the current promotion + the signed-in viewer. Identity-derived (no manual
+   * toggle): if the promotion is MINE I only ever wait for the Steward (even if I'm also a Steward —
+   * separation of duties); a Steward viewing SOMEONE ELSE'S promotion (opened from "Todas") gets the
+   * approval affordance.
    *
-   * TRUST BOUNDARY: this client-side check runs on DISPLAY-ONLY identities (`requesterEmail` from
-   * `x-forwarded-email`, `steward` from config) — it's a faithful PREVIEW of the policy, not
-   * enforcement. The real separation of duties is the CI/CD GitHub Environment gate (required
-   * reviewer + prevent_self_review). A future multi-user/prod path must add an `/api/approve`
-   * endpoint that resolves the approver from the OBO TOKEN server-side and re-checks can_approve.
+   * TRUST BOUNDARY: a DISPLAY-ONLY preview on proxy-forwarded identities — the real SoD is the GitHub
+   * Environment gate (required reviewer + prevent_self_review), which enforces it on GitHub identity.
    */
   get approval(): { state: ApprovalState; canApprove: boolean } {
-    if (this.persona !== 'steward') return { state: 'author', canApprove: false };
+    if (this.isMine || !this.isSteward) return { state: 'author', canApprove: false };
     if (this.hasBlocker) return { state: 'blocked', canApprove: false };
-    // SoD: the requester can never approve their own promotion (also blocks a null/misconfigured
-    // steward — the safe direction).
-    if (!this.approver || this.approver === this.requesterEmail) return { state: 'sod', canApprove: false };
     return { state: 'ready', canApprove: true };
-  }
-
-  setPersona(p: Persona): void {
-    this.persona = p;
   }
 
   /** Pick a resource. A new selection invalidates any prior verdict so nothing misleads. */
