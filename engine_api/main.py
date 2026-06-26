@@ -37,6 +37,7 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "app"))
 import app_logic  # noqa: E402
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
+import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 
 logger = logging.getLogger("engine_api")
@@ -250,9 +251,22 @@ def promote(
 
 @api.get("/promote/{number}/status")
 def promote_status(number: int) -> dict:
-    """GH3: live status of a promotion PR (checks + merge + prod deploy/gate). Read as the BOT
-    (app SP) — no OBO token required; the platform proxy already gates who reaches the app."""
-    return _engine_call("promotion_status", lambda: app_logic.promotion_status(number))
+    """GH3 + LB4: live status of a promotion PR (checks + merge + prod deploy/gate), read as the BOT
+    (app SP). On each read it RECONCILES the persisted promotion against this live status — appending
+    any newly-reached audit events (GitHub-sourced identities) + refreshing the cached status — so
+    the audit trail self-heals + a reload renders the cached status instantly. Reflect, never assert."""
+    status = _engine_call("promotion_status", lambda: app_logic.promotion_status(number))
+    store = getattr(app.state, "store", None)
+    if store is not None:
+        promotion = store.find_by_pr(number)
+        if promotion is not None:
+            # github_factory is lazy: reconcile builds the bot only if it must attribute a new
+            # merge/approval (a transition), so the 5s poll pays nothing extra on a steady state.
+            try:
+                reconcile_mod.reconcile(store, promotion, status, app_logic.github_app_factory)
+            except Exception:  # noqa: BLE001 — a reconcile hiccup must not break the status read
+                logger.exception("reconcile failed for PR #%s", number)
+    return status
 
 
 # --- LB3: durable history + recover-on-open (no reviewer re-run) ------------
@@ -270,6 +284,14 @@ def _promotion_summary(p) -> dict:
             "resource_title": p.resource_title, "pr_number": p.pr_number, "pr_url": p.pr_url,
             "current_phase": p.current_phase, "terminal": p.terminal,
             "created_at": p.created_at, "updated_at": p.updated_at}
+
+
+def _audit_event(e) -> dict:
+    """Serialize an audit event for the SPA trail (LB4). `actor_github_login` is the AUTHORITATIVE
+    governance identity; `actor_app_email` is display-only (present only on `requested`)."""
+    return {"seq": e.seq, "event_type": e.event_type, "occurred_at": e.occurred_at,
+            "actor_github_login": e.actor_github_login, "actor_app_email": e.actor_app_email,
+            "github_event_at": e.github_event_at, "detail": e.detail}
 
 
 def _snapshot_to_review(snap) -> dict:
@@ -315,7 +337,21 @@ def get_promotion(promotion_id: str) -> dict:
         "promotion": _promotion_summary(p),
         "review": _snapshot_to_review(snap) if snap else None,
         "pr": {"number": p.pr_number, "url": p.pr_url} if p.pr_number else None,
+        # The cached status lets the SPA render the phase badge IMMEDIATELY on load (LB4), before the
+        # first live poll lands. The audit trail (append-only, GitHub-attributed) drives the trail view.
+        "live_status": p.live_status,
+        "audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)],
     }
+
+
+@api.get("/promotions/{promotion_id}/audit")
+def get_promotion_audit(promotion_id: str) -> dict:
+    """The ordered, append-only audit trail for a promotion (LB4) — refreshed by the SPA as the
+    status poll reconciles, so the trail accrues live as the PR progresses."""
+    store = _require_store()
+    if store.get_promotion(promotion_id) is None:
+        raise HTTPException(status_code=404, detail="promoção não encontrada")
+    return {"audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)]}
 
 
 # Mount the API twice: at root (legacy engine-API contract) and under /api (what the SPA calls).

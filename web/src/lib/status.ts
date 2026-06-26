@@ -13,6 +13,19 @@ export const PHASE_LABEL: Record<PromotePhase, string> = {
   closed: 'PR fechado',
 };
 
+/** PT labels for the durable audit-trail event types (LB4). */
+export const EVENT_LABEL: Record<string, string> = {
+  requested: 'Promoção solicitada',
+  re_reviewed: 'Revisão refeita',
+  pr_opened: 'PR aberto',
+  pr_review_approved: 'Revisão do PR aprovada',
+  merged: 'Merge para main',
+  deploy_approved: 'Deploy aprovado (gate liberado)',
+  deployed: 'Implantado em produção',
+  failed: 'Falha',
+  closed: 'PR fechado (abandonado)',
+};
+
 export type BadgeTone = 'neutral' | 'accent' | 'success' | 'warning' | 'destructive';
 
 export function phaseTone(phase: PromotePhase): BadgeTone {

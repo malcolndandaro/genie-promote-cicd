@@ -7,6 +7,7 @@
   import Pipeline from '../lib/components/Pipeline.svelte';
   import ReviewPanel from '../lib/components/ReviewPanel.svelte';
   import ApprovalSection from '../lib/components/ApprovalSection.svelte';
+  import AuditTrail from '../lib/components/AuditTrail.svelte';
   import { getResources, isAuthError } from '../lib/api';
   import { kindMeta } from '../lib/resources';
   import { pendingTimeline } from '../lib/pipeline';
@@ -27,9 +28,13 @@
   const TERMINAL = new Set(['deployed', 'closed', 'deploy_failed']);
   $effect(() => {
     if (!promotion.pr) return;
+    // The status poll reconciles server-side (LB4) — so refresh the audit trail alongside it to
+    // surface newly-recorded events. Run both now + every 5s until a terminal phase.
     promotion.refreshStatus();
+    promotion.refreshAudit();
     const id = setInterval(async () => {
       await promotion.refreshStatus();
+      await promotion.refreshAudit();
       if (promotion.liveStatus && TERMINAL.has(promotion.liveStatus.phase)) clearInterval(id);
     }, 5000);
     return () => clearInterval(id);
@@ -149,6 +154,11 @@
         <ApprovalSection {promotion} />
       {/snippet}
     </ReviewPanel>
+    {#if promotion.promotionId}
+      <div class="audit-section">
+        <AuditTrail events={promotion.audit} />
+      </div>
+    {/if}
   {/if}
 </Card>
 
@@ -201,6 +211,11 @@
     gap: var(--space-2);
   }
   .review-running {
+    margin-top: var(--space-5);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+  }
+  .audit-section {
     margin-top: var(--space-5);
     padding-top: var(--space-5);
     border-top: 1px solid var(--border);

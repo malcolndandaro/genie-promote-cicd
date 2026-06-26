@@ -190,6 +190,24 @@ _OPEN_PR = {"number": 1, "state": "open", "merged": False, "head": {"sha": "s"},
 _MERGED_PR = {"number": 1, "state": "closed", "merged": True, "head": {"sha": "s"}, "html_url": "u"}
 
 
+def test_audit_facts_returns_github_merger_and_approver_with_timestamps():
+    # LB4: the cold-path enrichment reconcile uses for GitHub-sourced governance identities.
+    pull = {**_MERGED_PR, "merged_by": {"login": "PSPedro176"}, "merged_at": "2026-06-26T13:00:00Z"}
+    reviews = [
+        {"user": {"login": "someone"}, "state": "COMMENTED", "submitted_at": "2026-06-26T11:00:00Z"},
+        {"user": {"login": "PSPedro176"}, "state": "APPROVED", "submitted_at": "2026-06-26T12:00:00Z"},
+    ]
+    facts = _status_transport(pull, [], [], reviews=reviews).audit_facts(1)
+    assert facts == {"merged_by": "PSPedro176", "merged_at": "2026-06-26T13:00:00Z",
+                     "review_approver": "PSPedro176", "review_approved_at": "2026-06-26T12:00:00Z"}
+
+
+def test_audit_facts_tolerant_when_unmerged_and_no_approval():
+    facts = _status_transport(_OPEN_PR, [], [], reviews=[]).audit_facts(1)
+    assert facts == {"merged_by": None, "merged_at": None,
+                     "review_approver": None, "review_approved_at": None}
+
+
 def test_status_checks_running_when_open():
     s = _status_transport(_OPEN_PR, [{"status": "in_progress", "conclusion": None}], []).get_status(1)
     assert s["checks"] == "pending" and s["merged"] is False and s["phase"] == "checks_running"

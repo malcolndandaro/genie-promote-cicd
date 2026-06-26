@@ -69,6 +69,8 @@ export interface PullRequestRef {
 export interface PromoteResult {
   review: Review;
   pr: PullRequestRef;
+  /** The persisted Promotion id (LB3) — present when a durable store is bound (the deployed app). */
+  promotion_id?: string;
 }
 
 /**
@@ -105,11 +107,25 @@ export interface PromotionSummary {
   updated_at: string;
 }
 
-/** A Promotion + its latest STORED Review Snapshot + PR ref — the recover-on-open payload. */
+/** One append-only audit event (LB4). `actor_github_login` is the AUTHORITATIVE governance identity;
+ * `actor_app_email` is display-only (present only on `requested`). */
+export interface AuditEvent {
+  seq: number;
+  event_type: string;
+  occurred_at: string;
+  actor_github_login: string | null;
+  actor_app_email: string | null;
+  github_event_at: string | null;
+  detail: Record<string, unknown> | null;
+}
+
+/** A Promotion + its latest STORED Review Snapshot + PR ref + cached status + audit trail (LB3/LB4). */
 export interface PromotionDetail {
   promotion: PromotionSummary;
   review: Review | null;
   pr: PullRequestRef | null;
+  live_status: PromoteStatus | null;
+  audit: AuditEvent[];
 }
 
 /** The caller's promotions, newest first (LB3 `scope=mine`; `scope=all` is role-gated in LB5). */
@@ -118,9 +134,15 @@ export async function getPromotions(scope: 'mine' | 'all' = 'mine'): Promise<Pro
   return data.promotions ?? [];
 }
 
-/** A single promotion + its stored review + PR ref — renders WITHOUT re-running the reviewer. */
+/** A single promotion + its stored review + PR ref + audit — renders WITHOUT re-running the reviewer. */
 export function getPromotionDetail(id: string): Promise<PromotionDetail> {
   return getJSON<PromotionDetail>(`/api/promotions/${id}`);
+}
+
+/** The append-only audit trail for a promotion (LB4) — refreshed as the status poll reconciles. */
+export async function getPromotionAudit(id: string): Promise<AuditEvent[]> {
+  const data = await getJSON<{ audit: AuditEvent[] }>(`/api/promotions/${id}/audit`);
+  return data.audit ?? [];
 }
 
 /** Live promotion phases (GH3) — where the PR actually is, read from GitHub by the bot. */

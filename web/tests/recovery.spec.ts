@@ -68,11 +68,22 @@ test('recovers the stored promotion on load WITHOUT re-running the reviewer', as
     route.fulfill({ status: 500, json: { detail: 'promote must not be called on recovery' } });
   });
 
+  const audit = [
+    { seq: 1, event_type: 'requested', occurred_at: '2026-06-26T10:00:00Z',
+      actor_github_login: null, actor_app_email: 'ana@databricks.com', github_event_at: null, detail: null },
+    { seq: 2, event_type: 'pr_opened', occurred_at: '2026-06-26T10:00:05Z',
+      actor_github_login: null, actor_app_email: null, github_event_at: null, detail: null },
+    { seq: 3, event_type: 'merged', occurred_at: '2026-06-26T10:05:00Z',
+      actor_github_login: 'PSPedro176', actor_app_email: null, github_event_at: '2026-06-26T10:05:00Z', detail: null },
+  ];
   await page.route('**/api/promotions?scope=mine', (route) =>
     route.fulfill({ json: { promotions: [summary] } }),
   );
   await page.route(`**/api/promotions/${summary.id}`, (route) =>
-    route.fulfill({ json: { promotion: summary, review, pr: PR } }),
+    route.fulfill({ json: { promotion: summary, review, pr: PR, live_status: null, audit } }),
+  );
+  await page.route(`**/api/promotions/${summary.id}/audit`, (route) =>
+    route.fulfill({ json: { audit } }),
   );
 
   await page.goto('/');
@@ -83,6 +94,13 @@ test('recovers the stored promotion on load WITHOUT re-running the reviewer', as
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
   await expect(page.getByText('Checagens em execução')).toBeVisible(); // live status resumed
   await expect(page.getByRole('link', { name: /Ver no GitHub/ })).toHaveAttribute('href', PR.url);
+
+  // The audit trail (LB4): GitHub-attributed governance events. Scope to the audit section so the
+  // assertions don't collide with the pipeline step of the same name ("Merge para main — pendente").
+  await expect(page.getByText('Trilha de auditoria')).toBeVisible();
+  const trail = page.locator('.audit');
+  await expect(trail.getByText('Merge para main', { exact: true })).toBeVisible();
+  await expect(trail.getByText('PSPedro176')).toBeVisible(); // authoritative GitHub identity
 
   // The clincher: the reviewer was never re-run.
   expect(promoteCalled).toBe(false);

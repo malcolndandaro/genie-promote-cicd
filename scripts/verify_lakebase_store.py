@@ -105,6 +105,9 @@ def main() -> int:
         evs = store.list_audit_events(p.id)
         assert [e.event_type for e in evs] == ["requested", "pr_opened", "merged"], "ordered by seq"
         assert evs[0].actor_app_email == "verify@acme.com" and evs[2].actor_github_login == "PSPedro176"
+        # Partial unique index: re-appending a milestone is a no-op (the concurrent-reconcile guard).
+        assert store.append_audit_event(p.id, "merged", actor_github_login="x") is None, "dup milestone skipped"
+        assert [e.event_type for e in store.list_audit_events(p.id)].count("merged") == 1, "no dup row"
 
         store.update_cache(p.id, current_phase="deployed",
                            live_status={"phase": "deployed", "merged": True}, terminal=True)

@@ -18,8 +18,10 @@ import {
   getPromoteStatus,
   getPromotions,
   getPromotionDetail,
+  getPromotionAudit,
   type PullRequestRef,
   type PromoteStatus,
+  type AuditEvent,
 } from './api';
 
 export type PromotionPhase = 'idle' | 'reviewing' | 'reviewed' | 'error';
@@ -38,6 +40,10 @@ export class Promotion {
   pr = $state<PullRequestRef | null>(null);
   /** Live PR/CI/deploy status (GH3) — polled from GitHub via the bot; reflects, never asserts. */
   liveStatus = $state<PromoteStatus | null>(null);
+  /** The persisted Promotion id (LB3) — drives the audit-trail fetch (LB4). */
+  promotionId = $state<string | null>(null);
+  /** The append-only, GitHub-attributed audit trail (LB4) — accrues as the poll reconciles. */
+  audit = $state<AuditEvent[]>([]);
 
   // --- separation of duties (SV4/GH4) ---
   /** Demo persona toggle: act as the Autor (requester) or the Steward (approver). */
@@ -92,6 +98,20 @@ export class Promotion {
     this.phase = 'idle';
     this.pr = null;
     this.liveStatus = null;
+    this.promotionId = null;
+    this.audit = [];
+  }
+
+  /** Refresh the audit trail (LB4) for the active promotion. Best-effort: keep the last on error. */
+  async refreshAudit(): Promise<void> {
+    const id = this.promotionId;
+    if (!id) return;
+    try {
+      const events = await getPromotionAudit(id);
+      if (this.promotionId === id) this.audit = events;
+    } catch {
+      /* transient — keep the last known trail */
+    }
   }
 
   /** Poll the live status of the open PR (bot read). Keeps the last value on a transient error. */
@@ -124,7 +144,9 @@ export class Promotion {
       if (this.resource?.id !== id) return; // selection changed mid-flight — drop the stale result
       this.review = res.review;
       this.pr = res.pr;
+      this.promotionId = res.promotion_id ?? null;
       this.phase = 'reviewed';
+      void this.refreshAudit(); // show the `requested` event immediately
     } catch (e) {
       if (this.resource?.id !== id) return;
       this.error = e instanceof Error ? e.message : String(e);
@@ -157,6 +179,9 @@ export class Promotion {
       };
       this.review = detail.review;
       this.pr = detail.pr;
+      this.promotionId = summary.id;
+      this.liveStatus = detail.live_status; // cached status -> the phase badge renders immediately
+      this.audit = detail.audit ?? [];
       this.phase = 'reviewed';
       return true;
     } catch {

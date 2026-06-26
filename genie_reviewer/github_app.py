@@ -268,13 +268,45 @@ class GitHubApp:
         status = wf.get("status")  # queued | in_progress | completed | waiting (gate pending)
         conclusion = wf.get("conclusion")
         run_id = wf.get("id")
-        # Who released the gate (GH4) — only fetch once the deploy has SUCCEEDED (the only state the
-        # UI renders the approver), so polling doesn't re-hit /approvals every tick. Best-effort.
-        approver = (self._deploy_approver(run_id)
-                    if run_id and status == "completed" and conclusion == "success" else None)
+        # Who released the gate (GH4 + LB4's deploy_approved attribution) — fetch once the deploy has
+        # COMPLETED (success OR failure), so the Steward's identity is captured for the audit even on
+        # a failed deploy. Only on `completed` (not every polling tick), so /approvals isn't hammered.
+        approver = self._deploy_approver(run_id) if run_id and status == "completed" else None
         return {"status": status, "conclusion": conclusion,
                 "waiting_approval": status == "waiting", "run_url": wf.get("html_url"),
                 "run_id": run_id, "approver": approver}
+
+    def audit_facts(self, number: int) -> dict:
+        """GitHub-sourced governance identities + timestamps for the durable audit trail (LB4).
+
+        Cold path: reconcile calls this ONLY when it is about to append a `merged`/`pr_review_approved`
+        event (a real transition, idempotent) — never on the hot 5s status poll — so the extra reads
+        don't tax the poll. Returns the PR's merger + the latest approving reviewer (each with its
+        GitHub login + timestamp). The deploy gate's approver comes from `get_status` (already read).
+        Tolerant: any field GitHub doesn't expose is None."""
+        _, pr = self._api("GET", self._repo_path(f"/pulls/{number}"), "get pull (audit)")
+        merged_by = (pr.get("merged_by") or {}).get("login")
+        merged_at = pr.get("merged_at")
+        approver, approved_at = None, None
+        status, reviews = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/pulls/{number}/reviews')}",
+            self._headers(self._token()), None)
+        if status == 200 and reviews:
+            latest: dict[str, tuple] = {}  # reviewer -> (state, submitted_at), latest wins
+            for r in reviews:
+                login = (r.get("user") or {}).get("login")
+                state = r.get("state")
+                if not login:
+                    continue
+                if state in ("APPROVED", "CHANGES_REQUESTED"):
+                    latest[login] = (state, r.get("submitted_at"))
+                elif state == "DISMISSED":
+                    latest.pop(login, None)
+            for login, (state, at) in latest.items():
+                if state == "APPROVED":
+                    approver, approved_at = login, at  # an approval stands -> attribute it
+        return {"merged_by": merged_by, "merged_at": merged_at,
+                "review_approver": approver, "review_approved_at": approved_at}
 
     def _deploy_approver(self, run_id: int) -> str | None:
         """The GitHub login that approved the deployment (the Steward) — read from the run's

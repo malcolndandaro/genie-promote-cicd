@@ -235,6 +235,13 @@ def _github_app(profile: str | None = None, *, client: WorkspaceClient | None = 
     )
 
 
+def github_app_factory(profile: str | None = None) -> GitHubApp:
+    """A no-arg-friendly factory for the bot client (app SP). Used by reconcile (LB4) to fetch audit
+    facts lazily — only when attributing a new merge/approval — so the hot status poll pays nothing
+    extra. Returns a fresh GitHubApp (token caching lives inside it)."""
+    return _github_app(profile)
+
+
 def request_promotion(space_id: str, profile: str | None = None, *, user_token: str | None = None,
                       requester_email: str | None = None, domain: str = DOMAIN,
                       github: GitHubApp | None = None) -> dict:

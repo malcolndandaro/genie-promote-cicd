@@ -441,6 +441,37 @@ def test_list_promotions_rejects_scope_all_until_lb5(store):
     assert client.get("/api/promotions?scope=all").status_code == 400
 
 
+def test_status_read_reconciles_and_caches(monkeypatch, store):
+    # Persist a promotion (PR 6), then a status read must reconcile -> append GitHub events + cache.
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=6))
+    pid = client.post("/api/promote", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
+    monkeypatch.setattr(engine_api.app_logic, "promotion_status", lambda n, *a, **k: {
+        "pr_state": "open", "merged": False, "checks": "pending", "review_decision": "approved",
+        "deploy": {"status": "none", "conclusion": None, "waiting_approval": False, "approver": None},
+        "pr_url": "https://gh/pr/6", "phase": "open"})
+    # github_app_factory only fires if a merge/approval identity is needed; provide a fake.
+    monkeypatch.setattr(engine_api.app_logic, "github_app_factory",
+                        lambda *a, **k: type("G", (), {"audit_facts": lambda self, n: {"review_approver": "PSPedro176"}})())
+    r = client.get("/api/promote/6/status")
+    assert r.status_code == 200 and r.json()["phase"] == "open"
+    types = [e.event_type for e in store.list_audit_events(pid)]
+    assert "pr_opened" in types and "pr_review_approved" in types  # reconciled from GitHub
+    assert store.get_promotion(pid).current_phase == "open"  # cache updated
+
+
+def test_promotion_detail_includes_audit_and_cached_status(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=6))
+    pid = client.post("/api/promote", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
+    body = client.get(f"/api/promotions/{pid}").json()
+    assert "audit" in body and body["audit"][0]["event_type"] == "requested"
+    assert body["audit"][0]["actor_app_email"] == "ana@x"  # display-only attribution
+    assert "live_status" in body  # cached status for instant render (None until first reconcile)
+    audit = client.get(f"/api/promotions/{pid}/audit").json()["audit"]
+    assert [e["event_type"] for e in audit] == ["requested"]
+
+
 def test_get_promotion_404_for_unknown(store):
     assert client.get("/api/promotions/nope").status_code == 404
 

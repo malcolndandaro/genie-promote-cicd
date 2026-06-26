@@ -34,11 +34,16 @@ from typing import Callable, Iterable, Optional, Protocol
 # state. Append-only — there is no update/delete path for an event.
 EVENT_TYPES = (
     "requested", "re_reviewed", "pr_opened", "pr_review_approved",
-    "merged", "deploy_approved", "deployed", "failed",
+    "merged", "deploy_approved", "deployed", "failed", "closed",
 )
+# App-written events that may legitimately RECUR (so they're excluded from the per-type dedup that
+# protects reconcile's GitHub-observed milestones from a concurrent double-append).
+RECURRING_EVENTS = ("requested", "re_reviewed")
 
-# Phases that mean the promotion is over (no further reconcile needed by the scheduler, LB6).
-TERMINAL_PHASES = ("deployed", "closed")
+# Phases that mean the promotion is over (the LB6 scheduler stops visiting these). `deploy_failed` is
+# terminal so a failed deploy doesn't loop the scheduler forever — a fix + re-merge is a new Promotion
+# (new PR); a manual re-run is still picked up by an open viewer's poll.
+TERMINAL_PHASES = ("deployed", "deploy_failed", "closed")
 
 
 @dataclasses.dataclass
@@ -112,7 +117,7 @@ class StoreBackend(Protocol):
     def update_promotion(self, promotion_id: str, fields: dict) -> None: ...
     def insert_snapshot(self, row: dict) -> None: ...
     def list_snapshots(self, promotion_id: str) -> list[dict]: ...  # oldest -> newest
-    def insert_audit_event(self, row: dict) -> int: ...  # assigns + returns seq atomically
+    def insert_audit_event(self, row: dict) -> Optional[int]: ...  # seq, or None if a dup milestone
     def list_audit_events(self, promotion_id: str) -> list[dict]: ...  # ordered by seq
     def healthcheck(self) -> None: ...
     def close(self) -> None: ...
@@ -200,7 +205,9 @@ class PromotionStore:
                           actor_github_login: Optional[str] = None,
                           actor_app_email: Optional[str] = None,
                           github_event_at: Optional[datetime] = None,
-                          detail: Optional[dict] = None) -> AuditEvent:
+                          detail: Optional[dict] = None) -> Optional[AuditEvent]:
+        """Append an audit event. Returns None if it was a reconcile MILESTONE already recorded (the
+        idempotency safety net for a concurrent double-reconcile) — the caller can ignore it."""
         if event_type not in EVENT_TYPES:
             raise ValueError(f"unknown event_type {event_type!r}; expected one of {EVENT_TYPES}")
         row = {
@@ -209,7 +216,7 @@ class PromotionStore:
             "actor_app_email": actor_app_email, "github_event_at": github_event_at, "detail": detail,
         }
         seq = self._b.insert_audit_event(row)  # backend assigns the per-promotion seq atomically
-        return AuditEvent(seq=seq, **row)
+        return AuditEvent(seq=seq, **row) if seq is not None else None
 
     def list_audit_events(self, promotion_id: str) -> list[AuditEvent]:
         return [_as(AuditEvent, r) for r in self._b.list_audit_events(promotion_id)]
@@ -278,8 +285,13 @@ class InMemoryBackend:
         rows = [dict(r) for r in self._snapshots if r["promotion_id"] == promotion_id]
         return sorted(rows, key=lambda r: r["created_at"])  # oldest -> newest
 
-    def insert_audit_event(self, row: dict) -> int:
+    def insert_audit_event(self, row: dict) -> Optional[int]:
         self._require_promotion(row["promotion_id"])
+        et = row["event_type"]
+        if et not in RECURRING_EVENTS and any(
+                e["promotion_id"] == row["promotion_id"] and e["event_type"] == et
+                for e in self._events):
+            return None  # milestone already recorded — skip (mirrors the partial unique index)
         seq = 1 + max((e["seq"] for e in self._events if e["promotion_id"] == row["promotion_id"]),
                       default=0)
         self._events.append({**row, "seq": seq})
@@ -343,6 +355,12 @@ MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS ix_promotions_resource  ON promotions(resource_id)",
     "CREATE INDEX IF NOT EXISTS ix_promotions_pr        ON promotions(pr_number)",
     "CREATE INDEX IF NOT EXISTS ix_audit_promotion_seq  ON audit_events(promotion_id, seq)",
+    # A reconcile-written milestone occurs AT MOST ONCE per promotion. This partial unique index makes
+    # that a DB invariant, so two concurrent reconciles (e.g. a viewer poll + the LB6 scheduler) can't
+    # double-record an event_type — the loser hits ON CONFLICT DO NOTHING. `requested`/`re_reviewed`
+    # legitimately recur, so they're excluded.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_milestone ON audit_events(promotion_id, event_type) "
+    "WHERE event_type NOT IN ('requested', 're_reviewed')",
 )
 
 # Columns that hold JSON blobs (wrapped as jsonb on write).
@@ -451,25 +469,31 @@ class PgBackend:
             "SELECT * FROM review_snapshots WHERE promotion_id = %s ORDER BY created_at",
             (promotion_id,))
 
-    def insert_audit_event(self, row: dict) -> int:
-        # Assign seq = next per-promotion sequence (COALESCE(MAX)+1). Under READ COMMITTED two
-        # concurrent appends for the same promotion can both pick N+1; UNIQUE(promotion_id, seq)
-        # rejects the loser with a UniqueViolation. RETRY a few times — on retry MAX(seq) has
-        # advanced, so the next attempt picks a free seq. (LB4 reconcile-on-read + the LB6 scheduler
-        # can hit the same promotion concurrently, so this race is real, not hypothetical.)
+    def insert_audit_event(self, row: dict) -> Optional[int]:
+        # Assign seq = next per-promotion sequence (COALESCE(MAX)+1). Two concurrent appends can both
+        # pick N+1; UNIQUE(promotion_id, seq) rejects the loser -> RETRY (MAX advances, the next
+        # attempt picks a free seq). SEPARATELY, the partial unique index (promotion_id, event_type)
+        # makes a reconcile MILESTONE at-most-once: a concurrent double-reconcile hits ON CONFLICT
+        # DO NOTHING -> no row -> RETURNING yields nothing -> return None (already recorded). The
+        # conflict target matches the partial index (event_type NOT IN recurring), so requested/
+        # re_reviewed are unaffected and always insert.
         from psycopg.errors import UniqueViolation
         cols = [c for c in _EVENT_COLS if c != "seq"]
         vals = [self._jsonb(row.get(c)) if c in _JSON_COLS else row.get(c) for c in cols]
         placeholders = ", ".join(["%s"] * len(cols))
+        recurring = ", ".join(f"'{e}'" for e in RECURRING_EVENTS)
         sql = (f"INSERT INTO audit_events (seq, {', '.join(cols)}) "
                f"SELECT COALESCE(MAX(seq), 0) + 1, {placeholders} "
-               f"FROM audit_events WHERE promotion_id = %s RETURNING seq")
+               f"FROM audit_events WHERE promotion_id = %s "
+               f"ON CONFLICT (promotion_id, event_type) WHERE event_type NOT IN ({recurring}) "
+               f"DO NOTHING RETURNING seq")
         attempts = 5
         for attempt in range(attempts):
             try:
                 with self._pool.connection() as conn, conn.cursor() as cur:
                     cur.execute(sql, [*vals, row["promotion_id"]])
-                    return cur.fetchone()["seq"]
+                    fetched = cur.fetchone()
+                    return fetched["seq"] if fetched else None  # None = milestone already recorded
             except UniqueViolation:
                 if attempt == attempts - 1:
                     raise
