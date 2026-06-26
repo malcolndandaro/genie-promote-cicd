@@ -83,7 +83,11 @@
               Não foi possível listar os espaços.
             {/if}
           </span>
-          <Button variant="outline" onclick={reloadSpaces}>Tentar novamente</Button>
+          {#if isAuthError(err)}
+            <Button variant="outline" onclick={() => location.reload()}>Recarregar</Button>
+          {:else}
+            <Button variant="outline" onclick={reloadSpaces}>Tentar novamente</Button>
+          {/if}
         </div>
       </Card>
     {/await}
@@ -118,7 +122,11 @@
               Não foi possível carregar as promoções.
             {/if}
           </span>
-          <Button variant="outline" onclick={reloadPromos}>Tentar novamente</Button>
+          {#if isAuthError(err)}
+            <Button variant="outline" onclick={() => location.reload()}>Recarregar</Button>
+          {:else}
+            <Button variant="outline" onclick={reloadPromos}>Tentar novamente</Button>
+          {/if}
         </div>
       {/await}
     </Card>

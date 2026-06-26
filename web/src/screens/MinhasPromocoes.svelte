@@ -65,6 +65,12 @@
           </Button>
         </div>
       </Card>
+    {:else if promotion.phase === 'idle'}
+      <!-- Loaded but the stored promotion has no review snapshot (defensive — every promotion is
+           persisted with one). Never leave the detail blank. -->
+      <Card>
+        <p class="muted text-sm">Esta promoção ainda não tem uma revisão armazenada.</p>
+      </Card>
     {:else}
       <PromotionReview {promotion} userEmail={who?.email ?? null} />
     {/if}

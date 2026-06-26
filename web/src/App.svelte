@@ -36,8 +36,10 @@
     .catch(() => {});
 
   // Recover-on-load (LB3): restore the most-recent promotion from its STORED snapshot — no reviewer
-  // re-run. Provides continuity for the "Meus espaços" flow; the home/history surface promotions too.
-  promotion.recover().catch(() => {});
+  // re-run. ONLY on the "Meus espaços" screen, where the review renders in place. On the home the
+  // in-flight promotion shows in "Promoções recentes"; on a #/promocoes/:id deep-link openById loads
+  // the exact target — running recover there would race it and could surface the WRONG promotion.
+  if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
   const NAV_ITEMS: NavItem[] = [
     { id: 'inicio', label: 'Início', icon: 'home' },

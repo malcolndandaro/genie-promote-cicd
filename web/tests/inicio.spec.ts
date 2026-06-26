@@ -85,6 +85,27 @@ test('a COLD-LOAD of #/promocoes/:id opens the detail without re-running the rev
   expect(promoteCalled).toBe(false);
 });
 
+test('a cold-load deep-link shows the LINKED promotion even when a different one is newest (no recover clobber)', async ({ page }) => {
+  // Regression: App.recover() must not race openById on a #/promocoes/:id deep-link. The newest
+  // promotion (promo-new) differs from the linked one (promo-1); the detail must show promo-1.
+  const newest = { ...summary, id: 'promo-new', pr_number: 99,
+    pr_url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/99' };
+  page.route('**/api/whoami', (r) =>
+    r.fulfill({ json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }));
+  page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }));
+  page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [newest, summary] } }));
+  page.route('**/api/promotions/promo-new', (r) =>
+    r.fulfill({ json: { promotion: newest, review, pr: { number: 99, url: newest.pr_url }, live_status: null, audit: [] } }));
+  page.route('**/api/promotions/promo-1', (r) =>
+    r.fulfill({ json: { promotion: summary, review, pr: PR, live_status: status, audit: [] } }));
+  page.route('**/api/promote/**', (r) => r.fulfill({ json: status }));
+
+  await page.goto('/#/promocoes/promo-1');
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('#6', { exact: true })).toBeVisible();      // promo-1's PR
+  await expect(page.getByText('#99', { exact: true })).toHaveCount(0);    // NOT the newest
+});
+
 test('a recent promotion deep-links to its detail without re-running the reviewer', async ({ page }) => {
   let promoteCalled = false;
   await page.route('**/api/promote', (r) => { promoteCalled = true; r.fulfill({ status: 500, json: {} }); });
