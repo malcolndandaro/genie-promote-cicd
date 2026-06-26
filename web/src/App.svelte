@@ -3,8 +3,9 @@
   import Tabs from './lib/components/Tabs.svelte';
   import type { Tab } from './lib/components/Tabs.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
+  import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
   import NovoEspaco from './screens/NovoEspaco.svelte';
-  import { getWhoami } from './lib/api';
+  import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
   import type { Whoami } from './lib/types';
 
@@ -18,6 +19,7 @@
   getWhoami()
     .then((w) => {
       who = w;
+      promotion.viewerEmail = w.email;
       promotion.requesterEmail = w.email;
       promotion.steward = w.steward;
     })
@@ -30,8 +32,16 @@
   let tab = $state('spaces');
   const TABS: Tab[] = [
     { value: 'spaces', label: 'Meus espaços' },
+    { value: 'history', label: 'Minhas promoções' },
     { value: 'new', label: '＋ Novo Genie Space' },
   ];
+
+  // Open a promotion from the history list: load its stored snapshot + audit, then show it in the
+  // review view (the "Meus espaços" panel renders the active promotion). No reviewer re-run.
+  async function openFromHistory(summary: PromotionSummary): Promise<void> {
+    tab = 'spaces'; // switch first so the loading/review state renders in place (open() resets it)
+    await promotion.open(summary);
+  }
 </script>
 
 <Header>
@@ -48,6 +58,8 @@
     <div role="tabpanel" id={`promote-panel-${tab}`} aria-labelledby={`promote-tab-${tab}`} tabindex="-1">
       {#if tab === 'spaces'}
         <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => (tab = 'new')} />
+      {:else if tab === 'history'}
+        <MinhasPromocoes {who} onOpen={openFromHistory} />
       {:else}
         <NovoEspaco />
       {/if}

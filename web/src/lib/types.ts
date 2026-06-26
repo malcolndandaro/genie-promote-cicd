@@ -3,10 +3,12 @@
  * Kept identical to the engine API so the Svelte client is a faithful port of the AppKit app.
  */
 
-/** Who the platform forwarded (OBO) + the configured Steward (separation of duties). */
+/** Who the platform forwarded (OBO) + the configured Steward (SoD) + whether the caller is an
+ * Admin/Steward (drives the LB5 history `scope=all` toggle; the server re-checks the role). */
 export interface Whoami {
   email: string | null;
   steward: string | null;
+  is_admin: boolean;
 }
 
 /**

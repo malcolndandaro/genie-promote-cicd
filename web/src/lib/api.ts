@@ -99,6 +99,9 @@ export interface PromotionSummary {
   resource_id: string;
   resource_kind: ResourceKind;
   resource_title: string | null;
+  /** The original requester (OBO email, display-only) — so an admin's cross-user view attributes
+   * the real requester, not the viewer. */
+  requester_email: string | null;
   pr_number: number | null;
   pr_url: string | null;
   current_phase: string | null;

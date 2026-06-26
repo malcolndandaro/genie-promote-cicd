@@ -117,16 +117,31 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+def _admin_emails() -> set[str]:
+    """The config-driven set of Steward/Admin emails who may see ALL promotions (LB5) — lowercased.
+    Sourced from `APP_ADMINS` + `APP_STEWARDS` (comma-separated) + the single `APP_STEWARD` (SoD).
+    NO hardcoded identities (ADR-0004): a new customer sets these env vars + redeploys."""
+    raw = ",".join(os.environ.get(k, "") for k in ("APP_ADMINS", "APP_STEWARDS", "APP_STEWARD"))
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _is_admin(email: str | None) -> bool:
+    return bool(email) and email.strip().lower() in _admin_emails()
+
+
 @api.get("/whoami")
 def whoami(x_forwarded_email: str | None = Header(default=None)) -> dict:
-    """The caller identity the platform forwards (OBO context) + the configured Steward.
+    """The caller identity the platform forwards (OBO context) + the configured Steward + whether the
+    caller is an Admin/Steward (drives the LB5 `scope=all` history toggle).
 
     `email` comes from `x-forwarded-email` (proxy-trust-only — display only, NEVER an
     authorization input); `steward` is the `APP_STEWARD` config (the distinct approver for the
-    separation-of-duties model in SV4). Any security decision must use the OBO-token-resolved
-    identity, not these raw headers.
+    separation-of-duties model in SV4); `is_admin` reflects the config-driven admin/steward set.
+    Any security decision must use the OBO-token-resolved identity, not these raw headers — the
+    server re-checks the role on `scope=all` (this flag is only a UI convenience).
     """
-    return {"email": x_forwarded_email, "steward": os.environ.get("APP_STEWARD") or None}
+    return {"email": x_forwarded_email, "steward": os.environ.get("APP_STEWARD") or None,
+            "is_admin": _is_admin(x_forwarded_email)}
 
 
 @api.get("/spaces")
@@ -281,7 +296,8 @@ def _require_store():
 
 def _promotion_summary(p) -> dict:
     return {"id": p.id, "resource_id": p.resource_id, "resource_kind": p.resource_kind,
-            "resource_title": p.resource_title, "pr_number": p.pr_number, "pr_url": p.pr_url,
+            "resource_title": p.resource_title, "requester_email": p.requester_email,
+            "pr_number": p.pr_number, "pr_url": p.pr_url,
             "current_phase": p.current_phase, "terminal": p.terminal,
             "created_at": p.created_at, "updated_at": p.updated_at}
 
@@ -311,27 +327,44 @@ def _snapshot_to_review(snap) -> dict:
 
 @api.get("/promotions")
 def list_promotions(scope: str = "mine", x_forwarded_email: str | None = Header(default=None)) -> dict:
-    """The caller's promotions (newest first), for recovery + the history view (LB3/LB5). LB3
-    implements `scope=mine` (filtered by the OBO email — convenience; the proxy is the boundary);
-    role-gated `scope=all` is added in LB5. Bot/SP owns the DB read."""
-    if scope != "mine":
-        # `scope=all` (cross-user) is role-gated — added in LB5. Reject loudly rather than silently
-        # treating it as `mine` (which would mask a missing role check when LB5 wires it).
-        raise HTTPException(status_code=400, detail="scope inválido; use 'mine' (scope=all chega no LB5)")
+    """The caller's promotions (newest first), for recovery + the history view (LB3/LB5).
+    `scope=mine` filters by the OBO email (convenience; the proxy is the access boundary).
+    `scope=all` (cross-user governance view) is ROLE-GATED server-side: only a configured
+    Steward/Admin gets it; anyone else is denied (403). Bot/SP owns the DB read."""
     store = _require_store()
-    promotions = store.list_promotions(x_forwarded_email)  # None email (local) => all
+    if scope == "mine":
+        promotions = store.list_promotions(x_forwarded_email)  # None email (local) => all
+    elif scope == "all":
+        if not _is_admin(x_forwarded_email):
+            raise HTTPException(status_code=403, detail="Apenas Stewards/Admins veem todas as promoções.")
+        promotions = store.list_promotions(None)  # cross-user
+    else:
+        raise HTTPException(status_code=400, detail="scope inválido; use 'mine' ou 'all'")
     return {"promotions": [_promotion_summary(p) for p in promotions]}
 
 
-@api.get("/promotions/{promotion_id}")
-def get_promotion(promotion_id: str) -> dict:
-    """A single promotion + its LATEST stored Review Snapshot + PR ref — the recover-on-open payload
-    (renders the stored review WITHOUT re-running the LLM reviewer). Live PR/CI/deploy status still
-    comes from the GitHub poll (`/promote/{n}/status`), unchanged."""
-    store = _require_store()
+def _visible_promotion_or_403(store, promotion_id: str, email: str | None):
+    """Fetch a promotion the caller may see: their own (requester_email == OBO email) OR any if the
+    caller is a Steward/Admin. Defense-in-depth over the proxy boundary — a user can't read another
+    user's stored review/audit by guessing an id (they only ever learn their own ids via scope=mine)."""
     p = store.get_promotion(promotion_id)
     if p is None:
         raise HTTPException(status_code=404, detail="promoção não encontrada")
+    # No proxy email == local/dev (the deployed proxy always injects it) -> allow. Otherwise the
+    # caller must own the promotion or be an admin.
+    if email is None or _is_admin(email) or (
+            p.requester_email and p.requester_email.lower() == email.lower()):
+        return p
+    raise HTTPException(status_code=403, detail="Sem permissão para esta promoção.")
+
+
+@api.get("/promotions/{promotion_id}")
+def get_promotion(promotion_id: str, x_forwarded_email: str | None = Header(default=None)) -> dict:
+    """A single promotion + its LATEST stored Review Snapshot + PR ref — the recover-on-open payload
+    (renders the stored review WITHOUT re-running the LLM reviewer). Live PR/CI/deploy status still
+    comes from the GitHub poll (`/promote/{n}/status`), unchanged. Caller must own it or be an admin."""
+    store = _require_store()
+    p = _visible_promotion_or_403(store, promotion_id, x_forwarded_email)
     snap = store.latest_snapshot(promotion_id)
     return {
         "promotion": _promotion_summary(p),
@@ -345,12 +378,11 @@ def get_promotion(promotion_id: str) -> dict:
 
 
 @api.get("/promotions/{promotion_id}/audit")
-def get_promotion_audit(promotion_id: str) -> dict:
+def get_promotion_audit(promotion_id: str, x_forwarded_email: str | None = Header(default=None)) -> dict:
     """The ordered, append-only audit trail for a promotion (LB4) — refreshed by the SPA as the
-    status poll reconciles, so the trail accrues live as the PR progresses."""
+    status poll reconciles, so the trail accrues live as the PR progresses. Owner-or-admin only."""
     store = _require_store()
-    if store.get_promotion(promotion_id) is None:
-        raise HTTPException(status_code=404, detail="promoção não encontrada")
+    _visible_promotion_or_403(store, promotion_id, x_forwarded_email)
     return {"audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)]}
 
 

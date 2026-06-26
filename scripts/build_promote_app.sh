@@ -39,6 +39,13 @@ env:
   # the SPA can enforce "the requester can never approve their own promotion" (SV4).
   - name: APP_STEWARD
     value: "pedro.perdomo@databricks.com"
+  # Config-driven Steward/Admin set (LB5): who may see ALL promotions (cross-user governance view).
+  # Comma-separated; NO hardcoded binding (ADR-0004) — a new customer sets their own. The Steward
+  # (APP_STEWARD) is implicitly included; this adds the platform operator. To grant the view to
+  # MULTIPLE stewards without making them full admins, also set APP_STEWARDS (comma-separated) — the
+  # server unions APP_ADMINS + APP_STEWARDS + APP_STEWARD.
+  - name: APP_ADMINS
+    value: "malcoln.dandaro@databricks.com"
   # Lakebase is a HARD dependency (ADR-0005): require the durable store at startup, so a bundle that
   # drops the `database` binding (no PGHOST injected) fails fast + loud instead of silently degrading.
   - name: APP_REQUIRE_STORE

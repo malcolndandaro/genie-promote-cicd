@@ -22,6 +22,8 @@ import {
   type PullRequestRef,
   type PromoteStatus,
   type AuditEvent,
+  type PromotionSummary,
+  type PromotionDetail,
 } from './api';
 
 export type PromotionPhase = 'idle' | 'reviewing' | 'reviewed' | 'error';
@@ -48,8 +50,12 @@ export class Promotion {
   // --- separation of duties (SV4/GH4) ---
   /** Demo persona toggle: act as the Autor (requester) or the Steward (approver). */
   persona = $state<Persona>('author');
-  /** The OBO requester identity (from /api/whoami) — never a constant. */
+  /** The requester of the CURRENT promotion view (display-only): the signed-in viewer for a fresh
+   * request, or the stored requester when a promotion is opened from history (so an admin's
+   * cross-user view attributes the real requester, not themselves). */
   requesterEmail = $state<string | null>(null);
+  /** The signed-in viewer's OBO email (from /api/whoami) — the baseline requester for a fresh flow. */
+  viewerEmail = $state<string | null>(null);
   /** The configured Steward (from /api/whoami.steward) — the distinct approver. */
   steward = $state<string | null>(null);
 
@@ -100,6 +106,7 @@ export class Promotion {
     this.liveStatus = null;
     this.promotionId = null;
     this.audit = [];
+    this.requesterEmail = this.viewerEmail; // a fresh flow is requested by the viewer
   }
 
   /** Refresh the audit trail (LB4) for the active promotion. Best-effort: keep the last on error. */
@@ -172,20 +179,50 @@ export class Promotion {
       const detail = await getPromotionDetail(summary.id);
       if (!detail.review || !detail.pr) return false;
       if (this.phase !== 'idle' || this.resource) return false; // a selection raced in — yield to it
-      this.resource = {
-        id: summary.resource_id,
-        title: summary.resource_title ?? summary.resource_id,
-        kind: summary.resource_kind,
-      };
-      this.review = detail.review;
-      this.pr = detail.pr;
-      this.promotionId = summary.id;
-      this.liveStatus = detail.live_status; // cached status -> the phase badge renders immediately
-      this.audit = detail.audit ?? [];
+      this._apply(summary, detail);
       this.phase = 'reviewed';
       return true;
     } catch {
       return false; // store unavailable / nothing to recover — proceed with the normal flow
     }
+  }
+
+  /**
+   * Open a specific promotion from the history list (LB5) — load its STORED snapshot + audit and
+   * render it (no reviewer re-run). Unlike recover() this is an explicit user action, so it replaces
+   * whatever is shown. The polling effect resumes the live status once `pr` is set.
+   */
+  async open(summary: PromotionSummary): Promise<void> {
+    // Reset to a clean loading state immediately so the user never sees the PRIOR promotion's review
+    // during the fetch. The id guard drops a stale result if a different row is opened mid-flight.
+    this.select(null);
+    this.promotionId = summary.id;
+    try {
+      const detail = await getPromotionDetail(summary.id);
+      if (this.promotionId !== summary.id) return; // another open() raced in — drop this result
+      this._apply(summary, detail);
+      this.phase = detail.review ? 'reviewed' : 'idle';
+    } catch (e) {
+      if (this.promotionId !== summary.id) return;
+      this.error = e instanceof Error ? e.message : String(e);
+      this.phase = 'error';
+    }
+  }
+
+  /** Shared: apply a fetched promotion detail to the reactive state (recover + open). */
+  private _apply(summary: PromotionSummary, detail: PromotionDetail): void {
+    this.resource = {
+      id: summary.resource_id,
+      title: summary.resource_title ?? summary.resource_id,
+      kind: summary.resource_kind,
+    };
+    this.review = detail.review;
+    this.pr = detail.pr;
+    this.promotionId = summary.id;
+    this.liveStatus = detail.live_status; // cached status -> the phase badge renders immediately
+    this.audit = detail.audit ?? [];
+    // Attribute the STORED requester (so an admin's cross-user view shows the real requester, and the
+    // display-only SoD preview compares the steward against the right person).
+    this.requesterEmail = summary.requester_email ?? this.viewerEmail;
   }
 }

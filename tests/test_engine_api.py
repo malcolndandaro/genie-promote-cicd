@@ -25,16 +25,20 @@ def test_health_no_auth():
 
 def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
     monkeypatch.setenv("APP_STEWARD", "steward@x")
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    monkeypatch.delenv("APP_STEWARDS", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
-    assert r.json() == {"email": "malcoln@x", "steward": "steward@x"}
+    assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False}
 
 
 def test_whoami_steward_none_when_unset(monkeypatch):
     monkeypatch.delenv("APP_STEWARD", raising=False)
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    monkeypatch.delenv("APP_STEWARDS", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
-    assert r.json() == {"email": "malcoln@x", "steward": None}
+    assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False}
 
 
 def test_spaces_threads_proxy_header_token(monkeypatch):
@@ -199,8 +203,10 @@ def test_api_prefix_health():
 
 def test_api_prefix_whoami(monkeypatch):
     monkeypatch.setenv("APP_STEWARD", "steward@x")
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    monkeypatch.delenv("APP_STEWARDS", raising=False)
     r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
-    assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x"}
+    assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x", "is_admin": False}
 
 
 def test_api_prefix_spaces_threads_token(monkeypatch):
@@ -437,8 +443,32 @@ def test_re_review_only_requested_carries_app_email_and_bumps_updated_at(monkeyp
     assert store.get_promotion(pid).updated_at > created_at  # re-review bumped freshness
 
 
-def test_list_promotions_rejects_scope_all_until_lb5(store):
-    assert client.get("/api/promotions?scope=all").status_code == 400
+def test_whoami_reports_admin_from_config(monkeypatch):
+    monkeypatch.setenv("APP_ADMINS", "admin@x, boss@x")
+    monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.setenv("APP_STEWARD", "pedro@x")
+    assert client.get("/whoami", headers={"x-forwarded-email": "ADMIN@x"}).json()["is_admin"] is True
+    assert client.get("/whoami", headers={"x-forwarded-email": "pedro@x"}).json()["is_admin"] is True  # steward
+    assert client.get("/whoami", headers={"x-forwarded-email": "rando@x"}).json()["is_admin"] is False
+
+
+def test_scope_all_role_gated(monkeypatch, store):
+    monkeypatch.setenv("APP_ADMINS", "admin@x")
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=21))
+    client.post("/api/promote", json={"space_id": "s1"},
+                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"})
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=22))
+    client.post("/api/promote", json={"space_id": "s2"},
+                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "bob@x"})
+    # An admin sees ALL promotions (cross-user governance view).
+    admin = client.get("/api/promotions?scope=all", headers={"x-forwarded-email": "admin@x"})
+    assert admin.status_code == 200 and {p["pr_number"] for p in admin.json()["promotions"]} == {21, 22}
+    # A non-admin requesting scope=all is denied (server-enforced, not just hidden in the UI).
+    assert client.get("/api/promotions?scope=all", headers={"x-forwarded-email": "ana@x"}).status_code == 403
+    # scope=mine still filters by the caller.
+    mine = client.get("/api/promotions?scope=mine", headers={"x-forwarded-email": "ana@x"})
+    assert {p["pr_number"] for p in mine.json()["promotions"]} == {21}
+    assert client.get("/api/promotions?scope=bogus", headers={"x-forwarded-email": "admin@x"}).status_code == 400
 
 
 def test_status_read_reconciles_and_caches(monkeypatch, store):
@@ -472,7 +502,20 @@ def test_promotion_detail_includes_audit_and_cached_status(monkeypatch, store):
     assert [e["event_type"] for e in audit] == ["requested"]
 
 
+def test_get_promotion_ownership_gated(monkeypatch, store):
+    monkeypatch.setenv("APP_ADMINS", "admin@x")
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=31))
+    pid = client.post("/api/promote", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
+    # The owner sees it; an admin sees it; another user is denied (can't read by guessing an id).
+    assert client.get(f"/api/promotions/{pid}", headers={"x-forwarded-email": "ana@x"}).status_code == 200
+    assert client.get(f"/api/promotions/{pid}", headers={"x-forwarded-email": "admin@x"}).status_code == 200
+    assert client.get(f"/api/promotions/{pid}", headers={"x-forwarded-email": "mallory@x"}).status_code == 403
+    assert client.get(f"/api/promotions/{pid}/audit", headers={"x-forwarded-email": "mallory@x"}).status_code == 403
+
+
 def test_get_promotion_404_for_unknown(store):
+    # No email == local/dev (the deployed proxy always injects it) -> ownership check is skipped.
     assert client.get("/api/promotions/nope").status_code == 404
 
 

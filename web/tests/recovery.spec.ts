@@ -30,6 +30,7 @@ const summary = {
   resource_id: 'sp1',
   resource_kind: 'genie_space',
   resource_title: 'Recebíveis',
+  requester_email: 'ana@databricks.com',
   pr_number: PR.number,
   pr_url: PR.url,
   current_phase: 'open',
