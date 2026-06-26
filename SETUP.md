@@ -107,6 +107,12 @@ customer changes only these and redeploys:
 | `lakebase_database` | `databricks_postgres` | Postgres database the app uses |
 | `lakebase_capacity` | `CU_1` | instance SKU (autoscaling floor) |
 
+The app's schema is config-driven too, via an app env var (defaults work for every deployment):
+
+| App env | Default | What |
+|---|---|---|
+| `APP_LAKEBASE_SCHEMA` | `genie_promote` | Postgres schema the store owns (NOT `public` — see below) |
+
 **How the app connects — no static password (US-11).** The app `database` binding grants the app SP
 `CAN_CONNECT_AND_CREATE` and makes the platform inject `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER`
 (the SP client id) / `PGSSLMODE`. The app mints a **short-lived OAuth credential** at connect time
@@ -119,9 +125,16 @@ python scripts/verify_lakebase.py --profile cerc-mlops-dev          # local oper
 # on the deployed app the same logic runs as the SP off the injected PG* env
 ```
 
-**First-deploy ordering / SP schema ownership.** DABs provisions the instance (waits for
-`AVAILABLE`) before binding the app (the binding references the instance via `${resources…}`). Per
-the `databricks-lakebase` skill, the SP must **create** the schema to own it — so **deploy the app
-before running it locally**; the app's idempotent startup migrations (LB2) create + own the schema as
-the SP. If you ran locally first and hit `permission denied for schema`, the schema is owned by your
-identity, not the SP — don't drop it without checking for data.
+**First-deploy ordering / SP schema ownership (a real Lakebase gotcha).** DABs provisions the
+instance (waits for `AVAILABLE`) before binding the app (the binding references the instance via
+`${resources…}`). The app SP has `CAN_CONNECT_AND_CREATE` — it can create NEW objects (incl. its own
+schema) but **cannot create in the pre-existing `public` schema** (`permission denied for schema
+public`). So the store (LB2) creates + uses a **dedicated schema the SP owns** (`APP_LAKEBASE_SCHEMA`,
+default `genie_promote`), pinned via the connection's `search_path` — never `public`. The app's
+idempotent startup migrations create the schema + tables as the SP on first boot.
+
+Consequence: **deploy the app before running any store code locally.** If you run the local store
+verify with the default schema first, *your* identity creates + owns `genie_promote` and the SP is
+then locked out. `scripts/verify_lakebase_store.py` defaults to a throwaway schema
+(`lb_verify_local`, dropped after) for exactly this reason — pass `--schema genie_promote` only after
+the deployed app owns it (and only if your identity has access).

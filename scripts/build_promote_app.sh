@@ -39,6 +39,10 @@ env:
   # the SPA can enforce "the requester can never approve their own promotion" (SV4).
   - name: APP_STEWARD
     value: "pedro.perdomo@databricks.com"
+  # Lakebase is a HARD dependency (ADR-0005): require the durable store at startup, so a bundle that
+  # drops the `database` binding (no PGHOST injected) fails fast + loud instead of silently degrading.
+  - name: APP_REQUIRE_STORE
+    value: "1"
 YAML
 # The built SPA the FastAPI app serves (engine_api/main.py -> <app-root>/static).
 cp -R web/dist "$OUT/static"

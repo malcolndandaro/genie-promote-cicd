@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 from typing import Callable
 
 from databricks.sdk.errors import PermissionDenied, Unauthenticated
@@ -35,10 +36,32 @@ from pydantic import BaseModel
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "app"))
 import app_logic  # noqa: E402
+import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 
 logger = logging.getLogger("engine_api")
-app = FastAPI(title="genie-promote app")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Initialize the Lakebase store at startup. Lakebase is a HARD dependency of the deployed app
+    (ADR-0005): if the `database` binding injected PGHOST but the DB can't be reached/migrated,
+    `build_store_from_env` raises `LakebaseUnavailable` and the app fails to start — fast + loud, no
+    silent half-broken app. Locally/in tests (no PGHOST) the store is None and the app still runs.
+    Idempotent startup migrations create the schema, so a fresh deployment self-initializes."""
+    app.state.store = promotion_store.build_store_from_env()  # raises (fail-fast) if Lakebase is down
+    logger.info("Lakebase store: %s",
+                "initialized (migrations applied)" if app.state.store else "absent (no PGHOST — local/test)")
+    try:
+        yield
+    finally:
+        if app.state.store is not None:
+            app.state.store.close()  # release the connection pool on graceful shutdown
+
+
+app = FastAPI(title="genie-promote app", lifespan=_lifespan)
+# Default so requests before/without lifespan (e.g. module-level TestClient) see a defined attribute.
+app.state.store = None
 api = APIRouter()
 
 
