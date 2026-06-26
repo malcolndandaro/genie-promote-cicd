@@ -176,5 +176,48 @@
         ]
       }
     ]
+  },
+  "benchmarks": {
+    "questions": [
+      {
+        "id": "43d6372b5fcb4dafb9d28f4335a0a34d",
+        "question": [
+          "Quais os 5 cedentes com maior volume de recebíveis no ano corrente, e de qual UF?"
+        ],
+        "answer": [
+          {
+            "format": "SQL",
+            "content": [
+              "SELECT c.nome, c.uf, SUM(f.valor) AS volume_total\n",
+              "FROM dev_recebiveis.diamond.fato_recebiveis f\n",
+              "JOIN dev_recebiveis.diamond.dim_cedente c ON f.cedente_id = c.cedente_id\n",
+              "WHERE YEAR(f.data) = YEAR(CURRENT_DATE())\n",
+              "GROUP BY c.nome, c.uf\n",
+              "ORDER BY volume_total DESC\n",
+              "LIMIT 5\n"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "135c1b3178024c52bab9bcfc77a6364a",
+        "question": [
+          "Qual o volume total de recebíveis por bandeira nos últimos 30 dias?"
+        ],
+        "answer": [
+          {
+            "format": "SQL",
+            "content": [
+              "SELECT a.bandeira, SUM(f.valor) AS volume_total\n",
+              "FROM dev_recebiveis.diamond.fato_recebiveis f\n",
+              "JOIN dev_recebiveis.diamond.dim_arranjo a ON f.arranjo = a.arranjo\n",
+              "WHERE f.data >= DATE_SUB(CURRENT_DATE(), 30)\n",
+              "GROUP BY a.bandeira\n",
+              "ORDER BY volume_total DESC\n"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }
