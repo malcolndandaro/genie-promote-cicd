@@ -1,7 +1,7 @@
 <script lang="ts">
   import AppShell from './lib/components/AppShell.svelte';
   import type { NavItem } from './lib/components/Sidebar.svelte';
-  import Icon from './lib/components/Icon.svelte';
+  import Topbar from './lib/components/Topbar.svelte';
   import Card from './lib/components/Card.svelte';
   import Button from './lib/components/Button.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
@@ -67,24 +67,7 @@
 
 <AppShell navItems={NAV_ITEMS} route={router.route}>
   {#snippet header({ toggle, open })}
-    <header class="topbar">
-      <button
-        class="topbar__menu"
-        type="button"
-        aria-label="Abrir menu"
-        aria-expanded={open}
-        aria-controls="sidebar-nav"
-        onclick={toggle}
-      >
-        <Icon name="menu" />
-      </button>
-      <h1 class="topbar__title">{SECTION_TITLE[router.route.id]}</h1>
-      <div class="topbar__right">
-        {#if who?.email}
-          <span class="identity"><span class="identity__dot"></span>{who.email}</span>
-        {/if}
-      </div>
-    </header>
+    <Topbar title={SECTION_TITLE[router.route.id]} {who} {open} onToggle={toggle} />
   {/snippet}
 
   {#if router.route.id === 'inicio'}
@@ -107,75 +90,10 @@
 </AppShell>
 
 <style>
-  .topbar {
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    min-height: var(--header-h);
-    padding: 0 var(--space-5);
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-  }
-  .topbar__title {
-    font-size: 1.05rem;
-    font-weight: 700;
-  }
-  .topbar__menu {
-    display: none;
-    appearance: none;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    color: var(--foreground);
-    border-radius: var(--radius-sm);
-    padding: 0.35rem;
-    cursor: pointer;
-    line-height: 0;
-  }
-  .topbar__menu:hover {
-    background: var(--surface-inset);
-  }
-  .topbar__right {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-  }
-  .identity {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 0.85rem;
-    color: var(--muted-foreground);
-    max-width: 16rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .identity__dot {
-    width: 0.5rem;
-    height: 0.5rem;
-    border-radius: 50%;
-    background: var(--accent);
-    flex-shrink: 0;
-  }
   .placeholder {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: var(--space-4);
-  }
-  @media (max-width: 860px) {
-    .topbar {
-      padding: 0 var(--space-4);
-    }
-    .topbar__menu {
-      display: inline-flex;
-    }
-    .identity {
-      max-width: 9rem;
-    }
   }
 </style>

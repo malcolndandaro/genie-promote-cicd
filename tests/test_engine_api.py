@@ -25,20 +25,31 @@ def test_health_no_auth():
 
 def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
     monkeypatch.setenv("APP_STEWARD", "steward@x")
+    monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
-    assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False}
+    assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False,
+                        "repo_url": "https://gh/acme/repo"}
 
 
 def test_whoami_steward_none_when_unset(monkeypatch):
     monkeypatch.delenv("APP_STEWARD", raising=False)
+    monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
-    assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False}
+    assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False,
+                        "repo_url": "https://gh/acme/repo"}
+
+
+def test_whoami_repo_url_defaults_when_unset(monkeypatch):
+    # Config-driven with a safe default (ADR-0004): no APP_REPO_URL -> the accelerator's own repo.
+    monkeypatch.delenv("APP_REPO_URL", raising=False)
+    body = client.get("/whoami", headers={"x-forwarded-email": "m@x"}).json()
+    assert body["repo_url"] == "https://github.com/malcolndandaro/genie-promote-cicd"
 
 
 def test_spaces_threads_proxy_header_token(monkeypatch):
@@ -203,10 +214,12 @@ def test_api_prefix_health():
 
 def test_api_prefix_whoami(monkeypatch):
     monkeypatch.setenv("APP_STEWARD", "steward@x")
+    monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
-    assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x", "is_admin": False}
+    assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x",
+                                                 "is_admin": False, "repo_url": "https://gh/acme/repo"}
 
 
 def test_api_prefix_spaces_threads_token(monkeypatch):
