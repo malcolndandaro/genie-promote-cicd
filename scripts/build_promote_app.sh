@@ -50,6 +50,11 @@ env:
   # drops the `database` binding (no PGHOST injected) fails fast + loud instead of silently degrading.
   - name: APP_REQUIRE_STORE
     value: "1"
+  # Scheduled reconciler cadence (LB6): the in-app periodic task reconciles non-terminal promotions
+  # every N seconds so an overnight merge/deploy is recorded even when no browser is open. 0/unset
+  # disables it. Config-driven (ADR-0004).
+  - name: APP_RECONCILE_INTERVAL_SEC
+    value: "300"
 YAML
 # The built SPA the FastAPI app serves (engine_api/main.py -> <app-root>/static).
 cp -R web/dist "$OUT/static"

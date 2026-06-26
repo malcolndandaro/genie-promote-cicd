@@ -110,3 +110,39 @@ def reconcile(store: PromotionStore, promotion, status: dict,
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def reconcile_all(store: PromotionStore, github_factory: Callable[[], object],
+                  logger=None) -> dict:
+    """Reconcile EVERY non-terminal promotion against live GitHub (LB6) — the scheduled-reconciler
+    entrypoint, so an overnight merge/deploy is recorded even when no browser is open. Reuses the
+    SAME `reconcile` (no second code path), so it's idempotent + backfills exactly like the on-read
+    path. Builds the bot ONCE for the whole sweep (the per-promotion get_status reads reuse it).
+    Bounded: only non-terminal promotions; a per-promotion error is logged + skipped, never aborts
+    the sweep. Returns {checked, transitioned:[{id, events}]}."""
+    promotions = store.list_non_terminal()
+    if not promotions:
+        return {"checked": 0, "transitioned": []}
+    if logger and len(promotions) > 20:
+        # ~3 GitHub calls each per sweep — flag when the non-terminal set is large enough to pressure
+        # the installation-token budget (shared with viewer polls), so an operator can react.
+        logger.warning("scheduled reconcile sweeping %s non-terminal promotions — watch the GitHub "
+                       "API budget", len(promotions))
+    gh = github_factory()          # one bot client for the sweep (its token caches internally)
+    factory = lambda: gh           # reconcile's lazy enrichment reuses the same client  # noqa: E731
+
+    checked = 0
+    transitioned: list[dict] = []
+    for p in promotions:
+        if p.pr_number is None:
+            continue
+        try:
+            status = gh.get_status(p.pr_number)
+            appended = reconcile(store, p, status, factory)
+            checked += 1
+            if appended:
+                transitioned.append({"id": p.id, "pr_number": p.pr_number, "events": appended})
+        except Exception:  # noqa: BLE001 — one bad promotion must not abort the whole sweep
+            if logger:
+                logger.exception("scheduled reconcile failed for PR #%s", p.pr_number)
+    return {"checked": checked, "transitioned": transitioned}

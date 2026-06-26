@@ -114,6 +114,7 @@ class StoreBackend(Protocol):
     def get_promotion(self, promotion_id: str) -> Optional[dict]: ...
     def find_promotion_by_pr(self, pr_number: int) -> Optional[dict]: ...
     def list_promotions(self, requester_email: Optional[str]) -> list[dict]: ...  # newest first
+    def list_non_terminal(self) -> list[dict]: ...  # all non-terminal (for the scheduler)
     def update_promotion(self, promotion_id: str, fields: dict) -> None: ...
     def insert_snapshot(self, row: dict) -> None: ...
     def list_snapshots(self, promotion_id: str) -> list[dict]: ...  # oldest -> newest
@@ -171,6 +172,11 @@ class PromotionStore:
     def list_promotions(self, requester_email: Optional[str] = None) -> list[Promotion]:
         """Promotions, newest first. `requester_email=None` => all (the caller enforces the role)."""
         return [_as(Promotion, r) for r in self._b.list_promotions(requester_email)]
+
+    def list_non_terminal(self) -> list[Promotion]:
+        """All non-terminal promotions (for the scheduled reconciler, LB6) — the ones still worth
+        polling GitHub for. Terminal ones (deployed/closed/deploy_failed) are skipped."""
+        return [_as(Promotion, r) for r in self._b.list_non_terminal()]
 
     def update_cache(self, promotion_id: str, *, current_phase: Optional[str],
                      live_status: Optional[dict], terminal: bool,
@@ -272,6 +278,9 @@ class InMemoryBackend:
         rows = [dict(r) for r in self._promotions.values()
                 if requester_email is None or r.get("requester_email") == requester_email]
         return sorted(rows, key=lambda r: r["created_at"], reverse=True)  # newest first
+
+    def list_non_terminal(self) -> list[dict]:
+        return [dict(r) for r in self._promotions.values() if not r.get("terminal")]
 
     def update_promotion(self, promotion_id: str, fields: dict) -> None:
         if promotion_id in self._promotions:
@@ -453,6 +462,9 @@ class PgBackend:
         return self._all(
             "SELECT * FROM promotions WHERE requester_email = %s ORDER BY created_at DESC",
             (requester_email,))
+
+    def list_non_terminal(self) -> list[dict]:
+        return self._all("SELECT * FROM promotions WHERE terminal = false ORDER BY created_at", ())
 
     def update_promotion(self, promotion_id: str, fields: dict) -> None:
         cols = list(fields)

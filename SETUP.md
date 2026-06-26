@@ -119,6 +119,20 @@ The app's schema is config-driven too, via an app env var (defaults work for eve
 (`WorkspaceClient().database.generate_database_credential(instance_names=[…])`) and uses it as the
 Postgres password (`sslmode=require`). Nothing static is stored or committed.
 
+**Scheduled reconciler (LB6) — audit completeness when no one is viewing.** A config-driven in-app
+periodic task (`APP_RECONCILE_INTERVAL_SEC`, default 300s; 0/unset disables) sweeps all NON-terminal
+promotions and runs the SAME `reconcile` (LB4) over each — so an overnight merge/deploy is recorded
+even if no browser was open. **Why an app task, not a DABs job:** it reuses the app's live store +
+bot factory + the injected PG*/secret env with zero connection re-plumbing (a separate job wouldn't
+get the app's `database` binding injection and would have to re-resolve the Lakebase connection); the
+Databricks Apps container runs continuously (not scale-to-zero), so a periodic task is reliable.
+Idempotent (reuses the same reconcile + the `uq_audit_milestone` dedup), so a multi-replica deploy is
+safe — but each replica runs its own sweep, so the GitHub API call rate scales with the replica count
+(the 300s default comfortably accommodates 2–3 replicas; raise it if you scale out further or have
+many non-terminal promotions — the reconciler logs a warning past ~20). To switch to a DABs job
+instead, add a `resources/*.job.yml` Python task that calls `reconcile.reconcile_all(store,
+github_app_factory)` after building the store from the SP-OAuth path.
+
 **Connectivity smoke** (`SELECT 1` via OAuth, no password):
 ```bash
 python scripts/verify_lakebase.py --profile cerc-mlops-dev          # local operator (your identity)

@@ -19,6 +19,7 @@ Bearer branch is retained only for transitional app-to-app callers and tests.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -53,11 +54,56 @@ async def _lifespan(app: FastAPI):
     app.state.store = promotion_store.build_store_from_env()  # raises (fail-fast) if Lakebase is down
     logger.info("Lakebase store: %s",
                 "initialized (migrations applied)" if app.state.store else "absent (no PGHOST — local/test)")
+    reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
     finally:
+        if reconciler is not None:
+            reconciler.cancel()
+            try:
+                await reconciler  # drain any in-flight sweep BEFORE closing the pool it uses
+            except asyncio.CancelledError:
+                pass
         if app.state.store is not None:
             app.state.store.close()  # release the connection pool on graceful shutdown
+
+
+def _start_scheduled_reconciler(store):
+    """LB6: a config-driven in-app periodic reconciler. We use the app's own task (not a separate
+    DABs job) because it REUSES the app's live store + bot factory + injected PG*/secret env with
+    ZERO connection re-plumbing — a job wouldn't get the app's `database` binding injection and would
+    have to re-resolve the Lakebase connection. The Databricks Apps container runs continuously (not
+    scale-to-zero), so a periodic task is reliable. Enabled + paced by `APP_RECONCILE_INTERVAL_SEC`
+    (>0); disabled when 0/unset or no store. Idempotent (reuses LB4 reconcile), so a multi-replica
+    deploy is safe (the partial unique index dedups)."""
+    try:
+        interval = int(os.environ.get("APP_RECONCILE_INTERVAL_SEC", "0"))
+    except ValueError:
+        interval = 0
+    if store is None or interval <= 0:
+        logger.info("Scheduled reconciler: disabled (APP_RECONCILE_INTERVAL_SEC=%s, store=%s)",
+                    os.environ.get("APP_RECONCILE_INTERVAL_SEC"), store is not None)
+        return None
+    floor = 60  # guard a misconfigured tiny interval from hammering the GitHub API budget
+    if interval < floor:
+        logger.warning("APP_RECONCILE_INTERVAL_SEC=%s below the %ss floor — clamping.", interval, floor)
+        interval = floor
+
+    async def _loop():
+        logger.info("Scheduled reconciler: every %ss over non-terminal promotions", interval)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                # Run the blocking DB+HTTP sweep off the event loop.
+                result = await asyncio.to_thread(
+                    reconcile_mod.reconcile_all, store, app_logic.github_app_factory, logger)
+                if result["transitioned"]:
+                    logger.info("Scheduled reconcile: %s checked, transitions=%s",
+                                result["checked"], result["transitioned"])
+            except Exception:  # noqa: BLE001 — never let the loop die on one bad sweep
+                logger.exception("scheduled reconcile sweep failed")
+
+    return asyncio.create_task(_loop())
 
 
 app = FastAPI(title="genie-promote app", lifespan=_lifespan)

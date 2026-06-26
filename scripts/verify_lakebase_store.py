@@ -109,10 +109,12 @@ def main() -> int:
         assert store.append_audit_event(p.id, "merged", actor_github_login="x") is None, "dup milestone skipped"
         assert [e.event_type for e in store.list_audit_events(p.id)].count("merged") == 1, "no dup row"
 
+        assert any(x.id == p.id for x in store.list_non_terminal()), "non-terminal listed (LB6)"
         store.update_cache(p.id, current_phase="deployed",
                            live_status={"phase": "deployed", "merged": True}, terminal=True)
         got = store.get_promotion(p.id)
         assert got.current_phase == "deployed" and got.terminal is True, "cache update"
+        assert all(x.id != p.id for x in store.list_non_terminal()), "terminal NOT listed (LB6)"
         assert got.live_status == {"phase": "deployed", "merged": True}, "live_status jsonb round-trips"
         print("OK — migrations + full round-trip + append-only audit + cache all pass on real Lakebase")
     finally:
