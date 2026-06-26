@@ -7,19 +7,87 @@
  * progress animation, not a fabricated verdict. When the result arrives, `review.timeline`
  * overrides labels + statuses.
  */
+import type { Review } from './types';
 import type { StepStatus, TimelineStep } from './types';
+import type { PromoteStatus } from './api';
 
 export const PIPELINE_STEPS: { key: string; label: string }[] = [
   { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)' },
   { key: 'review', label: 'Revisão do agente (Genie Reviewer)' },
   { key: 'eval', label: 'Eval-run' },
-  { key: 'approval', label: 'Aprovação do Steward' },
+  { key: 'pr_review', label: 'Revisão do PR (aprovação de merge)' },
+  { key: 'merge', label: 'Merge para main' },
+  { key: 'approval', label: 'Aprovação do Steward (deploy)' },
   { key: 'deploy', label: 'Deploy em produção (service principal)' },
 ];
 
 /** The steps to show while the review is running (all pending; the animation conveys activity). */
 export function pendingTimeline(): TimelineStep[] {
   return PIPELINE_STEPS.map((s) => ({ ...s, status: 'pending' as StepStatus }));
+}
+
+/** Label fallbacks for the verdict steps if the server omits one (it always emits all three). */
+const VERDICT_LABELS: Record<string, string> = {
+  checks: 'Checagens determinísticas (pré-render + allowlist)',
+  review: 'Revisão do agente (Genie Reviewer)',
+  eval: 'Eval-run',
+};
+
+/**
+ * Build the 7-step promotion pipeline (GH5): the first 3 come from the review VERDICT
+ * (`review.timeline` — checks/review/eval, preserving the server's labels + statuses), the last 4
+ * are driven LIVE by the polled `get_status` (pr_review/merge/approval/deploy). Reflect, never
+ * assert — a step is `pass` only when GitHub reports it, otherwise pending/running.
+ */
+export function buildPromotionSteps(review: Review, live: PromoteStatus | null): TimelineStep[] {
+  const byKey = new Map(review.timeline.map((s) => [s.key, s]));
+  const verdict: TimelineStep[] = ['checks', 'review', 'eval'].map((key) => {
+    const s = byKey.get(key);
+    return s ?? { key, label: VERDICT_LABELS[key], status: 'pending' as StepStatus };
+  });
+
+  const prReview: StepStatus = live?.merged
+    ? 'pass'
+    : live?.review_decision === 'approved'
+      ? 'pass'
+      : live?.review_decision === 'changes_requested'
+        ? 'fail'
+        : live
+          ? 'running'
+          : 'pending';
+
+  const merge: StepStatus = live?.merged
+    ? 'pass'
+    : // 'running' = all merge preconditions met (can't merge until checks pass + the PR is approved).
+      live && live.checks === 'success' && live.review_decision === 'approved'
+      ? 'running'
+      : 'pending';
+
+  const approval: StepStatus =
+    live?.deploy.status === 'waiting'
+      ? 'running'
+      : // 'completed' here means the Environment gate was RELEASED, not that the deploy succeeded —
+        // the deploy step below carries the run's success/failure.
+        live && ['queued', 'in_progress', 'completed'].includes(live.deploy.status)
+        ? 'pass'
+        : 'pending';
+
+  const deploy: StepStatus =
+    live?.phase === 'deployed'
+      ? 'pass'
+      : live?.phase === 'deploy_failed'
+        ? 'fail'
+        : live?.phase === 'deploying'
+          ? 'running'
+          : 'pending';
+
+  return [
+    ...verdict,
+    { key: 'pr_review', label: 'Revisão do PR (aprovação de merge)', status: prReview },
+    { key: 'merge', label: 'Merge para main', status: merge },
+    { key: 'approval', label: 'Aprovação do Steward (deploy)', status: approval },
+    { key: 'deploy', label: 'Deploy em produção (service principal)', status: deploy },
+  ];
 }
 
 /** Glyph per status (a hollow ring for pending is drawn in CSS). */

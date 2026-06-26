@@ -144,11 +144,7 @@
         </a>
       </div>
     {/if}
-    <ReviewPanel
-      review={promotion.review}
-      {userEmail}
-      deployed={promotion.liveStatus?.phase === 'deployed'}
-    >
+    <ReviewPanel review={promotion.review} {userEmail} liveStatus={promotion.liveStatus}>
       {#snippet approval()}
         <ApprovalSection {promotion} />
       {/snippet}

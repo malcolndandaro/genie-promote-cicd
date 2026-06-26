@@ -166,11 +166,13 @@ def test_github_error_raised_on_non_2xx():
     assert e.value.status == 422
 
 
-def _status_transport(pull, check_runs, workflow_runs, approvals=None):
+def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=None):
     def t(method, url, headers, body):
         p = url.split("api.github.com")[-1]
         if p.endswith("/access_tokens"):
             return 201, {"token": "x"}
+        if "/reviews" in p:  # must precede the generic /pulls/{n} branch (path also has /pulls/)
+            return 200, reviews or []
         if "/pulls/" in p and p.split("/pulls/")[1].split("?")[0].isdigit():
             return 200, pull
         if "/check-runs" in p:
@@ -202,6 +204,51 @@ def test_status_checks_failed():
 def test_status_open_when_checks_pass_pre_merge():
     s = _status_transport(_OPEN_PR, [{"status": "completed", "conclusion": "success"}], []).get_status(1)
     assert s["checks"] == "success" and s["phase"] == "open"
+
+
+def test_status_review_decision_approved():
+    s = _status_transport(
+        _OPEN_PR, [{"status": "completed", "conclusion": "success"}], [],
+        reviews=[{"user": {"login": "steward-gh"}, "state": "APPROVED"}],
+    ).get_status(1)
+    assert s["review_decision"] == "approved"
+
+
+def test_status_review_decision_changes_requested_uses_latest_per_user():
+    # The same reviewer first APPROVED, then later requested changes — the LATEST state wins.
+    s = _status_transport(
+        _OPEN_PR, [{"status": "completed", "conclusion": "success"}], [],
+        reviews=[
+            {"user": {"login": "steward-gh"}, "state": "APPROVED"},
+            {"user": {"login": "steward-gh"}, "state": "CHANGES_REQUESTED"},
+        ],
+    ).get_status(1)
+    assert s["review_decision"] == "changes_requested"
+
+
+def test_status_review_decision_dismissed_clears_prior_approval():
+    # An APPROVED then a later DISMISSED from the SAME user — the dismissal clears the approval.
+    s = _status_transport(
+        _OPEN_PR, [{"status": "completed", "conclusion": "success"}], [],
+        reviews=[
+            {"user": {"login": "steward-gh"}, "state": "APPROVED"},
+            {"user": {"login": "steward-gh"}, "state": "DISMISSED"},
+        ],
+    ).get_status(1)
+    assert s["review_decision"] == "review_required"
+
+
+def test_status_review_decision_required_when_no_reviews():
+    s = _status_transport(
+        _OPEN_PR, [{"status": "completed", "conclusion": "success"}], [], reviews=[],
+    ).get_status(1)
+    assert s["review_decision"] == "review_required"
+
+
+def test_status_merged_pr_review_decision_is_approved():
+    # A merged PR was approvable by definition — skip the reviews call and report approved.
+    s = _status_transport(_MERGED_PR, [{"status": "completed", "conclusion": "success"}], []).get_status(1)
+    assert s["review_decision"] == "approved"
 
 
 def test_status_awaiting_approval_after_merge():

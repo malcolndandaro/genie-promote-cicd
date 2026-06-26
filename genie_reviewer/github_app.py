@@ -209,11 +209,45 @@ class GitHubApp:
         _, cr = self._api("GET", self._repo_path(f"/commits/{head_sha}/check-runs"), "check runs")
         checks = _aggregate_checks((cr or {}).get("check_runs", []))
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
+        # A merged PR was approvable by definition; otherwise read the live PR-review decision.
+        review_decision = "approved" if merged else self._pr_review_decision(number)
         return {
             "pr_state": pr.get("state"), "merged": merged, "checks": checks,
+            "review_decision": review_decision,
             "deploy": deploy, "pr_url": pr.get("html_url"),
             "phase": _derive_phase(pr.get("state"), merged, checks, deploy),
         }
+
+    def _pr_review_decision(self, number: int) -> str:
+        """The PR's merge-approval gate, read from its reviews. Tolerant: any API hiccup or an empty
+        review list reads as `review_required` (the safe default — never asserts an approval).
+
+        Reviews arrive in chronological order; we keep each reviewer's LATEST decisive state. A
+        standing CHANGES_REQUESTED from anyone blocks; else any standing APPROVED clears it; else
+        it's still required. Only APPROVED/CHANGES_REQUESTED decide; a DISMISSED review CLEARS that
+        reviewer's prior decisive state (a dismissed approval no longer counts as standing approval);
+        COMMENTED/PENDING are ignored."""
+        status, reviews = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/pulls/{number}/reviews')}",
+            self._headers(self._token()), None)
+        if status != 200 or not reviews:
+            return "review_required"
+        latest: dict[str, str] = {}
+        for r in reviews:
+            login = (r.get("user") or {}).get("login")
+            state = r.get("state")
+            if not login:
+                continue
+            if state in ("APPROVED", "CHANGES_REQUESTED"):
+                latest[login] = state  # later entry wins -> latest decisive state per reviewer
+            elif state == "DISMISSED":
+                latest.pop(login, None)  # a dismissed review clears that reviewer's prior decision
+        states = latest.values()
+        if "CHANGES_REQUESTED" in states:
+            return "changes_requested"
+        if "APPROVED" in states:
+            return "approved"
+        return "review_required"
 
     def _deploy_status(self, merge_sha: str | None = None) -> dict:
         """THIS promotion's `deploy` run + whether its gate is waiting. Correlated to the PR's

@@ -2,30 +2,25 @@
   import { fly } from 'svelte/transition';
   import Badge from './Badge.svelte';
   import Pipeline from './Pipeline.svelte';
-  import { severityTone } from '../pipeline';
+  import { severityTone, buildPromotionSteps } from '../pipeline';
   import type { Review } from '../types';
 
   interface Props {
     review: Review;
     userEmail: string | null;
-    /** Once the prod deploy actually succeeds (live), advance the approval + deploy timeline rows. */
-    deployed?: boolean;
+    /** Live PR/CI/deploy status (GH3/GH5) — drives the git steps (pr_review/merge/approval/deploy)
+     * of the pipeline. Null until the first poll lands; reflects GitHub, never asserts. */
+    liveStatus?: import('../api').PromoteStatus | null;
     /** Optional steward-approval section rendered below the review (SV4/GH4). */
     approval?: import('svelte').Snippet;
   }
-  let { review, userEmail, deployed = false, approval }: Props = $props();
+  let { review, userEmail, liveStatus = null, approval }: Props = $props();
 
   let failed = $derived(review.gate.conclusion === 'failure');
   // Findings have no stable id; the list never reorders, so a rule_id+index key is unique & safe.
   let keyed = $derived(review.findings.map((f, i) => ({ ...f, _k: `${f.rule_id}-${i}` })));
-  // A real, completed prod deploy advances the approval + deploy rows (reflects GitHub, not a guess).
-  let timeline = $derived(
-    deployed
-      ? review.timeline.map((t) =>
-          t.key === 'approval' || t.key === 'deploy' ? { ...t, status: 'pass' as const } : t,
-        )
-      : review.timeline,
-  );
+  // The 7-step pipeline: verdict steps from review.timeline, git steps driven live by liveStatus.
+  let timeline = $derived(buildPromotionSteps(review, liveStatus));
 </script>
 
 <div class="review">

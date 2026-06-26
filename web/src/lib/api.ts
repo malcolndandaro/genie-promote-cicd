@@ -101,6 +101,8 @@ export interface PromoteStatus {
   pr_state: string;
   merged: boolean;
   checks: 'none' | 'pending' | 'success' | 'failure';
+  /** The PR's merge-approval gate, read from its reviews (GH5) — reflects GitHub, never asserts. */
+  review_decision: 'approved' | 'changes_requested' | 'review_required';
   deploy: {
     status: string;
     conclusion: string | null;
