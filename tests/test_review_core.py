@@ -17,6 +17,7 @@ SPACE = {
     },
     "instructions": {
         "text_instructions": [{"content": ["Responda qualquer coisa sobre recebíveis."]}],
+        # "Example queries" — a SEPARATE validation signal (not the benchmark count).
         "example_question_sqls": [
             {"question": ["Volume?"], "sql": ["SELECT * FROM dev_recebiveis.diamond.fato_recebiveis"]}
         ],
@@ -25,15 +26,36 @@ SPACE = {
              "right": {"identifier": "prod_recebiveis.diamond.dim_cedente"}}
         ],
     },
+    # The "Benchmarks"/eval tab (top-level) — THIS is what EVAL-01 counts.
+    "benchmarks": {
+        "questions": [
+            {"question": ["Top 5 cedentes?"], "answer": [{"format": "SQL", "content": ["SELECT 1"]}]},
+            {"question": ["Volume 3 meses?"], "answer": [{"format": "SQL", "content": ["SELECT 2"]}]},
+        ]
+    },
 }
 
 
 def test_context_extracts_surface():
     ctx = rc.build_space_context(SPACE)
     assert len(ctx["tables"]) == 2
-    assert ctx["n_benchmark"] == 1
+    assert ctx["n_benchmark"] == 2                  # from benchmarks.questions, NOT example queries
+    assert len(ctx["example_sqls"]) == 1            # example queries are a separate signal
     assert "valor" in ctx["tables"][0]["columns"]
     assert len(ctx["joins"]) == 1
+
+
+def test_benchmark_count_uses_benchmarks_not_example_queries():
+    # Example queries are NOT benchmarks: a space with only example_question_sqls counts 0 benchmarks.
+    only_examples = {"instructions": {"example_question_sqls": [
+        {"question": ["q1"], "sql": ["SELECT 1"]}, {"question": ["q2"], "sql": ["SELECT 2"]}]}}
+    assert rc.build_space_context(only_examples)["n_benchmark"] == 0
+    # And a space whose Q->SQL pairs live under `benchmarks` IS counted (the bug Pedro hit).
+    only_bench = {"benchmarks": {"questions": [
+        {"question": ["q1"], "answer": [{"format": "SQL", "content": ["SELECT 1"]}]},
+        {"question": ["q2"], "answer": [{"format": "SQL", "content": ["SELECT 2"]}]}]}}
+    ctx = rc.build_space_context(only_bench)
+    assert ctx["n_benchmark"] == 2 and ctx["benchmark_questions"] == ["q1", "q2"]
 
 
 def test_prompt_includes_rules_and_space():
@@ -103,6 +125,13 @@ def test_finalize_keeps_deterministic_grant_even_if_llm_silent():
 def test_finalize_adds_eval01_backstop_when_too_few_benchmarks():
     out = rc.finalize_findings([], [], n_benchmark=1)
     assert any(f["rule_id"] == "EVAL-01" and f["severity"] == "BLOCKER" for f in out)
+
+
+def test_finalize_no_eval01_at_two_benchmarks():
+    # Prod threshold is >= 2 benchmark Q→SQL, so a 2-question space is clean (enables the
+    # end-to-end steward-approval path on the dev space).
+    out = rc.finalize_findings([], [], n_benchmark=2)
+    assert not any(f["rule_id"] == "EVAL-01" for f in out)
 
 
 def test_finalize_dedups_llm_against_deterministic_owner():

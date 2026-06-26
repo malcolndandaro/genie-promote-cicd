@@ -35,17 +35,33 @@ def build_space_context(space: dict) -> dict:
         tables.append({"identifier": t.get("identifier", ""), "columns": cols})
     instr = (space.get("instructions") or {})
     text_instructions = [_as_text(ti.get("content")) for ti in (instr.get("text_instructions") or [])]
-    sqls = [_as_text(q.get("sql")) for q in (instr.get("example_question_sqls") or [])]
-    questions = [_as_text(q.get("question")) for q in (instr.get("example_question_sqls") or [])]
+    # TWO DISTINCT signals — do NOT conflate them:
+    #   - instructions.example_question_sqls = "Example queries" (sample Q->SQL shown to users).
+    #     Reviewed by the LLM for SQL conventions / cross-env refs, but NOT the benchmark count.
+    #   - benchmarks.questions = the "Benchmarks"/eval tab (a question + its expected SQL answer).
+    #     THIS is the eval benchmark coverage EVAL-01 gates on.
+    example_qsqls = instr.get("example_question_sqls") or []
+    bench_qs = ((space.get("benchmarks") or {}).get("questions")) or []
+
+    def _bench_sql(q: dict) -> str:
+        for a in (q.get("answer") or []):
+            if a.get("format") == "SQL":
+                return _as_text(a.get("content"))
+        return ""
+
+    sqls = [_as_text(q.get("sql")) for q in example_qsqls]
+    benchmark_questions = [_as_text(q.get("question")) for q in bench_qs]
+    benchmark_sqls = [_bench_sql(q) for q in bench_qs]
     joins = []
     for j in (instr.get("join_specs") or []):
         joins.append(f"{(j.get('left') or {}).get('identifier','')} ⋈ {(j.get('right') or {}).get('identifier','')}")
     return {
         "tables": tables,
         "instructions": text_instructions,
-        "example_sqls": sqls,
-        "benchmark_questions": questions,
-        "n_benchmark": len(questions),
+        "example_sqls": sqls,                       # "Example queries" — a separate validation signal
+        "benchmark_questions": benchmark_questions,  # the real eval benchmarks (Benchmarks tab)
+        "benchmark_sqls": benchmark_sqls,
+        "n_benchmark": len(bench_qs),                # EVAL-01 gates on benchmark coverage only
         "joins": joins,
     }
 
@@ -55,7 +71,7 @@ _SYSTEM = (
     "Você é o Genie Reviewer, um revisor automático de Genie Spaces da Acme. Você revisa "
     "a definição (serialized_space) de um espaço que está sendo PROMOVIDO PARA PRODUÇÃO, "
     "ÚNICA E EXCLUSIVAMENTE contra as regras do Genie Promotion Handbook fornecidas. Não invente "
-    "regras. Cada hallazgo DEVE citar um rule_id da lista. Responda em PORTUGUÊS.\n\n"
+    "regras. Cada achado DEVE citar um rule_id da lista. Responda em PORTUGUÊS.\n\n"
     "Checagens determinísticas (schema, bundle validate, allowlist de catálogo, verificação "
     "de grants) JÁ rodam no PR. Concentre-se na camada SEMÂNTICA/de política que elas não "
     "veem: catálogos de outro ambiente em SQL, ausência de perguntas de benchmark, instruções "
@@ -84,6 +100,12 @@ def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[d
     instr_block = "\n".join(f"  - {i[:600]}" for i in context.get("instructions", [])) or "  (nenhuma)"
     # SQL budget large enough that a catalog ref buried mid-query (ENV-01) is visible
     sql_block = "\n".join(f"  - {s[:1200]}" for s in context.get("example_sqls", [])) or "  (nenhum)"
+    # The eval benchmarks (Benchmarks tab) — the real Q->SQL coverage EVAL-01 counts; show them so the
+    # LLM can also assess the benchmark queries (conventions, cross-env refs).
+    bench_block = "\n".join(
+        f"  - {q[:200]} :: {s[:1000]}"
+        for q, s in zip(context.get("benchmark_questions", []), context.get("benchmark_sqls", []))
+    ) or "  (nenhuma)"
     grant_block = (
         "\n".join(f"  - {g.get('message')}" for g in (grant_findings or []))
         or "  (verificação de grants não reportou problemas)"
@@ -94,12 +116,12 @@ def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[d
         "ESPAÇO GENIE EM PROMOÇÃO PARA PRODUÇÃO:\n"
         f"data_sources (tabelas):\n{tables_block}\n\n"
         f"instruções gerais:\n{instr_block}\n\n"
-        f"SQL de exemplo:\n{sql_block}\n\n"
-        f"perguntas de benchmark: {context.get('n_benchmark', 0)}\n"
+        f"SQL de exemplo (Example queries):\n{sql_block}\n\n"
+        f"perguntas de benchmark ({context.get('n_benchmark', 0)}):\n{bench_block}\n\n"
         f"joins: {', '.join(context.get('joins', [])) or '(nenhum)'}\n\n"
         "ACHADOS DETERMINÍSTICOS DE GRANTS (considere como BLOCKER GRANT-01 se houver):\n"
         f"{grant_block}\n\n"
-        "Devolva o JSON de hallazgos."
+        "Devolva o JSON de achados."
     )
     return _SYSTEM, user
 
@@ -180,12 +202,12 @@ def decide_gate(findings: list[dict]) -> dict:
     n_block = sum(1 for f in valid if f["severity"] == "BLOCKER")
     if n == 0:
         return {"conclusion": "success", "blocker_count": 0,
-                "summary": "✅ Sem hallazgos contra o Genie Promotion Handbook."}
+                "summary": "✅ Sem achados contra o Genie Promotion Handbook."}
     if n_block:
         return {"conclusion": "failure", "blocker_count": n_block,
-                "summary": f"🔴 {n_block} de {n} hallazgo(s) são BLOCKER — promoção bloqueada."}
+                "summary": f"🔴 {n_block} de {n} achado(s) são BLOCKER — promoção bloqueada."}
     return {"conclusion": "neutral", "blocker_count": 0,
-            "summary": f"🟡 {n} hallazgo(s) assessor(es) — não bloqueiam."}
+            "summary": f"🟡 {n} achado(s) assessor(es) — não bloqueiam."}
 
 
 # --- Core 5: merge deterministic findings into the gate -------------------------
@@ -194,7 +216,7 @@ def decide_gate(findings: list[dict]) -> dict:
 # Deterministic findings OWN their rule_id; the LLM owns the rest (semantic rules).
 def finalize_findings(
     llm_findings: list[dict], deterministic_findings: list[dict] | None, n_benchmark: int,
-    min_benchmark: int = 3,
+    min_benchmark: int = 2,  # prod requires >= 2 benchmark Q→SQL (lets a 2-question space promote)
 ) -> list[dict]:
     det = list(deterministic_findings or [])
     if n_benchmark < min_benchmark and not any(f.get("rule_id") == "EVAL-01" for f in det):
@@ -202,7 +224,9 @@ def finalize_findings(
             "severity": "BLOCKER", "rule_id": "EVAL-01",
             "citation": "Genie Promotion Handbook › Quality › EVAL-01",
             "message": f"Apenas {n_benchmark} pergunta(s) de benchmark; produção exige >= {min_benchmark}.",
-            "suggestion": "Adicionar perguntas de benchmark (Q→SQL) ao espaço.",
+            "suggestion": ("Adicionar perguntas de benchmark na aba \"Benchmarks\" do Genie (pergunta "
+                           "+ resposta SQL esperada). Perguntas de exemplo (\"Example queries\") são "
+                           "uma validação à parte e não contam como benchmark."),
         })
     owned = {f.get("rule_id") for f in det}
     kept = [f for f in (llm_findings or []) if f.get("rule_id") not in owned]

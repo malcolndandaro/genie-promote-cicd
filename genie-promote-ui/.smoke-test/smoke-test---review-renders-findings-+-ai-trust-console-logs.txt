@@ -1,0 +1,10 @@
+=== Console Logs ===
+[debug] [vite] connecting... at http://localhost:8000/@vite/client:732:8
+[debug] [vite] connected. at http://localhost:8000/@vite/client:826:11
+[info] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold at http://localhost:8000/@fs/Users/malcoln.dandaro/Documents/Work/Projects/genie-promote-cicd/genie-promote-ui/node_modules/.vite/deps/react-dom_client.js?v=1be212b3:14329:48
+
+=== Console Errors (React errors) ===
+
+=== Page Errors ===
+
+=== Failed Requests ===

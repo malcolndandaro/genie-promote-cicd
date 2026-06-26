@@ -109,3 +109,126 @@ def test_claude_returns_first_choice_content():
 def test_claude_empty_when_no_choices():
     fake = NS(serving_endpoints=NS(query=lambda name, messages, max_tokens: NS(choices=[])))
     assert app_logic._claude("sys", "usr", "p", client=fake) == ""
+
+
+# --- _client auth-context branching (OBO / local profile / app SP) — offline ---
+
+def _capture_wc(monkeypatch):
+    """Patch WorkspaceClient to record ctor kwargs instead of connecting."""
+    seen = {}
+
+    class FakeWC:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(app_logic, "WorkspaceClient", FakeWC)
+    return seen
+
+
+def test_client_obo_uses_user_token(monkeypatch):
+    seen = _capture_wc(monkeypatch)
+    monkeypatch.setattr(app_logic, "Config", lambda: NS(host="https://dev.example"))
+    app_logic._client(profile="ignored-when-token", user_token="tok-123")
+    assert seen == {"host": "https://dev.example", "token": "tok-123", "auth_type": "pat"}
+
+
+def test_client_local_profile(monkeypatch):
+    seen = _capture_wc(monkeypatch)
+    app_logic._client(profile="cerc-mlops-dev")
+    assert seen == {"profile": "cerc-mlops-dev"}
+
+
+def test_client_app_sp_default(monkeypatch):
+    seen = _capture_wc(monkeypatch)
+    app_logic._client()  # no profile, no token -> app SP / default auth
+    assert seen == {}
+
+
+# --- request_promotion (GH2): review + export (OBO) + open PR/comment (bot) ---
+
+class _FakeGitHubApp:
+    def __init__(self):
+        self.promo = None
+        self.comment = None
+
+    def open_or_update_promotion(self, **kw):
+        self.promo = kw
+        return {"number": 7, "html_url": "https://github.com/o/r/pull/7"}
+
+    def upsert_comment(self, number, marker, body):
+        self.comment = {"number": number, "marker": marker, "body": body}
+        return {"id": 1, "updated": False}
+
+
+_FULL_REVIEW = {
+    "findings": [{"rule_id": "EVAL-01", "severity": "BLOCKER", "message": "poucas perguntas"}],
+    "gate": {"conclusion": "failure", "blocker_count": 1, "summary": "🔴 bloqueada"},
+    "eval": {"status": "advisory", "summary": "🟡 x"},
+    "timeline": [{"key": "checks", "label": "Checagens", "status": "pass"}],
+    "allowlist_violations": [],
+    "consumer_group": "account users",
+    "prod_serialized": {"big": "payload should be dropped"},
+    "dev_serialized": {"display_name": "Recebíveis", "n": 2},  # what the PR commits
+}
+
+
+def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                      resource_title="Recebíveis", github=gh)
+
+    # returns the UI review subset (NOT the big prod_serialized/dev_serialized) + the PR coordinates
+    assert out["pr"] == {"number": 7, "url": "https://github.com/o/r/pull/7"}
+    assert set(out["review"]) == set(app_logic.REVIEW_FIELDS)
+    assert "prod_serialized" not in out["review"] and "dev_serialized" not in out["review"]
+
+    # PER-SPACE: commits to this space's OWN branch + file (slug derived from the id), not a shared one
+    assert gh.promo["branch"] == "promote/sp1" and out["branch"] == "promote/sp1"
+    assert gh.promo["path"] == "src/genie/sp1.serialized_space.json"
+    assert "display_name" in gh.promo["content"]
+    # + a per-space title sidecar so render.sh can name the generated prod genie_spaces resource
+    assert gh.promo["extra_files"]["src/genie/sp1.title"].strip() == "Recebíveis"
+    # the comment mirrors the review and attributes the human requester
+    assert gh.comment["number"] == 7
+    assert "malcoln@x" in gh.comment["body"] and "EVAL-01" in gh.comment["body"]
+
+
+def test_two_spaces_get_distinct_branches_and_paths():
+    # The core of the bug fix: different spaces never collide on a shared branch/PR/file.
+    assert app_logic.branch_for(app_logic.space_slug("aaa")) != app_logic.branch_for(app_logic.space_slug("bbb"))
+    assert app_logic.src_path_for(app_logic.space_slug("aaa")) != app_logic.src_path_for(app_logic.space_slug("bbb"))
+
+
+def test_space_slug_pinned_and_derived(monkeypatch):
+    # A pinned slug (APP_SPACE_SLUGS) wins; otherwise derive a valid identifier from the id.
+    monkeypatch.setattr(app_logic, "_SPACE_SLUGS", {"01f16e83": "receivables"})
+    assert app_logic.space_slug("01f16e83") == "receivables"
+    # an id starting with a digit is prefixed so it's a valid branch + DABs resource key
+    assert app_logic.space_slug("01f1717f") == "s_01f1717f"
+    assert app_logic.space_slug("my_space") == "my_space"
+
+
+def test_promotion_status_reads_via_injected_bot():
+    class FakeGH:
+        def get_status(self, number):
+            return {"phase": "awaiting_approval", "number": number, "merged": True}
+
+    out = app_logic.promotion_status(6, github=FakeGH())
+    assert out == {"phase": "awaiting_approval", "number": 6, "merged": True}
+
+
+def test_github_app_built_as_app_sp_never_user_token(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(app_logic, "_client",
+                        lambda profile=None, **k: seen.update(profile=profile, kwargs=k) or "wc")
+    monkeypatch.setattr(app_logic, "_secret", lambda w, scope, key: f"{key}-val")
+    gh = app_logic._github_app("prof")
+    assert "user_token" not in seen["kwargs"]  # the bot is the app SP, never the user
+    assert gh.owner == "malcolndandaro" and gh.repo == "genie-promote-cicd"
+
+
+def test_secret_decodes_base64_value():
+    import base64
+    fake = NS(secrets=NS(get_secret=lambda scope, key: NS(value=base64.b64encode(b"hello").decode())))
+    assert app_logic._secret(fake, "genie_promote", "github_app_id") == "hello"

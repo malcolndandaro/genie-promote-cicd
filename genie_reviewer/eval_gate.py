@@ -3,7 +3,7 @@
 Runs the Genie benchmark eval, gates promotion on pass-rate, and DEGRADES GRACEFULLY
 (advisory, non-blocking) when there are no benchmark questions or the endpoint is
 unavailable — promotion is never hard-failed on eval infra. The floor that still
-protects quality is the agent's static EVAL-01 (≥3 benchmark Q→SQL) + the human approval.
+protects quality is the agent's static EVAL-01 (≥2 benchmark Q→SQL) + the human approval.
 
 Benchmark questions are authored in the Genie UI (not in serialized_space; no CLI to
 create them), so a space without authored benchmarks hits the advisory path — the common

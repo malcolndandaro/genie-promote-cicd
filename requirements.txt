@@ -1,0 +1,12 @@
+# Single front-door app (FastAPI + Svelte) deps — assembled into build/promote_app by
+# scripts/build_promote_app.sh. (Streamlit retired at AK9; the engine-only API + AppKit at SV5.)
+databricks-sdk>=0.111.0
+fastapi
+uvicorn
+# GitHub App (bot) auth for the PR integration — mint the App JWT (RS256).
+pyjwt>=2.8.0
+cryptography>=42.0.0
+# Lakebase (Databricks Postgres) — durable promotion state/audit/cache (ADR-0005). psycopg3 + its
+# pool back the promotion_store; the app connects as its SP via short-lived OAuth (no password).
+psycopg[binary]>=3.1
+psycopg_pool>=3.2

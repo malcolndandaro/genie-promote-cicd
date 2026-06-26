@@ -27,8 +27,8 @@ _WRITE_PERMS = ("write", "maintain", "admin")
 
 _FIX_SYSTEM = (
     "Você é o Genie Reviewer em MODO CORREÇÃO. Recebe um serialized_space de um Genie Space "
-    "e uma lista de hallazgos. Devolva o serialized_space COMPLETO e corrigido que: "
-    "(1) resolve os hallazgos seguindo o Genie Promotion Handbook; "
+    "e uma lista de achados. Devolva o serialized_space COMPLETO e corrigido que: "
+    "(1) resolve os achados seguindo o Genie Promotion Handbook; "
     "(2) NÃO remove nem adiciona tabelas em data_sources e NÃO altera os identifiers; "
     "(3) preserva a estrutura e o comportamento do restante; "
     "(4) torna instruções vagas específicas (cite as tabelas Diamond) e ajusta SQL às "
@@ -54,9 +54,9 @@ def build_fix_prompt(space: dict, findings: list[dict]) -> tuple[str, str]:
     fixable = fixable_findings(findings)
     issues = "\n".join(
         f"- {f.get('rule_id')} [{f.get('severity')}]: {f.get('message')}" for f in fixable
-    ) or "(nenhum hallazgo auto-corrigível)"
+    ) or "(nenhum achado auto-corrigível)"
     user = (
-        f"HALLAZGOS A CORRIGIR:\n{issues}\n\n"
+        f"ACHADOS A CORRIGIR:\n{issues}\n\n"
         f"SERIALIZED_SPACE ATUAL:\n```json\n{json.dumps(space, ensure_ascii=False, indent=2)}\n```\n\n"
         "Devolva o serialized_space COMPLETO corrigido em um único bloco de código JSON."
     )
