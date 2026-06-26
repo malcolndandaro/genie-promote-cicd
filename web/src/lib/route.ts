@@ -16,11 +16,8 @@ export interface Route {
 
 export const ROUTE_IDS: readonly RouteId[] = ['inicio', 'espacos', 'promocoes', 'novo'];
 
-/**
- * The default landing route. UI1 lands on `espacos` to preserve the current behavior (the spaces
- * flow + recover-on-load render there); UI4 switches this to `inicio` once the dashboard exists.
- */
-export const DEFAULT_ROUTE: Route = { id: 'espacos' };
+/** The default landing route — the business-user home/dashboard (UI4). */
+export const DEFAULT_ROUTE: Route = { id: 'inicio' };
 
 function isRouteId(s: string): s is RouteId {
   return (ROUTE_IDS as readonly string[]).includes(s);

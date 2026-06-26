@@ -19,9 +19,9 @@ test('lands on the default route with the sidebar nav and an active item', async
   for (const label of ['Início', 'Meus espaços', 'Minhas promoções', /Novo Genie Space/]) {
     await expect(page.getByRole('link', { name: label })).toBeVisible();
   }
-  // Default route is "Meus espaços", reflected in the URL and the active link.
-  await expect(page).toHaveURL(/#\/espacos$/);
-  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
+  // Default route is the home ("Início"), reflected in the URL and the active link.
+  await expect(page).toHaveURL(/#\/inicio$/);
+  await expect(page.getByRole('link', { name: 'Início' })).toHaveAttribute('aria-current', 'page');
 });
 
 test('sidebar navigation switches the screen AND the URL hash', async ({ page }) => {
@@ -29,7 +29,7 @@ test('sidebar navigation switches the screen AND the URL hash', async ({ page })
 
   await page.getByRole('link', { name: 'Início' }).click();
   await expect(page).toHaveURL(/#\/inicio$/);
-  await expect(page.getByText(/O painel inicial chega em breve/)).toBeVisible();
+  await expect(page.getByText('Autoria no dev')).toBeVisible(); // the home's 3-step flow
   await expect(page.getByRole('link', { name: 'Início' })).toHaveAttribute('aria-current', 'page');
 
   await page.getByRole('link', { name: 'Minhas promoções' }).click();
@@ -49,8 +49,8 @@ test('a deep-linked hash lands on the right screen on load', async ({ page }) =>
 
 test('an unknown hash falls back to the default screen', async ({ page }) => {
   await page.goto('/#/bogus');
-  await expect(page).toHaveURL(/#\/espacos$/);
-  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
+  await expect(page).toHaveURL(/#\/inicio$/);
+  await expect(page.getByRole('link', { name: 'Início' })).toHaveAttribute('aria-current', 'page');
 });
 
 test('on a narrow viewport the sidebar collapses into a toggle/drawer', async ({ page }) => {

@@ -42,7 +42,7 @@ test.beforeEach(async ({ page }) => {
 
 async function promote(page: import('@playwright/test').Page, status: unknown) {
   await page.route(`**/api/promote/${PR.number}/status`, (route) => route.fulfill({ json: status }));
-  await page.goto('/');
+  await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 }
 

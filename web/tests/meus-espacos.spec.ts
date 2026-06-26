@@ -14,7 +14,7 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
   page,
 }) => {
   await page.route('**/api/spaces', oneSpace);
-  await page.goto('/');
+  await page.goto('/#/espacos');
 
   // App shell sidebar present.
   await expect(page.getByRole('link', { name: 'Meus espaços' })).toBeVisible();
@@ -47,7 +47,7 @@ test('while one space is promoting, the other space cards are disabled', async (
       },
     });
   });
-  await page.goto('/');
+  await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
 
   // The busy card spins; the OTHER space's card is disabled to prevent a concurrent request.
@@ -58,14 +58,14 @@ test('while one space is promoting, the other space cards are disabled', async (
 
 test('navigates to the "Novo Genie Space" screen and shows the placeholder', async ({ page }) => {
   await page.route('**/api/spaces', oneSpace);
-  await page.goto('/');
+  await page.goto('/#/espacos');
   await page.getByRole('link', { name: /Novo Genie Space/ }).click();
   await expect(page.getByText('Em breve — assistente de criação', { exact: false })).toBeVisible();
 });
 
 test('shows the empty state with a next action when there are no spaces', async ({ page }) => {
   await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [] } }));
-  await page.goto('/');
+  await page.goto('/#/espacos');
 
   await expect(page.getByText('Nenhum Genie Space encontrado')).toBeVisible();
   await expect(page.getByRole('button', { name: /Novo Genie Space/ })).toBeVisible();
@@ -75,7 +75,7 @@ test('shows an error state with retry when /api/spaces fails', async ({ page }) 
   await page.route('**/api/spaces', (route) =>
     route.fulfill({ status: 502, json: { detail: 'engine error: list_spaces' } }),
   );
-  await page.goto('/');
+  await page.goto('/#/espacos');
 
   await expect(page.getByText(/Não foi possível listar os espaços/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();

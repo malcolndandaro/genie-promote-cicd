@@ -203,6 +203,28 @@ export class Promotion {
     }
   }
 
+  /**
+   * Open a promotion by id (the `#/promocoes/:id` deep-link) — fetch its STORED detail + render it
+   * WITHOUT re-running the reviewer. Like `open()` but starting from just an id (no pre-fetched
+   * summary); uses the detail's own promotion record as the summary. Idempotent for the same id so a
+   * re-render of the route doesn't reload. The polling effect resumes the live status once `pr` is set.
+   */
+  async openById(id: string): Promise<void> {
+    if (this.promotionId === id && this.phase !== 'idle') return; // already showing this one
+    this.select(null);
+    this.promotionId = id;
+    try {
+      const detail = await getPromotionDetail(id);
+      if (this.promotionId !== id) return; // another open raced in — drop this result
+      this._apply(detail.promotion, detail);
+      this.phase = detail.review ? 'reviewed' : 'idle';
+    } catch (e) {
+      if (this.promotionId !== id) return;
+      this.error = e instanceof Error ? e.message : String(e);
+      this.phase = 'error';
+    }
+  }
+
   /** Shared: apply a fetched promotion detail to the reactive state (recover + open). */
   private _apply(summary: PromotionSummary, detail: PromotionDetail): void {
     this.resource = {

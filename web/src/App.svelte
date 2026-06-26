@@ -2,8 +2,7 @@
   import AppShell from './lib/components/AppShell.svelte';
   import type { NavItem } from './lib/components/Sidebar.svelte';
   import Topbar from './lib/components/Topbar.svelte';
-  import Card from './lib/components/Card.svelte';
-  import Button from './lib/components/Button.svelte';
+  import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
   import NovoEspaco from './screens/NovoEspaco.svelte';
@@ -11,17 +10,15 @@
   import { Promotion } from './lib/promotion.svelte';
   import { Router } from './lib/router.svelte';
   import type { RouteId } from './lib/route';
-  import type { Whoami } from './lib/types';
+  import type { Whoami, PromotableResource } from './lib/types';
 
   // The shared promotion flow state (selection → review → approval).
   const promotion = new Promotion();
 
-  // Hash router — the URL is the single source of truth for the active screen (deep-links, reload,
-  // browser back/forward, and the sidebar's plain <a href="#/…"> links all work for free).
+  // Hash router — the URL is the single source of truth for the active screen.
   const router = new Router();
 
-  // OBO identity (drives the header identity + the review AI-trust badge + SoD). Display-only, so a
-  // failure is silent — the spaces error surfaces any re-auth need.
+  // OBO identity (drives the header identity/role + the review AI-trust badge + SoD). Display-only.
   let who = $state<Whoami | null>(null);
   getWhoami()
     .then((w) => {
@@ -29,9 +26,9 @@
       promotion.viewerEmail = w.email;
       promotion.requesterEmail = w.email;
       promotion.steward = w.steward;
-      // Identity-derived role (no manual toggle): the viewer IS the Steward when their OBO email
-      // matches the configured steward. The approval view follows this + whether the promotion is
-      // theirs; the real SoD is still GitHub's gate.
+      // Identity-derived role: the viewer IS the Steward when their OBO email matches the configured
+      // steward. The approval view follows this + whether the promotion is theirs; the real SoD is
+      // still GitHub's gate.
       promotion.isSteward = !!(
         w.email && w.steward && w.email.toLowerCase() === w.steward.toLowerCase()
       );
@@ -39,7 +36,7 @@
     .catch(() => {});
 
   // Recover-on-load (LB3): restore the most-recent promotion from its STORED snapshot — no reviewer
-  // re-run. Best-effort + independent of whoami; the live status resumes via the polling effect.
+  // re-run. Provides continuity for the "Meus espaços" flow; the home/history surface promotions too.
   promotion.recover().catch(() => {});
 
   const NAV_ITEMS: NavItem[] = [
@@ -56,12 +53,17 @@
     novo: 'Novo Genie Space',
   };
 
-  // Open a promotion from the history list: load its stored snapshot + audit, then show it in the
-  // review view (the "Meus espaços" panel renders the active promotion). No reviewer re-run.
-  // (UI4 will deep-link this to #/promocoes/:id; UI1 preserves the existing in-place behavior.)
-  async function openFromHistory(summary: PromotionSummary): Promise<void> {
+  // Start a promotion for a space and drop into the in-place review flow on "Meus espaços".
+  function promoteSpace(resource: PromotableResource): void {
+    promotion.select(resource);
+    promotion.requestPromotion();
     router.navigate('espacos');
-    await promotion.open(summary);
+  }
+
+  // Open a promotion's detail via its shareable deep-link (#/promocoes/:id) — the detail view loads
+  // the STORED snapshot (no reviewer re-run).
+  function openPromotion(summary: PromotionSummary): void {
+    router.navigate('promocoes', summary.id);
   }
 </script>
 
@@ -71,29 +73,22 @@
   {/snippet}
 
   {#if router.route.id === 'inicio'}
-    <Card title="Início" subtitle="Painel do usuário — visão geral dos seus espaços e promoções.">
-      <div class="placeholder">
-        <p class="muted">
-          O painel inicial chega em breve: seus Genie Spaces e suas promoções recentes em um só lugar,
-          com um resumo de como funciona a promoção governada.
-        </p>
-        <Button onclick={() => router.navigate('espacos')}>Ir para Meus espaços →</Button>
-      </div>
-    </Card>
+    <Home
+      onPromote={promoteSpace}
+      onOpenPromotion={openPromotion}
+      onGoToNew={() => router.navigate('novo')}
+    />
   {:else if router.route.id === 'espacos'}
     <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => router.navigate('novo')} />
   {:else if router.route.id === 'promocoes'}
-    <MinhasPromocoes {who} onOpen={openFromHistory} />
+    <MinhasPromocoes
+      {who}
+      {promotion}
+      onOpen={openPromotion}
+      detailId={router.route.param}
+      onBack={() => router.navigate('promocoes')}
+    />
   {:else}
     <NovoEspaco />
   {/if}
 </AppShell>
-
-<style>
-  .placeholder {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-4);
-  }
-</style>
