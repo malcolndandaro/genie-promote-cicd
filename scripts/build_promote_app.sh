@@ -7,7 +7,9 @@
 # static/) into build/promote_app/ with the engine's app.yaml as the root manifest.
 # engine_api/main.py resolves the SPA at <app-root>/static.
 #
-# Run BEFORE `databricks bundle validate/deploy -t dev` (the promote_app resource points here).
+# Run BEFORE `databricks bundle deploy -t prod` (the promote_app resource now lives in the PROD
+# target — ADR-0006/A1). `bundle validate` only needs build/promote_app to EXIST, so pr-checks
+# stubs the dir instead of running this full build; deploy.yml runs this for real.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

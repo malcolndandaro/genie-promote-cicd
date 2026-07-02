@@ -129,3 +129,12 @@ alternative (Decision 3) is deferred without a trigger condition beyond "a custo
 the app + its state, which is the exact problem this ADR solves; (b) **Lakebase migration from the
 old dev instance** — not worth building for disposable demo data (Decision 6); (c) **a 3rd
 control-plane workspace now** — deferred, not rejected outright (Decision 3).
+
+**Sequencing — the app is deliberately half-migrated after A1 (do not deploy A1 alone to prod).**
+A1 relocates the resources and builds the client factory *shape*, but every promotion **read-path**
+caller (`app_logic.list_spaces` / `export_serialized` / `review_space`) still uses the default
+`scope="prod"` client. Because OBO cannot span workspaces (Decision 2), a prod-hosted app on A1 alone
+**cannot read an author's dev Space** — the read callers must be rewired to `scope="dev-sp"` keyed on
+the OBO-verified identity. That rewiring, plus provisioning the dev SP, is owned by **A2** (tracked as
+an explicit A2 acceptance criterion). This is safe because merges and prod deploys are human-gated
+(SoD): A1 is a foundation commit, not a shippable prod state on its own.
