@@ -10,6 +10,7 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 import app_logic  # noqa: E402
+import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
 
 
 def test_build_timeline_clean_pending_approval():
@@ -78,6 +79,102 @@ def test_export_serialized_empty_when_missing():
     fake = NS(genie=NS(get_space=lambda sid, include_serialized_space=False:
                        NS(serialized_space=None)))
     assert app_logic.export_serialized("sid", "p", client=fake) == {}
+
+
+# --- A2: cross-workspace read-path rewiring (list_spaces/export_serialized -> dev-sp + guard) ---
+
+
+def _fake_dev_transport(spaces, acl_by_space):
+    """A fake dev-sp WorkspaceClient: `genie.list_spaces()` returns `spaces`, and
+    `permissions.get` answers per-space from `acl_by_space` (space_id -> list of user_names that
+    have access) — enough to drive authz.assert_can_access without a real ACL shape."""
+    def get_perms(request_object_type, request_object_id):
+        allowed = acl_by_space.get(request_object_id, [])
+        return NS(access_control_list=[
+            NS(user_name=u, group_name=None, service_principal_name=None,
+               all_permissions=[NS(permission_level="CAN_MANAGE")])
+            for u in allowed
+        ])
+
+    return NS(genie=NS(list_spaces=lambda: NS(spaces=spaces)),
+              permissions=NS(get=get_perms))
+
+
+def test_list_spaces_with_token_uses_dev_sp_and_filters_to_accessible(monkeypatch):
+    # The dev SP can list EVERY space (platform necessity); list_spaces must filter down to only
+    # the ones the VERIFIED caller can access — the confused-deputy fix (A2 acceptance criterion).
+    dev = _fake_dev_transport(
+        spaces=[NS(space_id="mine", title="Meu Espaço"), NS(space_id="not-mine", title="De outro")],
+        acl_by_space={"mine": ["ana@x"], "not-mine": ["bob@x"]},
+    )
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: dev)
+    monkeypatch.setattr(authz, "verify_identity",
+                        lambda token, **k: authz.VerifiedIdentity(user_name="ana@x", group_names=frozenset()))
+    out = app_logic.list_spaces(user_token="tok-ana")
+    assert out == [{"space_id": "mine", "title": "Meu Espaço"}]  # "not-mine" filtered out
+
+
+def test_list_spaces_uses_dev_sp_scope_not_obo(monkeypatch):
+    # OBO cannot span workspaces once prod-hosted (ADR-0006) — list_spaces must request the
+    # dev-reader/writer SP transport (scope="dev-sp"), never build an OBO client for dev.
+    seen_scopes = []
+
+    def fake_client(*a, **k):
+        seen_scopes.append(k.get("scope"))
+        return _fake_dev_transport(spaces=[], acl_by_space={})
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+    monkeypatch.setattr(authz, "verify_identity",
+                        lambda token, **k: authz.VerifiedIdentity(user_name="ana@x", group_names=frozenset()))
+    app_logic.list_spaces(user_token="tok-ana")
+    assert seen_scopes == ["dev-sp"]
+
+
+def test_export_serialized_denies_a_requester_who_does_not_own_the_space(monkeypatch):
+    # Unit test required by A2: a Requester cannot export a Space they don't own even though the
+    # dev SP itself can reach it.
+    dev = _fake_dev_transport(spaces=[], acl_by_space={"someone-elses-space": ["ana@x"]})
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: dev)
+    monkeypatch.setattr(authz, "verify_identity",
+                        lambda token, **k: authz.VerifiedIdentity(user_name="mallory@x", group_names=frozenset()))
+    try:
+        app_logic.export_serialized("someone-elses-space", user_token="tok-mallory")
+        assert False, "expected AccessDenied"
+    except authz.AccessDenied:
+        pass
+
+
+def test_export_serialized_allows_the_owner_and_reaches_dev_sp(monkeypatch):
+    dev = NS(
+        genie=NS(get_space=lambda sid, include_serialized_space=False:
+                NS(serialized_space='{"title": "mine"}')),
+        permissions=NS(get=lambda request_object_type, request_object_id:
+                       NS(access_control_list=[NS(user_name="ana@x", group_name=None,
+                                                  service_principal_name=None,
+                                                  all_permissions=[NS(permission_level="CAN_MANAGE")])])),
+    )
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: dev)
+    monkeypatch.setattr(authz, "verify_identity",
+                        lambda token, **k: authz.VerifiedIdentity(user_name="ana@x", group_names=frozenset()))
+    out = app_logic.export_serialized("my-space", user_token="tok-ana")
+    assert out == {"title": "mine"}
+
+
+def test_export_serialized_local_profile_path_skips_guard(monkeypatch):
+    # Bare profile, no token (offline/local-dev convenience): no verified caller exists to check
+    # against, so the profile's own Genie permission IS the access boundary (unchanged behavior).
+    called = {"assert_can_access": False}
+
+    def spy(*a, **k):
+        called["assert_can_access"] = True
+
+    monkeypatch.setattr(authz, "assert_can_access", spy)
+    fake = NS(genie=NS(get_space=lambda sid, include_serialized_space=False:
+                       NS(serialized_space='{"x": 1}')))
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: fake)
+    out = app_logic.export_serialized("sid", "some-profile")
+    assert out == {"x": 1}
+    assert called["assert_can_access"] is False
 
 
 def test_effective_grants_maps_enum_and_string_privileges():

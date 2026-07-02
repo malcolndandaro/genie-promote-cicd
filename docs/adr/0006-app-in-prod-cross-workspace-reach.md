@@ -52,8 +52,13 @@ Two spikes gated this decision before it was estimated:
      review can tell "a verified user triggered this via the SP" from "the SP was misused."
    - The **real security boundary is A2's live, fail-closed per-user authorization guard**, not the
      SP's own restraint — this ADR names the trust relationship; A2 builds the control that makes
-     it safe. Until A2 lands, the dev-sp client path in A1 is wired but not exercised (no SP exists
-     to authenticate as yet).
+     it safe. **A2 is now landed**: `app/authz.py::assert_can_access` is the single reused guard
+     (threat model: `docs/security/assert-can-access-threat-model.md`), and the read-path callers
+     (`app_logic.list_spaces`/`export_serialized`/`review_space`) now resolve dev via
+     `scope="dev-sp"` gated on the caller's OBO-verified identity (see Sequencing note below) — the
+     dev-sp client path is wired AND exercised by these callers; it just has no live SP to
+     authenticate as until `scripts/provision_dev_sp.sh` is run against a real dev workspace
+     (deliberately not run as part of A2 — see that script's own docstring for why).
 
 3. **[STAKEHOLDER — CONSIDERED, NOT ADOPTED] A dedicated 3rd control-plane workspace.** Raised in
    review as an alternative that would decouple the governance app's uptime/blast-radius from prod
@@ -130,11 +135,25 @@ the app + its state, which is the exact problem this ADR solves; (b) **Lakebase 
 old dev instance** — not worth building for disposable demo data (Decision 6); (c) **a 3rd
 control-plane workspace now** — deferred, not rejected outright (Decision 3).
 
-**Sequencing — the app is deliberately half-migrated after A1 (do not deploy A1 alone to prod).**
-A1 relocates the resources and builds the client factory *shape*, but every promotion **read-path**
-caller (`app_logic.list_spaces` / `export_serialized` / `review_space`) still uses the default
-`scope="prod"` client. Because OBO cannot span workspaces (Decision 2), a prod-hosted app on A1 alone
-**cannot read an author's dev Space** — the read callers must be rewired to `scope="dev-sp"` keyed on
-the OBO-verified identity. That rewiring, plus provisioning the dev SP, is owned by **A2** (tracked as
-an explicit A2 acceptance criterion). This is safe because merges and prod deploys are human-gated
-(SoD): A1 is a foundation commit, not a shippable prod state on its own.
+**Sequencing — the app was deliberately half-migrated after A1; A2 completes the migration (RESOLVED).**
+A1 relocated the resources and built the client factory *shape*, but every promotion **read-path**
+caller (`app_logic.list_spaces` / `export_serialized` / `review_space`) still used the default
+`scope="prod"` client — a prod-hosted app on A1 alone could not read an author's dev Space, because
+OBO cannot span workspaces (Decision 2). **A2 rewired all three read-path callers to
+`scope="dev-sp"`**, each gated by `authz.assert_can_access` on the caller's OBO-verified identity
+(never the SP's own broad reach) before it ever touches dev:
+- `list_spaces(user_token=...)` lists via the dev SP, then **filters** the result down to Spaces
+  the verified identity can access (the SP itself can see every dev Space — the filter is what
+  prevents that reach from leaking to the caller).
+- `export_serialized(space_id, user_token=...)` calls `assert_can_access` FIRST and denies
+  (fail-closed) before making the dev-sp `get_space` call at all.
+- `review_space` delegates its export step to the now-gated `export_serialized`, so it inherits the
+  same check with no separate wiring.
+
+A bare local `profile=` call (no `user_token`) still resolves against the given profile directly,
+unchanged — offline/local-dev ergonomics are preserved (see `app/app_logic.py` docstrings on each
+function for the exact fallback rules). The half-migration this ADR flagged is closed: the app is
+no longer in a state where deploying it to prod would silently break dev reads — it is instead in a
+state where dev reads work correctly **once `scripts/provision_dev_sp.sh` has been run** against a
+real dev workspace (a separate, explicit bootstrap step — see that script's own docstring for why
+provisioning a live SP was deliberately kept OUT of an automated PR/CI flow).
