@@ -52,6 +52,7 @@ import app_logic  # noqa: E402
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
+import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 
 logger = logging.getLogger("engine_api")
@@ -144,6 +145,17 @@ def _engine_call(label: str, fn: Callable):
         # The bot couldn't reach GitHub / the App isn't installed/authorized — actionable, not a bug.
         logger.exception("GitHub op failed in %s", label)
         raise HTTPException(status_code=503, detail="Integração GitHub indisponível — verifique a instalação do app.")
+    except authz.AccessDenied as e:
+        # A2's live, fail-closed guard denied the VERIFIED caller — a normal 403, distinct from the
+        # dev-bootstrap case below (SP2's disambiguation: a genuinely-denied user must never see a
+        # "re-bootstrap" prompt).
+        logger.info("access denied in %s (%s)", label, e)
+        raise HTTPException(status_code=403, detail="Sem permissão para este recurso.")
+    except rehydrate_mod.DevEnvironmentNotBootstrapped as e:
+        # The dev-reader/writer SP itself is unreachable/ungranted (SP2) — actionable + DISTINCT
+        # from a 403: the caller isn't denied, the dev environment needs a re-bootstrap.
+        logger.warning("dev environment not bootstrapped in %s (%s)", label, e)
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception:  # noqa: BLE001
         logger.exception("engine call failed: %s", label)
         raise HTTPException(status_code=502, detail=f"engine error: {label}")
@@ -381,6 +393,53 @@ def promote_status(number: int) -> dict:
             except Exception:  # noqa: BLE001 — a reconcile hiccup must not break the status read
                 logger.exception("reconcile failed for PR #%s", number)
     return status
+
+
+# --- A3/F1: prod->dev rehydrate (one-click reseed, no git PR) ---------------
+
+
+class RehydrateRequest(BaseModel):
+    source_prod_space_id: str
+    mode: str  # "create" | "overwrite"
+    dev_space_id: str | None = None  # required when mode == "overwrite"
+    title: str | None = None
+    # The Promotion this rehydrate is reseeding FROM (optional) — when given, the audit event is
+    # attached to that Promotion's trail so "who rehydrated this deployed Space, and when" shows up
+    # next to its promotion history, same place a Steward already looks.
+    promotion_id: str | None = None
+
+
+@api.post("/rehydrate")
+def rehydrate(
+    body: RehydrateRequest,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """A3/F1: export a PROMOTED prod Space and (re-)create it in dev, rebound `prod_`->`dev_` — no
+    git PR. Guarded at BOTH blast sites by `authz.assert_can_access` on the caller's platform-
+    VERIFIED identity: the source prod Space (always) and, in `overwrite` mode, the target dev
+    Space (so a caller can't clobber a dev Space they can't reach even though the standing
+    dev-reader/writer SP could). A denial is a plain 403; an unreachable/unprovisioned dev SP
+    (SP2) is a distinct 503 with an actionable re-bootstrap message — never confused with a 403.
+    """
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    if body.mode not in ("create", "overwrite"):
+        raise HTTPException(status_code=400, detail="mode deve ser 'create' ou 'overwrite'")
+    if body.mode == "overwrite" and not body.dev_space_id:
+        raise HTTPException(status_code=400, detail="overwrite requer dev_space_id")
+
+    def _run() -> dict:
+        identity = authz.verify_identity(token, host=Config().host)
+        store = getattr(app.state, "store", None)
+        result = rehydrate_mod.rehydrate_space(
+            source_prod_space_id=body.source_prod_space_id, identity=identity, mode=body.mode,
+            dev_space_id=body.dev_space_id, title=body.title,
+            store=store, promotion_id=body.promotion_id)
+        return {"space_id": result.space_id, "mode": result.mode, "title": result.title}
+
+    return _engine_call("rehydrate_space", _run)
 
 
 # --- LB3: durable history + recover-on-open (no reviewer re-run) ------------

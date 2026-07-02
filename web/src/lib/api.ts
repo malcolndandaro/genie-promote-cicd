@@ -171,3 +171,32 @@ export interface PromoteStatus {
 export function getPromoteStatus(prNumber: number): Promise<PromoteStatus> {
   return getJSON<PromoteStatus>(`/api/promote/${prNumber}/status`);
 }
+
+/** A3/F1: one-click prod->dev reseed (no git PR). `mode: 'overwrite'` requires `devSpaceId`. */
+export interface RehydrateResult {
+  space_id: string;
+  mode: 'create' | 'overwrite';
+  title: string | null;
+}
+
+export async function postRehydrate(opts: {
+  sourceProdSpaceId: string;
+  mode: 'create' | 'overwrite';
+  devSpaceId?: string;
+  title?: string;
+  promotionId?: string;
+}): Promise<RehydrateResult> {
+  const r = await fetch('/api/rehydrate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      source_prod_space_id: opts.sourceProdSpaceId,
+      mode: opts.mode,
+      dev_space_id: opts.devSpaceId ?? null,
+      title: opts.title ?? null,
+      promotion_id: opts.promotionId ?? null,
+    }),
+  });
+  if (!r.ok) throw await toError(r);
+  return (await r.json()) as RehydrateResult;
+}

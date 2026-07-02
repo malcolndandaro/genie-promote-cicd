@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { phaseChip, PHASE_LABEL } from './status';
+import { phaseChip, PHASE_LABEL, EVENT_LABEL } from './status';
 
 describe('phaseChip', () => {
   it('maps known phases to a PT label + semantic tone', () => {
@@ -31,5 +31,11 @@ describe('phaseChip', () => {
     expect(phaseChip(undefined)).toEqual({ label: '—', tone: 'neutral' });
     expect(phaseChip('')).toEqual({ label: '—', tone: 'neutral' });
     expect(phaseChip('something_new')).toEqual({ label: 'something_new', tone: 'neutral' });
+  });
+});
+
+describe('EVENT_LABEL', () => {
+  it('has a PT label for the A3/F1 rehydrate audit event', () => {
+    expect(EVENT_LABEL.rehydrated).toBe('Rehidratado para dev');
   });
 });

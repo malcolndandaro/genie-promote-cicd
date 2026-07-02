@@ -220,6 +220,92 @@ def test_review_contract_drift_maps_to_502(monkeypatch):
     assert r.status_code == 502
 
 
+# --- /rehydrate (A3/F1): prod->dev reseed, no git PR --------------------------------------------
+
+
+def test_rehydrate_requires_a_token():
+    r = client.post("/rehydrate", json={"source_prod_space_id": "x", "mode": "create"})
+    assert r.status_code == 401
+
+
+def test_rehydrate_rejects_invalid_mode(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    r = client.post("/rehydrate", json={"source_prod_space_id": "x", "mode": "delete"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+
+
+def test_rehydrate_overwrite_requires_dev_space_id(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    r = client.post("/rehydrate", json={"source_prod_space_id": "x", "mode": "overwrite"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+
+
+def test_rehydrate_create_returns_new_space_id(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        assert identity.user_name == "ana@x"  # the VERIFIED identity, not a header
+        assert mode == "create"
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate",
+                    json={"source_prod_space_id": "prod-1", "mode": "create", "title": "Recebíveis (dev)"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json() == {"space_id": "new-dev-id", "mode": "create", "title": "Recebíveis (dev)"}
+
+
+def test_rehydrate_overwrite_passes_dev_space_id_and_promotion_id(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        seen.update(dev_space_id=dev_space_id, promotion_id=promotion_id, store=store)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id=dev_space_id, mode=mode, title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate", json={
+        "source_prod_space_id": "prod-1", "mode": "overwrite",
+        "dev_space_id": "dev-1", "promotion_id": "promo-1",
+    }, headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "dev-1"
+    assert seen["dev_space_id"] == "dev-1" and seen["promotion_id"] == "promo-1"
+
+
+def test_rehydrate_access_denied_maps_to_403_not_bootstrap_error(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "mallory@x"})
+
+    def boom(**kw):
+        raise authz.AccessDenied("mallory@x may not access space prod-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", boom)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 403
+
+
+def test_rehydrate_dev_not_bootstrapped_maps_to_503_distinct_from_403(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+
+    def boom(**kw):
+        raise engine_api.rehydrate_mod.DevEnvironmentNotBootstrapped(
+            "dev environment needs re-bootstrap (run provision_dev_sp.sh): APP_DEV_HOST not set")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", boom)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 503
+    assert "provision_dev_sp.sh" in r.json()["detail"]
+
+
 # --- /api/* mount (SV1): the SPA calls the API under /api; same handlers as the legacy paths ---
 
 

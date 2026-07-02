@@ -35,10 +35,13 @@ from typing import Callable, Iterable, Optional, Protocol
 EVENT_TYPES = (
     "requested", "re_reviewed", "pr_opened", "pr_review_approved",
     "merged", "deploy_approved", "deployed", "failed", "closed",
+    # A3/F1: prod->dev rehydrate is app-written (no git PR involved) and may legitimately recur
+    # (reseed dev again after another wipe) — see RECURRING_EVENTS below.
+    "rehydrated",
 )
 # App-written events that may legitimately RECUR (so they're excluded from the per-type dedup that
 # protects reconcile's GitHub-observed milestones from a concurrent double-append).
-RECURRING_EVENTS = ("requested", "re_reviewed")
+RECURRING_EVENTS = ("requested", "re_reviewed", "rehydrated")
 
 # Phases that mean the promotion is over (the LB6 scheduler stops visiting these). `deploy_failed` is
 # terminal so a failed deploy doesn't loop the scheduler forever — a fix + re-merge is a new Promotion
