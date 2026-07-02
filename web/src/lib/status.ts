@@ -24,6 +24,8 @@ export const EVENT_LABEL: Record<string, string> = {
   deployed: 'Implantado em produção',
   failed: 'Falha',
   closed: 'PR fechado (abandonado)',
+  // A3/F1: app-direct (no git PR) — recurs each time dev is reseeded from this promotion.
+  rehydrated: 'Rehidratado para dev',
 };
 
 export type BadgeTone = 'neutral' | 'accent' | 'success' | 'warning' | 'destructive';

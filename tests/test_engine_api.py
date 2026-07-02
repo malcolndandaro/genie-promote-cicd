@@ -220,6 +220,144 @@ def test_review_contract_drift_maps_to_502(monkeypatch):
     assert r.status_code == 502
 
 
+# --- /rehydrate (A3/F1): prod->dev reseed, no git PR --------------------------------------------
+
+
+def test_rehydrate_requires_a_token():
+    r = client.post("/rehydrate", json={"source_prod_space_id": "x", "mode": "create"})
+    assert r.status_code == 401
+
+
+def test_rehydrate_rejects_invalid_mode(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    r = client.post("/rehydrate", json={"source_prod_space_id": "x", "mode": "delete"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+
+
+def test_rehydrate_overwrite_requires_dev_space_id(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    r = client.post("/rehydrate", json={"source_prod_space_id": "x", "mode": "overwrite"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+
+
+def test_rehydrate_create_returns_new_space_id(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        assert identity.user_name == "ana@x"  # the VERIFIED identity, not a header
+        assert mode == "create"
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate",
+                    json={"source_prod_space_id": "prod-1", "mode": "create", "title": "Recebíveis (dev)"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json() == {"space_id": "new-dev-id", "mode": "create", "title": "Recebíveis (dev)"}
+
+
+def test_rehydrate_overwrite_passes_dev_space_id_and_promotion_id(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        seen.update(dev_space_id=dev_space_id, promotion_id=promotion_id, store=store)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id=dev_space_id, mode=mode, title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate", json={
+        "source_prod_space_id": "prod-1", "mode": "overwrite",
+        "dev_space_id": "dev-1", "promotion_id": "promo-1",
+    }, headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "dev-1"
+    assert seen["dev_space_id"] == "dev-1" and seen["promotion_id"] == "promo-1"
+
+
+def _mk_promotion(store):
+    return store.create_promotion(
+        resource_id="dev-src", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@x", pr_number=7, pr_url="https://gh/pr/7", branch="promote/x",
+        current_phase="deployed", live_status=None)
+
+
+def test_rehydrate_requires_promotion_id_when_store_present(monkeypatch, store):
+    # A3 review Finding 1: with a durable store (prod), a rehydrate mutates a real dev Space and MUST
+    # be auditable -> reject (before any mutation) when there's no source Promotion to attach the
+    # audit event to. Without this, POST /rehydrate {no promotion_id} created/overwrote a dev Space
+    # with ZERO audit rows (non-repudiation gap).
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    called = {"ran": False}
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
+                        lambda *a, **k: called.__setitem__("ran", True))
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+    assert called["ran"] is False  # rejected before the service (no mutation)
+
+
+def test_rehydrate_rejects_unknown_promotion_id_when_store_present(monkeypatch, store):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    called = {"ran": False}
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
+                        lambda *a, **k: called.__setitem__("ran", True))
+    r = client.post("/rehydrate",
+                    json={"source_prod_space_id": "prod-1", "mode": "create", "promotion_id": "nope"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 404
+    assert called["ran"] is False
+
+
+def test_rehydrate_with_valid_promotion_id_runs_when_store_present(monkeypatch, store):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    p = _mk_promotion(store)
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        assert store is not None and promotion_id == p.id  # linkage threaded through -> auditable
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate",
+                    json={"source_prod_space_id": "prod-1", "mode": "create", "promotion_id": p.id},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "new-dev-id"
+
+
+def test_rehydrate_access_denied_maps_to_403_not_bootstrap_error(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "mallory@x"})
+
+    def boom(**kw):
+        raise authz.AccessDenied("mallory@x may not access space prod-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", boom)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 403
+
+
+def test_rehydrate_dev_not_bootstrapped_maps_to_503_distinct_from_403(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+
+    def boom(**kw):
+        raise engine_api.rehydrate_mod.DevEnvironmentNotBootstrapped(
+            "dev environment needs re-bootstrap (run provision_dev_sp.sh): APP_DEV_HOST not set")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", boom)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 503
+    assert "provision_dev_sp.sh" in r.json()["detail"]
+
+
 # --- /api/* mount (SV1): the SPA calls the API under /api; same handlers as the legacy paths ---
 
 

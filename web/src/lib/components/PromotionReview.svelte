@@ -6,6 +6,7 @@
   import ReviewPanel from './ReviewPanel.svelte';
   import ApprovalSection from './ApprovalSection.svelte';
   import AuditTrail from './AuditTrail.svelte';
+  import RehydrateAction from './RehydrateAction.svelte';
   import { pendingTimeline } from '../pipeline';
   import { PHASE_LABEL, phaseTone } from '../status';
   import type { Promotion } from '../promotion.svelte';
@@ -74,6 +75,7 @@
           <AuditTrail events={promotion.audit} />
         </div>
       {/if}
+      <RehydrateAction {promotion} />
     {/if}
   </Card>
 {/if}
