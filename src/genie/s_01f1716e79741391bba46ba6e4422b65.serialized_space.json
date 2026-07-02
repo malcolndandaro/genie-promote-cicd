@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "data_sources": {
+    "tables": [
+      {
+        "identifier": "dev_recebiveis.diamond.dim_arranjo",
+        "column_configs": [
+          {
+            "column_name": "arranjo",
+            "enable_format_assistance": true
+          },
+          {
+            "column_name": "bandeira",
+            "enable_format_assistance": true,
+            "enable_entity_matching": true
+          },
+          {
+            "column_name": "descricao",
+            "enable_format_assistance": true,
+            "enable_entity_matching": true
+          }
+        ]
+      },
+      {
+        "identifier": "dev_recebiveis.diamond.dim_cedente",
+        "column_configs": [
+          {
+            "column_name": "cedente_id",
+            "enable_format_assistance": true
+          },
+          {
+            "column_name": "cnpj",
+            "enable_format_assistance": true,
+            "enable_entity_matching": true
+          },
+          {
+            "column_name": "nome",
+            "enable_format_assistance": true,
+            "enable_entity_matching": true
+          },
+          {
+            "column_name": "uf",
+            "enable_format_assistance": true,
+            "enable_entity_matching": true
+          }
+        ]
+      }
+    ]
+  }
+}
