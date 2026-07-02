@@ -46,5 +46,43 @@
         ]
       }
     ]
+  },
+  "benchmarks": {
+    "questions": [
+      {
+        "id": "01f1763cb2421a4888ea197a64cfca96",
+        "question": [
+          "Quantos arranjos de pagamento existem por bandeira"
+        ],
+        "answer": [
+          {
+            "format": "SQL",
+            "content": [
+              "SELECT bandeira, COUNT(*) AS arranjos\n",
+              "FROM dev_recebiveis.diamond.dim_arranjo\n",
+              "GROUP BY bandeira\n",
+              "ORDER BY arranjos DESC"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "01f1763ca5d8179e9f150abc46e26816",
+        "question": [
+          "Quantos cedentes existem por UF?"
+        ],
+        "answer": [
+          {
+            "format": "SQL",
+            "content": [
+              "SELECT uf, COUNT(*) AS cedentes\n",
+              "FROM dev_recebiveis.diamond.dim_cedente\n",
+              "GROUP BY uf\n",
+              "ORDER BY cedentes DESC"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }
