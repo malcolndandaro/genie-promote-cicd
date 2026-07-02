@@ -187,7 +187,11 @@ def list_spaces(profile: str | None = None, *, client: WorkspaceClient | None = 
     if client is not None:
         w = client
     elif user_token:
-        identity = authz.verify_identity(user_token, host=APP_DEV_HOST)
+        # Verify WHO the OBO token belongs to against the app's OWN (prod) host — the token is
+        # prod-minted and cannot authenticate to dev (ADR-0006 Decision 2). Only the transport
+        # (scope="dev-sp") and the ACL read (assert_can_access) run against dev; the identity is
+        # prod-issued. (Same host as engine_api._verified_email.)
+        identity = authz.verify_identity(user_token, host=Config().host)
         dev = _client(scope="dev-sp")
         resp = dev.genie.list_spaces()
         accessible = []
@@ -217,7 +221,11 @@ def export_serialized(space_id: str, profile: str | None = None, client: Workspa
     if client is not None:
         w = client
     elif user_token:
-        identity = authz.verify_identity(user_token, host=APP_DEV_HOST)
+        # Verify WHO the OBO token belongs to against the app's OWN (prod) host — the token is
+        # prod-minted and cannot authenticate to dev (ADR-0006 Decision 2). Only the transport
+        # (scope="dev-sp") and the ACL read (assert_can_access) run against dev; the identity is
+        # prod-issued. (Same host as engine_api._verified_email.)
+        identity = authz.verify_identity(user_token, host=Config().host)
         w = _client(scope="dev-sp")
         authz.assert_can_access(identity, space_id, transport=w)  # raises AccessDenied -> deny first
     else:

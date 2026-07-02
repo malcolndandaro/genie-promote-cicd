@@ -159,7 +159,14 @@ per action, not a hot loop), this is judged the correct trade-off.
    leak (the guard reveals no ACL contents, only allow/deny), but it is a minor information
    disclosure. Accepted for v1; if this becomes a concern, rate-limiting belongs at the endpoint
    layer (`engine_api/main.py`), not inside the guard.
-5. **`is_admin` derivation depends on the SAME `verify_identity` call succeeding.** If dev/verify
+5. **`list_spaces` fan-out (N+1 dev API calls).** Because the guard is never cached and
+   `list_spaces` filters per-Space, one `/spaces` request makes 1 `list_spaces` + M `permissions.get`
+   live dev calls (M = number of dev Spaces). An authenticated caller repeatedly hitting `/spaces`
+   amplifies load on the (ephemeral, rate-limited) dev workspace and the dev SP's budget by ~M — a
+   self-inflicted DoS/cost surface, not an authorization hole. Mitigation belongs at the endpoint
+   layer (rate-limit `/spaces`) and/or by bounding the fan-out; tracked as a follow-up before scale.
+   (Flagged by the A2 security review, Finding 3.)
+6. **`is_admin` derivation depends on the SAME `verify_identity` call succeeding.** If dev/verify
    temporarily can't resolve identity (e.g., during an outage of the app's OWN prod workspace,
    which is what issues/validates the token, not dev), admin-gated features fail closed too (no
    admin access) rather than degrading to "trust the display header." This is the correct

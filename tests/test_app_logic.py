@@ -130,6 +130,26 @@ def test_list_spaces_uses_dev_sp_scope_not_obo(monkeypatch):
     assert seen_scopes == ["dev-sp"]
 
 
+def test_read_path_verifies_identity_against_prod_host_not_dev(monkeypatch):
+    # Finding 1 (A2 security review): the OBO token is PROD-minted and cannot authenticate to dev,
+    # so verify_identity must resolve the caller against the app's OWN (prod) host — only the
+    # transport + ACL read run against dev. Verifying against APP_DEV_HOST would deny every real
+    # user (fails closed, but breaks the feature). Guard against that regression.
+    seen = {}
+    monkeypatch.setattr(app_logic, "APP_DEV_HOST", "https://dev.example.cloud.databricks.com")
+    monkeypatch.setattr(app_logic, "Config", lambda: NS(host="https://prod.example.cloud.databricks.com"))
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: _fake_dev_transport(spaces=[], acl_by_space={}))
+
+    def capture_verify(token, **k):
+        seen["host"] = k.get("host")
+        return authz.VerifiedIdentity(user_name="ana@x", group_names=frozenset())
+
+    monkeypatch.setattr(authz, "verify_identity", capture_verify)
+    app_logic.list_spaces(user_token="tok-ana")
+    assert seen["host"] == "https://prod.example.cloud.databricks.com"
+    assert seen["host"] != app_logic.APP_DEV_HOST  # must NOT verify the prod token against dev
+
+
 def test_export_serialized_denies_a_requester_who_does_not_own_the_space(monkeypatch):
     # Unit test required by A2: a Requester cannot export a Space they don't own even though the
     # dev SP itself can reach it.
