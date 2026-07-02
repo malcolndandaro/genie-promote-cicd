@@ -354,3 +354,22 @@ def test_audit_records_via_real_in_memory_backend():
     rehydrate.rehydrate_space(source_prod_space_id="prod-space", identity=ANA, mode="create",
                               prod_client=prod, dev_client=dev, store=store, promotion_id=promo.id)
     assert len(store.list_audit_events(promo.id)) == 2
+
+
+def test_audited_rehydrate_requires_promotion_id_and_does_not_mutate():
+    # A3 review Finding 1 (service-level defense-in-depth): when a durable store is present a
+    # rehydrate MUST be auditable -> refuse BEFORE any dev mutation if promotion_id is missing (a
+    # bare early-return in _audit would otherwise let an unaudited create/overwrite through).
+    n = {"mut": 0}
+    dev = _acl_transport({}, genie=NS(
+        create_space=lambda *a, **k: (n.__setitem__("mut", n["mut"] + 1), NS(space_id="x"))[1],
+        update_space=lambda *a, **k: n.__setitem__("mut", n["mut"] + 1)))
+    prod = _prod_transport("prod-1", ["ana@x"])
+    store = promotion_store.PromotionStore(promotion_store.InMemoryBackend())
+    try:
+        rehydrate.rehydrate_space(source_prod_space_id="prod-1", identity=ANA, mode="create",
+                                  prod_client=prod, dev_client=dev, store=store, promotion_id=None)
+        assert False, "expected ValueError (store present, no promotion_id)"
+    except ValueError:
+        pass
+    assert n["mut"] == 0  # refused before any create/update -> nothing mutated

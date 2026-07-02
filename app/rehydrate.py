@@ -173,6 +173,13 @@ def rehydrate_space(
     wh = dev_warehouse_id or APP_DEV_WAREHOUSE_ID
     if not wh:
         _no_dev_warehouse()
+    # Non-repudiation (A3 review): a rehydrate mutates a real dev Space, so when a durable store is
+    # present it MUST be auditable — refuse BEFORE any mutation if there's no promotion to attach the
+    # audit event to (a bare early-return in _audit would let an unaudited create/overwrite through).
+    # store=None is the local/offline path (no Lakebase, no audit) — matches every other
+    # optional-store call site; the endpoint additionally rejects this with a 400 in prod.
+    if store is not None and promotion_id is None:
+        raise ValueError("an audited rehydrate (store present) requires promotion_id for non-repudiation")
 
     import app_logic  # local import: avoids a circular import at module load time
 

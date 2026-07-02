@@ -429,10 +429,22 @@ def rehydrate(
         raise HTTPException(status_code=400, detail="mode deve ser 'create' ou 'overwrite'")
     if body.mode == "overwrite" and not body.dev_space_id:
         raise HTTPException(status_code=400, detail="overwrite requer dev_space_id")
+    # Non-repudiation (A3 acceptance + A3 review): a rehydrate mutates a real dev Space, so when a
+    # durable store is present (prod) it MUST be auditable — require a linkable source Promotion.
+    # (Validated here, BEFORE _engine_call, so these stay 400/404 — an HTTPException raised inside
+    # _run would be caught by _engine_call's broad handler and re-mapped to 502.) The audit row FKs
+    # to promotions(id), so the promotion must also exist. Store=None (local/offline) keeps the
+    # prior no-audit ergonomics; the gap was only reachable in prod, where the store is required.
+    store = getattr(app.state, "store", None)
+    if store is not None:
+        if not body.promotion_id:
+            raise HTTPException(status_code=400,
+                                detail="rehydrate requer promotion_id (a promoção de origem) para a trilha de auditoria")
+        if store.get_promotion(body.promotion_id) is None:
+            raise HTTPException(status_code=404, detail="promoção de origem não encontrada")
 
     def _run() -> dict:
         identity = authz.verify_identity(token, host=Config().host)
-        store = getattr(app.state, "store", None)
         result = rehydrate_mod.rehydrate_space(
             source_prod_space_id=body.source_prod_space_id, identity=identity, mode=body.mode,
             dev_space_id=body.dev_space_id, title=body.title,

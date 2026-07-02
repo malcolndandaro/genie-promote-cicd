@@ -280,6 +280,58 @@ def test_rehydrate_overwrite_passes_dev_space_id_and_promotion_id(monkeypatch):
     assert seen["dev_space_id"] == "dev-1" and seen["promotion_id"] == "promo-1"
 
 
+def _mk_promotion(store):
+    return store.create_promotion(
+        resource_id="dev-src", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@x", pr_number=7, pr_url="https://gh/pr/7", branch="promote/x",
+        current_phase="deployed", live_status=None)
+
+
+def test_rehydrate_requires_promotion_id_when_store_present(monkeypatch, store):
+    # A3 review Finding 1: with a durable store (prod), a rehydrate mutates a real dev Space and MUST
+    # be auditable -> reject (before any mutation) when there's no source Promotion to attach the
+    # audit event to. Without this, POST /rehydrate {no promotion_id} created/overwrote a dev Space
+    # with ZERO audit rows (non-repudiation gap).
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    called = {"ran": False}
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
+                        lambda *a, **k: called.__setitem__("ran", True))
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+    assert called["ran"] is False  # rejected before the service (no mutation)
+
+
+def test_rehydrate_rejects_unknown_promotion_id_when_store_present(monkeypatch, store):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    called = {"ran": False}
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
+                        lambda *a, **k: called.__setitem__("ran", True))
+    r = client.post("/rehydrate",
+                    json={"source_prod_space_id": "prod-1", "mode": "create", "promotion_id": "nope"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 404
+    assert called["ran"] is False
+
+
+def test_rehydrate_with_valid_promotion_id_runs_when_store_present(monkeypatch, store):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    p = _mk_promotion(store)
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        assert store is not None and promotion_id == p.id  # linkage threaded through -> auditable
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate",
+                    json={"source_prod_space_id": "prod-1", "mode": "create", "promotion_id": p.id},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "new-dev-id"
+
+
 def test_rehydrate_access_denied_maps_to_403_not_bootstrap_error(monkeypatch):
     _verify_as(monkeypatch, {"tok": "mallory@x"})
 
