@@ -154,7 +154,7 @@ CI** on the runner as the prod SP, so a soft or omitted LLM answer can never fli
 
 | Path | What |
 |---|---|
-| `databricks.yml` | DABs bundle: dev/prod targets, the prod-only `genie_spaces` + `dashboards` resources, the dev-only **Lakebase** instance + app binding (ADR-0005) |
+| `databricks.yml` | DABs bundle: dev/prod targets. **Prod** now hosts the `genie-promote-app` App + its **Lakebase** instance (ADR-0006), plus the `genie_spaces`/`dashboards` promotion resources. **Dev** keeps only the `setup` seed job. |
 | `genie_reviewer/` | the reviewer agent — `review_core`, `handbook_rules`, `grant_check`, `eval_gate`, `fix_core`, `agent` (MLflow), `github_app` (the bot), `promotion_comment` |
 | `app/` | `app_logic.py` (shared engine: OBO/SP `_client`, review, request_promotion, status), `promotion_store.py` (Lakebase store), `reconcile.py` (GitHub→audit) |
 | `engine_api/` | the FastAPI app: JSON API (`/api/*`, OBO in-process) + serves the built Svelte SPA + the Lakebase startup migration + the scheduled reconciler |
@@ -163,18 +163,43 @@ CI** on the runner as the prod SP, so a soft or omitted LLM answer can never fli
 | `resources/`, `src/` | DABs resources, setup/seed job, the serialized_space + dashboard artifacts |
 | `.github/workflows/` | `pr-checks.yml` (validate + GRANT-01 + tests on every PR) · `deploy.yml` (merge → prod, behind the Environment gate) |
 | `tests/` | offline unit tests (engine, store, reconcile, github bot, engine API; no live workspace/DB) |
-| `docs/adr/` | architecture decisions (incl. ADR-0005: Lakebase as index/audit over GitHub-as-truth) |
+| `docs/adr/` | architecture decisions (ADR-0005: Lakebase as index/audit over GitHub-as-truth; **ADR-0006: the app relocates to prod + reaches into dev, cross-workspace client factory**) |
 
 ## Durable state (Lakebase)
 
 Promotions, review snapshots, and an append-only **audit trail** live in **Lakebase (Databricks
 Postgres)** — a durable index + audit log + status cache over GitHub-as-truth (it never overrides a
 live read; **reflect, never assert**). It is a **hard dependency** of the app (fails fast at startup
-if misconfigured), provisioned all-DABs (dev target), config-driven (`lakebase_*` vars +
+if misconfigured), provisioned all-DABs (**prod target** — ADR-0006, since dev is wiped on a ~7-day
+cycle and durable governance state can't live there), config-driven (`lakebase_*` vars +
 `APP_LAKEBASE_SCHEMA`), and the app connects as its **SP via short-lived OAuth** — no static
 password. A reload **recovers** a promotion from its stored snapshot **without re-running the LLM**.
 See `SETUP.md` → *Lakebase* for the config knobs, the connectivity smoke, and the scheduled-reconciler
 design.
+
+## Governance console: app-in-prod, cross-workspace reach (ADR-0006)
+
+The app itself now runs **in the prod workspace** (a durable control plane) and reaches **into dev**
+only for the Genie-API operations that must run there (exporting an authored Space at promotion
+time; a future rehydrate-to-dev). Everything else is prod-local. Full rationale, the standing
+dev-reader/writer SP trust relationship, the considered 3rd-control-plane-workspace alternative, and
+the dev-Lakebase fresh-start decision are in **`docs/adr/0006-app-in-prod-cross-workspace-reach.md`**.
+
+- **Cross-workspace client factory** — `app/app_logic.py::_client(scope=...)` is the single tested
+  place target/credential selection lives: `scope="prod"` (default) behaves exactly as before (OBO /
+  local profile / app SP); `scope="dev-sp"` authenticates as a standing dev-reader/writer service
+  principal against `APP_DEV_HOST`, with credentials read from the `APP_DEV_SP_SECRET_SCOPE` secret
+  scope (never a bundle variable). The dev SP itself is provisioned in a later slice — the factory
+  shape is wired now and unit-tested with an injected/faked client (no live workspace).
+- **Least privilege for Authors** — a business user needs **`CAN_USE` on the `genie-promote-app` App
+  resource only**, no broad prod catalog/schema grant (standard Apps OBO). Apply it per workspace
+  after deploy, e.g.:
+  `databricks apps update-permissions genie-promote-app -p <prod-profile> --json '{"access_control_list":[{"group_name":"<authors-group>","permission_level":"CAN_USE"}]}'`
+- **Prod Lakebase direct-access control** — only the app's own SP and the emails/SPs listed in the
+  `lakebase_direct_access_admins` bundle variable may connect to the prod Lakebase instance
+  *directly* (bypassing the app). This is separate from the app's in-app role-gating (Steward/Admin)
+  and is an incident-response escape hatch, not a workflow — see ADR-0006 §7 for the enforcement
+  mechanism and its current manual-step caveat.
 
 ## Use it on your workspaces
 

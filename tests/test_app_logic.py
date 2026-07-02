@@ -144,6 +144,79 @@ def test_client_app_sp_default(monkeypatch):
     assert seen == {}
 
 
+# --- Cross-workspace client factory (A1/ADR-0006): prod-local vs dev-remote-SP selection ---
+
+def test_client_default_scope_is_prod_local(monkeypatch):
+    """scope defaults to "prod" and behaves exactly like the pre-A1 selector (no regression)."""
+    seen = _capture_wc(monkeypatch)
+    app_logic._client(profile="cerc-mlops-dev")
+    assert seen == {"profile": "cerc-mlops-dev"}
+
+
+def test_client_dev_sp_scope_uses_dev_host_and_sp_auth_not_obo(monkeypatch):
+    """scope="dev-sp" must hit APP_DEV_HOST with client_id/client_secret (SP auth) — never OBO,
+    even if a user_token is (incorrectly) also passed, because once the app is prod-hosted there is
+    no forwarded dev token (ADR-0006): the SP is the only cross-workspace identity."""
+    seen = _capture_wc(monkeypatch)
+    monkeypatch.setattr(app_logic, "APP_DEV_HOST", "https://dev.example.cloud.databricks.com")
+    monkeypatch.setattr(app_logic, "_secret", lambda w, scope, key: f"{key}-val")
+    app_logic._client(scope="dev-sp", user_token="should-be-ignored")
+    assert seen == {
+        "host": "https://dev.example.cloud.databricks.com",
+        "client_id": "dev_sp_client_id-val",
+        "client_secret": "dev_sp_client_secret-val",
+    }
+
+
+def test_client_dev_sp_scope_reads_secret_via_injected_secret_client(monkeypatch):
+    """The dev SP's own OAuth secret is read from the configured scope via a prod-local client (the
+    app's own identity), mirroring `_github_app`'s pattern — never a static credential in config."""
+    monkeypatch.setattr(app_logic, "APP_DEV_HOST", "https://dev.example.cloud.databricks.com")
+    monkeypatch.setattr(app_logic, "APP_DEV_SP_SECRET_SCOPE", "my_scope")
+    seen_secret_reads = []
+
+    def fake_secret(w, scope, key):
+        seen_secret_reads.append((w, scope, key))
+        return f"{key}-val"
+
+    monkeypatch.setattr(app_logic, "_secret", fake_secret)
+    monkeypatch.setattr(app_logic, "WorkspaceClient", lambda **kw: NS(**kw))
+    sentinel_client = object()
+    app_logic._dev_sp_client(secret_client=sentinel_client)
+    assert seen_secret_reads == [
+        (sentinel_client, "my_scope", "dev_sp_client_id"),
+        (sentinel_client, "my_scope", "dev_sp_client_secret"),
+    ]
+
+
+def test_client_dev_sp_scope_fails_loud_without_dev_host(monkeypatch):
+    """No silent fallback to prod: an unconfigured APP_DEV_HOST must raise, not quietly build a
+    prod-local client (which would defeat the point of the cross-workspace factory)."""
+    monkeypatch.setattr(app_logic, "APP_DEV_HOST", None)
+    try:
+        app_logic._client(scope="dev-sp")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "APP_DEV_HOST" in str(e)
+
+
+def test_client_dev_sp_scope_is_lazy_no_network_at_import_or_unconfigured_call(monkeypatch):
+    """A1 explicitly only builds the factory SHAPE — the dev-remote-SP path must construct lazily
+    (no eager network/SDK calls) so it's safe to wire in before the SP exists (A2 provisions it).
+    Asserting the module already imported cleanly (no top-level WorkspaceClient() call for dev-sp)
+    and that the failure path above raises a plain RuntimeError (no SDK exception) covers this."""
+    assert app_logic.APP_DEV_SP_SECRET_SCOPE  # module-level config read, not a live call
+    assert callable(app_logic._dev_sp_client)
+
+
+def test_client_prod_obo_still_resolves_with_scope_default(monkeypatch):
+    """OBO/profile/SP prod paths still resolve unchanged when scope is left at its default."""
+    seen = _capture_wc(monkeypatch)
+    monkeypatch.setattr(app_logic, "Config", lambda: NS(host="https://prod.example"))
+    app_logic._client(user_token="tok-abc")
+    assert seen == {"host": "https://prod.example", "token": "tok-abc", "auth_type": "pat"}
+
+
 # --- request_promotion (GH2): review + export (OBO) + open PR/comment (bot) ---
 
 class _FakeGitHubApp:

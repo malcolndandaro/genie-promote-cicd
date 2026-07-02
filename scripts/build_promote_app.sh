@@ -7,7 +7,9 @@
 # static/) into build/promote_app/ with the engine's app.yaml as the root manifest.
 # engine_api/main.py resolves the SPA at <app-root>/static.
 #
-# Run BEFORE `databricks bundle validate/deploy -t dev` (the promote_app resource points here).
+# Run BEFORE `databricks bundle deploy -t prod` (the promote_app resource now lives in the PROD
+# target — ADR-0006/A1). `bundle validate` only needs build/promote_app to EXIST, so pr-checks
+# stubs the dir instead of running this full build; deploy.yml runs this for real.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -64,6 +66,16 @@ env:
   # A new customer sets their own map (or leaves it empty -> id-derived slugs).
   - name: APP_SPACE_SLUGS
     value: '{"01f16e8322661161a83f7d1f2a1bec14": "receivables"}'
+  # Cross-workspace client factory (ADR-0006/A1): the app now runs in PROD and reaches into DEV for
+  # the Genie-API ops that must run there. APP_DEV_HOST is the dev workspace URL (config-driven, ADR-
+  # 0004 — never hardcoded in code). The dev-reader/writer SP's OAuth credentials are read at runtime
+  # from the secret scope named by APP_DEV_SP_SECRET_SCOPE (keys: dev_sp_client_id,
+  # dev_sp_client_secret) — never a bundle var, never in this file. The SP is provisioned in A2; until
+  # then these vars are wired but unused (the dev-remote-SP client path isn't exercised live).
+  - name: APP_DEV_HOST
+    value: "https://your-dev-workspace.cloud.databricks.com"
+  - name: APP_DEV_SP_SECRET_SCOPE
+    value: "genie_promote"
 YAML
 # The built SPA the FastAPI app serves (engine_api/main.py -> <app-root>/static).
 cp -R web/dist "$OUT/static"

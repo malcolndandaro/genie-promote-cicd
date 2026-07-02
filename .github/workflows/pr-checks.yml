@@ -38,6 +38,12 @@ jobs:
           python3 -m pytest tests/ -q
       - name: Pre-render + identifier allowlist (rejects foreign-env / cross-domain refs)
         run: bash scripts/render.sh prod
+      - name: Stub the app source dir (ADR-0006/A1 — promote_app now targets prod)
+        # `bundle validate -t prod` only needs build/promote_app to EXIST (an empty dir validates
+        # with a warning, no error). Deliberately do NOT run the full build_promote_app.sh here — the
+        # heavy Svelte `npm install && npm run build` belongs in deploy.yml only, so an unrelated
+        # code PR's deployability check never depends on npm-registry reachability or SPA build health.
+        run: mkdir -p build/promote_app
       - name: Validate bundle (prod target)
         run: databricks bundle validate -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
       - name: GRANT-01 — consumer group can SELECT the prod tables (governance gate)

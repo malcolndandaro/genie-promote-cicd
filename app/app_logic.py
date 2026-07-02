@@ -82,10 +82,36 @@ def src_path_for(slug: str) -> str:
 # The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
 REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group")
 
+# --- Cross-workspace client factory (ADR-0006 / A1) --------------------------------------------
+#
+# The app now runs in PROD (a durable control plane — ADR-0006 supersedes ADR-0002's "app is the
+# dev front door" framing) and reaches INTO dev for the two Genie-API operations that must run
+# there: reading the authored Space at promotion time, and (in a later slice, F1) writing a
+# rebound Space back to dev. Every other operation is prod-local.
+#
+# Config-driven (ADR-0004): the dev workspace host + the dev-reader/writer SP's secret-scope
+# location are env vars, never hardcoded. The SP's OWN credentials are never bundle variables or
+# code — they live in a Databricks secret scope, read at call time via the app's own identity
+# (whichever prod-local client is already authenticated).
+#
+# NOTE (A1 scope): the dev-reader/writer SP is *provisioned + bootstrapped in A2*
+# (scripts/provision_dev_sp.sh, per SP2's self-heal finding — dev's ~7-day wipe means the SP's
+# dev-side grants must be re-assertable, not just its account-level identity). A1 only builds the
+# factory SHAPE + config wiring: the dev-remote-SP path constructs lazily (no network at import or
+# construction time) and is unit-tested with an injected/faked client; it is not exercised live
+# until A2 lands the SP + its secret.
+APP_DEV_HOST = os.environ.get("APP_DEV_HOST")
+APP_DEV_SP_SECRET_SCOPE = os.environ.get("APP_DEV_SP_SECRET_SCOPE", "genie_promote")
+DEV_SP_CLIENT_ID_KEY = "dev_sp_client_id"
+DEV_SP_CLIENT_SECRET_KEY = "dev_sp_client_secret"
 
-def _client(profile: str | None = None, *, user_token: str | None = None) -> WorkspaceClient:
-    """Build a Databricks SDK WorkspaceClient for one of three auth contexts.
 
+def _client(profile: str | None = None, *, user_token: str | None = None,
+            scope: str = "prod") -> WorkspaceClient:
+    """Build a Databricks SDK WorkspaceClient for one of four auth contexts. This is the ONE place
+    target/credential selection lives (US-4) — every call site goes through here.
+
+    ``scope="prod"`` (default) — the workspace the app itself runs in (prod, post-ADR-0006):
     - ``user_token`` (deployed app, OBO): act *as the logged-in user* via their forwarded
       OAuth token (the ``x-forwarded-access-token`` header). Host comes from the
       auto-injected env. Used for user-facing reads so the app respects the user's own
@@ -94,14 +120,44 @@ def _client(profile: str | None = None, *, user_token: str | None = None) -> Wor
     - neither (deployed app, shared ops): the app's service principal authenticates
       automatically via injected env — used for the LLM reviewer + the prod grant preview.
 
-    Construction is lazy (no network call), so this is safe to build offline.
+    ``scope="dev-sp"`` — the DEV workspace, reached via the standing dev-reader/writer service
+    principal (never OBO: once the app is prod-hosted there is no forwarded dev token — the
+    cross-workspace identity is load-bearing, see ADR-0006/A2). Host = ``APP_DEV_HOST``;
+    credentials are read from the ``APP_DEV_SP_SECRET_SCOPE`` secret scope via the CALLING
+    client's own identity (an explicit ``secret_client`` may be injected for tests/bootstrapping
+    without a live prod client). Raises ``RuntimeError`` if ``APP_DEV_HOST`` isn't configured —
+    fail loud rather than silently falling back to prod.
+
+    Construction is lazy (no network call in any branch), so this is safe to build/test offline.
     """
+    if scope == "dev-sp":
+        return _dev_sp_client()
     if user_token:
         # auth_type="pat" so the SDK uses ONLY the forwarded user token. Without it the app
         # SP's auto-injected OAuth env (DATABRICKS_CLIENT_ID/SECRET) collides with the token
         # -> "more than one authorization method configured: oauth and pat".
         return WorkspaceClient(host=Config().host, token=user_token, auth_type="pat")
     return WorkspaceClient(profile=profile) if profile else WorkspaceClient()
+
+
+def _dev_sp_client(*, secret_client: WorkspaceClient | None = None) -> WorkspaceClient:
+    """The dev-remote-SP client (scope="dev-sp"): authenticates as the dev-reader/writer SP against
+    the DEV workspace host. Construction is lazy — the secret read + WorkspaceClient() call only
+    happen when a caller actually invokes this (not at import time), so wiring this in is safe
+    before the SP exists (A1) and before it's ever called live (A2 provisions the SP + secret).
+
+    ``secret_client`` is the prod-local client used to READ the dev SP's secret (the app's own
+    identity holds the READ grant on the scope, mirroring ``_github_app``'s pattern); defaults to
+    the app SP / local profile. Injectable so this is unit-testable with a fake — no network.
+    """
+    if not APP_DEV_HOST:
+        raise RuntimeError(
+            "APP_DEV_HOST is not configured — the cross-workspace (dev-sp) client requires the "
+            "dev workspace host (ADR-0004: config-driven, never hardcoded).")
+    w = secret_client or _client()
+    client_id = _secret(w, APP_DEV_SP_SECRET_SCOPE, DEV_SP_CLIENT_ID_KEY)
+    client_secret = _secret(w, APP_DEV_SP_SECRET_SCOPE, DEV_SP_CLIENT_SECRET_KEY)
+    return WorkspaceClient(host=APP_DEV_HOST, client_id=client_id, client_secret=client_secret)
 
 
 def list_spaces(profile: str | None = None, *, client: WorkspaceClient | None = None,

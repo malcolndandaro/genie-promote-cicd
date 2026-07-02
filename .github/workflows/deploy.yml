@@ -44,5 +44,7 @@ jobs:
           version: 1.4.0   # pin the CLI (demo stability — genie_spaces + direct engine need >=1.4.0)
       - name: Pre-render serialized_space (dev_->prod_) + allowlist check
         run: bash scripts/render.sh prod
+      - name: Assemble the app source (ADR-0006/A1 — promote_app now deploys to prod)
+        run: bash scripts/build_promote_app.sh
       - name: Deploy bundle to prod
         run: databricks bundle deploy -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
