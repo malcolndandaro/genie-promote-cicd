@@ -32,6 +32,7 @@ for _p in ("genie_reviewer", "scripts"):
 
 import base64  # noqa: E402
 
+import access_spec  # noqa: E402  (F2 — the declared-access model; Space perms + UC grants)
 import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
 import eval_gate  # noqa: E402
 import grant_check  # noqa: E402
@@ -80,8 +81,16 @@ def branch_for(slug: str) -> str:
 def src_path_for(slug: str) -> str:
     return f"{GH_GENIE_SRC_DIR}/{slug}.serialized_space.json"
 
+
+def access_path_for(slug: str) -> str:
+    """The per-space AccessSpec sidecar path (F2) — mirrors the `.title` sidecar pattern: committed
+    next to the artifact so CI's render.sh/check_grants.py/apply_access.py find it by convention,
+    with no shared manifest (concurrent per-space PRs never conflict)."""
+    return f"{GH_GENIE_SRC_DIR}/{slug}.access.json"
+
 # The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
-REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group")
+REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group",
+                 "access_spec")
 
 # --- Cross-workspace client factory (ADR-0006 / A1) --------------------------------------------
 #
@@ -283,9 +292,42 @@ def _effective_grants(profile: str, full_name: str, client: WorkspaceClient | No
     return out
 
 
+def _pii_access_findings(space: dict, spec: "access_spec.AccessSpec") -> list[dict]:
+    """PII-01/02 interplay (F2 acceptance criteria): a handbook-grounded, deterministic note when
+    the Requester declares broad access (UC SELECT and/or Space CAN_RUN/CAN_VIEW) to ANY group on a
+    Space whose columns include an unmasked bank-secrecy/PII signal (CPF, titular/account-holder
+    identity, PAN/card number — the same signal PII-01 itself looks for, kept in sync with
+    handbook_rules.RULES so this doesn't drift into a second source of truth). This does NOT
+    replace the LLM's own PII-01 judgment (a real exposure is still a BLOCKER there); it's a
+    SUGGESTION surfaced specifically because F2 adds new principals who wouldn't otherwise have
+    seen this Space's data — the Steward should double-check masking before approving THIS access
+    grant, not just the Space's existing grants."""
+    if spec.is_empty():
+        return []
+    pii_terms = ("cpf", "titular", "portador", "pan", "cartao", "cartão")
+    flagged_cols: list[str] = []
+    for t in (space.get("data_sources") or {}).get("tables", []) or []:
+        for c in (t.get("column_configs") or []):
+            name = (c.get("column_name") or "").lower()
+            if any(term in name for term in pii_terms):
+                flagged_cols.append(f"{t.get('identifier', '')}.{c.get('column_name')}")
+    if not flagged_cols:
+        return []
+    principals = ", ".join(spec.all_principals())
+    return [{
+        "severity": "SUGGESTION", "rule_id": "PII-01",
+        "citation": "Genie Promotion Handbook › PII › PII-01",
+        "message": (f"acesso declarado para {principals} inclui colunas com sinal de "
+                    f"PII/sigilo bancário ({', '.join(flagged_cols)}) — confirme máscara/row filter "
+                    f"antes de aprovar, para não ampliar exposição a um grupo não autorizado."),
+        "suggestion": "Revisar máscaras de coluna UC nessas tabelas antes de aprovar o AccessSpec.",
+    }]
+
+
 def review_space(space_id: str, profile: str | None = None, to_env: str = "prod", domain: str = DOMAIN,
                  consumer_group: str | None = None, grant_profile: str | None = None,
-                 user_token: str | None = None) -> dict:
+                 user_token: str | None = None,
+                 access_spec_: "access_spec.AccessSpec | None" = None) -> dict:
     """The hero flow: export -> pre-render -> allowlist (ENV-01) + grant check (GRANT-01)
     -> agent review (EVAL-01 deterministic) -> eval gate. Deterministic findings own their
     rule_id (no double-count). Returns findings/gate/eval/allowlist_violations/timeline/prod_serialized.
@@ -294,6 +336,14 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     configured (grant_profile arg or APP_PROD_PROFILE locally) — the prod catalog is
     workspace-isolated, so the dev-hosted app can't see it. On the deployed app it's skipped;
     the AUTHORITATIVE GRANT-01 runs in CI (pr-checks) as the prod SP (scripts/check_grants.py).
+
+    ``access_spec_`` (F2, optional — named with a trailing underscore to avoid shadowing the
+    ``access_spec`` module import) is the Requester's declared `AccessSpec` for this promotion.
+    When given, GRANT-01's preview checks EVERY principal it declares (union with
+    ``consumer_group``, never a replacement — F2 never weakens the base check), and a PII-01
+    interplay SUGGESTION is added if the declared access reaches a column with a PII/bank-secrecy
+    signal. The AccessSpec itself is echoed back on the result (``access_spec``) so the Steward
+    reviews the SAME declaration that will be committed to the promotion sidecar.
 
     Cross-workspace rewiring (A2 / ADR-0006 half-migration fix): the export step is delegated to
     ``export_serialized`` UNCLIENTED (no ``client=`` injected here) so it does its own identity
@@ -304,6 +354,7 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     """
     consumer_group = consumer_group or os.environ.get("APP_CONSUMER_GROUP", "account users")
     grant_profile = grant_profile or os.environ.get("APP_PROD_PROFILE")  # None -> skip preview
+    spec = access_spec_ or access_spec.AccessSpec()
     # export_serialized resolves its OWN transport: dev-sp + assert_can_access(verified identity)
     # when user_token is set (the only way to reach dev post-ADR-0006), else the local profile.
     dev_serialized = export_serialized(space_id, profile, user_token=user_token)
@@ -320,13 +371,17 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
          "suggestion": "Remover/pré-renderizar a referência de outro ambiente."}
         for v in violations
     ]
+    # GRANT-01 preview: union of the base consumer_group + every principal the AccessSpec declares
+    # (F2) — declaring an AccessSpec never NARROWS the check, it only ever adds more principals.
+    all_principals = list(dict.fromkeys([consumer_group, *spec.all_principals()]))
     if grant_profile:  # only preview when a reachable prod target is configured (else CI owns it)
         try:
             gw = _client(grant_profile)  # built here so a bad/unreachable prod profile can't break the review
             deterministic += grant_check.check_grants(
-                prod_space, consumer_group, lambda fq: _effective_grants(grant_profile, fq, client=gw))
+                prod_space, all_principals, lambda fq: _effective_grants(grant_profile, fq, client=gw))
         except Exception:  # noqa: BLE001 — grant check is best-effort; never break the review
             pass
+    deterministic += _pii_access_findings(prod_space, spec)
 
     ctx = review_core.build_space_context(prod_space)
     system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, deterministic)
@@ -347,6 +402,7 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     return {
         "findings": findings, "gate": gate, "eval": eval_res,
         "allowlist_violations": violations, "consumer_group": consumer_group,
+        "access_spec": spec.to_dict(),
         "timeline": build_timeline(not violations, gate, eval_res, approved=False, deployed=False),
         "prod_serialized": prod_space,
         # The DEV-shaped export (what the promotion PR commits to src/; CI rebinds dev_->prod_).
@@ -391,18 +447,28 @@ def github_app_factory(profile: str | None = None) -> GitHubApp:
 
 def request_promotion(space_id: str, profile: str | None = None, *, user_token: str | None = None,
                       requester_email: str | None = None, resource_title: str | None = None,
-                      domain: str = DOMAIN, github: GitHubApp | None = None) -> dict:
-    """GH2: open (or update) a real promotion PR for a space and post the attributed review comment.
+                      domain: str = DOMAIN, github: GitHubApp | None = None,
+                      access_spec_: "access_spec.AccessSpec | None" = None) -> dict:
+    """GH2 (+ F2): open (or update) a real promotion PR for a space and post the attributed review
+    comment.
 
     Flow: review the space (OBO export + app-SP reviewer; reused for the PR comment) → export the
     DEV-shaped serialized_space (OBO) → as the BOT, ensure the promotion branch, write the artifact
     to src/ (CI rebinds dev_->prod_), open-or-find the PR, and upsert one comment that mirrors the
     UI (steps + gate + findings/blockers) attributing the human requester.
 
+    ``access_spec_`` (F2, optional) is the Requester's declared `AccessSpec` — DECLARATION is
+    app-direct (this function just writes it to a committed sidecar), but ENFORCEMENT (actually
+    applying the per-Space group's UC grants + Genie Space permissions) is NOT done here: it goes
+    through the governed pipeline (``scripts/apply_access.py``, run by CI/CD as the prod SP —
+    mirrors GRANT-01's split between the app's PREVIEW check and CI's authoritative one). Named
+    with a trailing underscore to avoid shadowing the ``access_spec`` module import.
+
     Returns {review (UI fields), pr:{number,url}}. The PR opens regardless of findings — it's the
     fix/approval loop; pr-checks + the Steward gate (GH4) enforce the outcome.
     """
-    full = review_space(space_id, profile=profile, user_token=user_token, domain=domain)
+    full = review_space(space_id, profile=profile, user_token=user_token, domain=domain,
+                        access_spec_=access_spec_)
     review = {k: full[k] for k in REVIEW_FIELDS}
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the
@@ -418,6 +484,13 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     # the prod space keeps a friendly title). Committed next to the artifact; no shared manifest, so
     # concurrent per-space PRs never conflict.
     extra = {f"{GH_GENIE_SRC_DIR}/{slug}.title": (resource_title or safe_id) + "\n"}
+    spec = access_spec_ or access_spec.AccessSpec()
+    if not spec.is_empty():
+        # The AccessSpec sidecar (F2): committed alongside the artifact so CI's render.sh copies it
+        # forward, check_grants.py (GRANT-01) verifies every declared principal, and
+        # apply_access.py (governed enforcement) applies the per-Space group + grants + Space
+        # permissions — NEVER applied here (no app-direct prod mutation).
+        extra[access_path_for(slug)] = json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n"
     pr = gh.open_or_update_promotion(
         branch=branch, path=path, content=content, extra_files=extra,
         title=f"Promover Genie Space para produção ({safe_id})",

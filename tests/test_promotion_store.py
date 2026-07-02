@@ -176,3 +176,44 @@ def test_build_store_succeeds_with_a_working_backend():
     assert isinstance(store, PromotionStore)
     # migrate() + healthcheck() ran on the backend
     assert store._b.migrated is True
+
+
+# --- F2: the declared AccessSpec persists WITH the Promotion -----------------
+
+_ACCESS_SPEC = {
+    "space_permissions": [{"principal": "data_analysts", "is_group": True, "level": "CAN_RUN"}],
+    "uc_principals": [{"principal": "ana@x.com", "is_group": False}],
+}
+
+
+def test_promotion_persists_and_round_trips_the_declared_access_spec(store):
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        access_spec=_ACCESS_SPEC)
+    assert p.access_spec == _ACCESS_SPEC
+    got = store.get_promotion(p.id)
+    assert got.access_spec == _ACCESS_SPEC  # survives the round trip through the backend
+
+
+def test_promotion_access_spec_defaults_to_none_when_not_declared(store):
+    """A promotion with no declared AccessSpec (pre-F2 behavior) persists cleanly with None — F2
+    is additive, not a breaking schema change for existing promotions."""
+    p = _mk(store)
+    assert p.access_spec is None
+    assert store.get_promotion(p.id).access_spec is None
+
+
+def test_access_spec_survives_a_re_review_snapshot_without_being_overwritten(store):
+    """Appending a NEW review snapshot (a re-review) must not clobber the Promotion's already
+    -declared AccessSpec — access_spec lives on the Promotion row, not the snapshot."""
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        access_spec=_ACCESS_SPEC)
+    store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="blocked",
+                          findings=[], eval=None, timeline=[])
+    store.touch(p.id)
+    assert store.get_promotion(p.id).access_spec == _ACCESS_SPEC

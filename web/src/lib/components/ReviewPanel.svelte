@@ -21,6 +21,12 @@
   let keyed = $derived(review.findings.map((f, i) => ({ ...f, _k: `${f.rule_id}-${i}` })));
   // The 7-step pipeline: verdict steps from review.timeline, git steps driven live by liveStatus.
   let timeline = $derived(buildPromotionSteps(review, liveStatus));
+  // F2: the declared AccessSpec (both permission systems), shown so the Steward approves it as
+  // part of the promotion. `access_spec` is optional (a pre-F2 cached/recovered review has none).
+  let accessSpec = $derived(review.access_spec);
+  let hasDeclaredAccess = $derived(
+    !!accessSpec && (accessSpec.space_permissions.length > 0 || accessSpec.uc_principals.length > 0)
+  );
 </script>
 
 <div class="review">
@@ -77,6 +83,39 @@
     {/if}
   </section>
 
+  <!-- F2: declared access — shown so the Steward approves it as part of the promotion. Read-only
+       here (declaration happens on the request form); enforcement is governed (CI, prod SP), never
+       applied from this screen. -->
+  {#if hasDeclaredAccess && accessSpec}
+    <section>
+      <h3 class="review__heading">Acesso declarado</h3>
+      {#if accessSpec.space_permissions.length > 0}
+        <div class="access-group">
+          <p class="access-group__label">Permissões do Espaço (Genie)</p>
+          <div class="access-chips">
+            {#each accessSpec.space_permissions as sp (sp.principal + sp.level)}
+              <Badge tone="accent">{sp.principal}{sp.is_group ? ' (grupo)' : ''} · {sp.level}</Badge>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      {#if accessSpec.uc_principals.length > 0}
+        <div class="access-group">
+          <p class="access-group__label">Grants de dados (UC SELECT)</p>
+          <div class="access-chips">
+            {#each accessSpec.uc_principals as p (p.principal)}
+              <Badge tone="neutral">{p.principal}{p.is_group ? ' (grupo)' : ''}</Badge>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      <p class="muted text-xs">
+        Aplicado via um grupo dedicado ao espaço, pelo pipeline governado (CI) após a aprovação —
+        nunca diretamente pelo app.
+      </p>
+    </section>
+  {/if}
+
   <p class="muted text-xs">eval-run: {review.eval.summary}</p>
 
   {#if approval}
@@ -111,6 +150,20 @@
   .review__heading {
     font-size: 0.95rem;
     margin-bottom: var(--space-3);
+  }
+  .access-group {
+    margin-bottom: var(--space-3);
+  }
+  .access-group__label {
+    margin: 0 0 var(--space-2);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--muted-foreground);
+  }
+  .access-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   .gate {
     border-radius: var(--radius-sm);

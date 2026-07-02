@@ -3,7 +3,7 @@
  * same origin — the server reads the user's OBO token (`x-forwarded-access-token`) in-process and
  * NO token is ever handled client-side.
  */
-import type { Whoami, PromotableResource, Review, ResourceKind } from './types';
+import type { AccessSpec, Whoami, PromotableResource, Review, ResourceKind } from './types';
 import { spaceToResource } from './resources';
 
 /** A failed API call. `status` lets callers distinguish a 401 (re-auth) from a 502 (engine). */
@@ -67,8 +67,15 @@ export interface PromoteResult {
  * attributed review comment. Reviews as the user (OBO); opens the PR + comments as the bot; the
  * server persists the Promotion + Review Snapshot (LB3). The resource title/kind are sent so the
  * stored Promotion (and the history/recovery view) shows the resource without a second lookup.
+ *
+ * `accessSpec` (F2, optional) is the Requester's declared access — DECLARATION only (this call);
+ * the server writes it to a git sidecar the governed CI pipeline enforces, it never mutates a live
+ * grant/permission from this request.
  */
-export async function postPromote(resource: PromotableResource): Promise<PromoteResult> {
+export async function postPromote(
+  resource: PromotableResource,
+  accessSpec?: AccessSpec
+): Promise<PromoteResult> {
   const r = await fetch('/api/promote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -76,6 +83,7 @@ export async function postPromote(resource: PromotableResource): Promise<Promote
       space_id: resource.id,
       resource_title: resource.title,
       resource_kind: resource.kind,
+      ...(accessSpec ? { access_spec: accessSpec } : {}),
     }),
   });
   if (!r.ok) throw await toError(r);
