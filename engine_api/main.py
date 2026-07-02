@@ -48,7 +48,8 @@ from pydantic import BaseModel
 # alongside engine_api/ — the build assembly (scripts/build_*_app.sh) guarantees that layout.
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "app"))
-import app_logic  # noqa: E402
+import app_logic  # noqa: E402  (MUST import before access_spec/github_app — it puts genie_reviewer/ on sys.path)
+import access_spec as access_spec_mod  # noqa: E402  (F2 — declared-access model)
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
@@ -266,12 +267,39 @@ def spaces(
     return {"spaces": _engine_call("list_spaces", lambda: app_logic.list_spaces(user_token=token))}
 
 
+class SpacePermissionIn(BaseModel):
+    principal: str
+    is_group: bool = False
+    level: str = "CAN_RUN"
+
+
+class PrincipalIn(BaseModel):
+    principal: str
+    is_group: bool = False
+
+
+class AccessSpecIn(BaseModel):
+    """F2: the Requester's declared access, over the wire. Mirrors
+    `access_spec.AccessSpec.to_dict()` — kept as a distinct pydantic model (rather than a bare
+    dict) so a malformed client payload 422s instead of failing deep inside the engine."""
+    space_permissions: list[SpacePermissionIn] = []
+    uc_principals: list[PrincipalIn] = []
+
+    def to_engine(self) -> "access_spec_mod.AccessSpec":
+        return access_spec_mod.AccessSpec.from_dict(self.model_dump())
+
+
 class ReviewRequest(BaseModel):
     space_id: str
+    # F2: the Requester's declared AccessSpec, previewed in the SAME review the Steward later sees
+    # (GRANT-01 checks every declared principal; a PII-01 interplay note may be added) — optional so
+    # the pre-F2 {space_id}-only contract still works and a review with no declared access is legal.
+    access_spec: AccessSpecIn | None = None
 
 
 # Only the UI-facing fields of the review result (drop the large prod_serialized payload).
-_REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group")
+_REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group",
+                  "access_spec")
 
 
 @api.post("/review")
@@ -288,7 +316,8 @@ def review(
         raise HTTPException(status_code=401, detail="user token required (OBO)")
 
     def _run() -> dict:
-        result = app_logic.review_space(body.space_id, user_token=token)
+        spec = body.access_spec.to_engine() if body.access_spec else None
+        result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
         return {k: result[k] for k in _REVIEW_FIELDS}
@@ -303,6 +332,10 @@ class PromoteRequest(BaseModel):
     # legacy {space_id}-only contract still works.
     resource_title: str | None = None
     resource_kind: str | None = None
+    # F2: the same declared AccessSpec reviewed above, now carried through to the actual promotion
+    # request — persisted with the Promotion + committed to the PR as a sidecar (declaration is
+    # app-direct; enforcement is governed, see app_logic.request_promotion).
+    access_spec: AccessSpecIn | None = None
 
 
 def _persist_promotion(store, result: dict, body: PromoteRequest, requester_email: str | None) -> str:
@@ -321,7 +354,11 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
                 resource_id=body.space_id, resource_kind=body.resource_kind or "genie_space",
                 resource_title=body.resource_title, requester_email=requester_email,
                 pr_number=pr["number"], pr_url=pr["url"], branch=result.get("branch", ""),
-                current_phase="open", live_status=None)
+                current_phase="open", live_status=None,
+                # F2: persist the declared AccessSpec WITH the Promotion (echoed back by
+                # request_promotion's review payload) so it survives independently of the PR/branch
+                # and renders in the recovery/history view without re-parsing the sidecar from git.
+                access_spec=review.get("access_spec") or None)
             promotion_id, event = promotion.id, "requested"
         except DuplicatePRNumber:
             # Concurrent request created it between our find_by_pr and create (TOCTOU). Recover by
@@ -363,11 +400,12 @@ def promote(
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
+    spec = body.access_spec.to_engine() if body.access_spec else None
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
-            resource_title=body.resource_title),
+            resource_title=body.resource_title, access_spec_=spec),
     )
     store = getattr(app.state, "store", None)
     if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips
@@ -469,7 +507,10 @@ def _promotion_summary(p) -> dict:
             "resource_title": p.resource_title, "requester_email": p.requester_email,
             "pr_number": p.pr_number, "pr_url": p.pr_url,
             "current_phase": p.current_phase, "terminal": p.terminal,
-            "created_at": p.created_at, "updated_at": p.updated_at}
+            "created_at": p.created_at, "updated_at": p.updated_at,
+            # F2: the declared AccessSpec persisted with the Promotion (independent of the review
+            # snapshot, and of the sidecar's own PR/branch lifetime) — the Steward reviews this.
+            "access_spec": p.access_spec}
 
 
 def _audit_event(e) -> dict:

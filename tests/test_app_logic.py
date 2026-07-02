@@ -4,6 +4,7 @@ The live calls are now SDK-based and accept an injectable ``client``, so the
 response-parsing (SDK objects -> UI dicts) is covered with a fake WorkspaceClient
 — no network, runs fully offline.
 """
+import json
 import os
 import sys
 from types import SimpleNamespace as NS
@@ -357,6 +358,7 @@ _FULL_REVIEW = {
     "timeline": [{"key": "checks", "label": "Checagens", "status": "pass"}],
     "allowlist_violations": [],
     "consumer_group": "account users",
+    "access_spec": {"space_permissions": [], "uc_principals": []},  # F2: no access declared
     "prod_serialized": {"big": "payload should be dropped"},
     "dev_serialized": {"display_name": "Recebíveis", "n": 2},  # what the PR commits
 }
@@ -422,3 +424,136 @@ def test_secret_decodes_base64_value():
     import base64
     fake = NS(secrets=NS(get_secret=lambda scope, key: NS(value=base64.b64encode(b"hello").decode())))
     assert app_logic._secret(fake, "genie_promote", "github_app_id") == "hello"
+
+
+# --- F2: AccessSpec declared at promotion (app-direct declaration, governed enforcement) ---
+
+import access_spec  # noqa: E402
+
+
+def _spec_with_access():
+    return access_spec.AccessSpec(
+        space_permissions=(
+            access_spec.SpacePermission(access_spec.Principal("data_analysts", is_group=True), "CAN_RUN"),
+        ),
+        uc_principals=(access_spec.Principal("data_analysts", is_group=True),
+                      access_spec.Principal("ana@x.com")),
+    )
+
+
+def test_request_promotion_commits_access_sidecar_when_declared(monkeypatch):
+    """F2: a non-empty AccessSpec is committed as a per-space sidecar (mirrors .title) — the
+    DECLARATION is app-direct (this call), but nothing here touches a live grant/permission."""
+    captured_spec = {}
+
+    def fake_review_space(space_id, *a, access_spec_=None, **k):
+        captured_spec["spec"] = access_spec_
+        out = dict(_FULL_REVIEW)
+        out["access_spec"] = access_spec_.to_dict() if access_spec_ else out["access_spec"]
+        return out
+
+    monkeypatch.setattr(app_logic, "review_space", fake_review_space)
+    gh = _FakeGitHubApp()
+    spec = _spec_with_access()
+    out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                      access_spec_=spec, github=gh)
+    sidecar_path = "src/genie/sp1.access.json"
+    assert sidecar_path in gh.promo["extra_files"]
+    committed = json.loads(gh.promo["extra_files"][sidecar_path])
+    assert committed == spec.to_dict()
+    # the review payload the Steward sees carries the SAME declaration that was passed through
+    assert captured_spec["spec"] is spec
+    assert out["review"]["access_spec"] == spec.to_dict()
+
+
+def test_request_promotion_omits_access_sidecar_when_not_declared(monkeypatch):
+    """No AccessSpec declared (the pre-F2 / default case) -> no sidecar file, no noisy empty commit."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    assert "src/genie/sp1.access.json" not in gh.promo["extra_files"]
+
+
+def test_request_promotion_never_calls_a_live_grant_or_permission_api(monkeypatch):
+    """Enforcement must be GOVERNED (CI-run, prod SP), never app-direct: request_promotion (and the
+    review_space it wraps) must never touch grants.update / permissions.update itself. We assert
+    this by making both explode if called on the injected client, then proving request_promotion
+    still succeeds — it only ever WRITES the declared spec to a git sidecar."""
+    def _boom(*a, **k):
+        raise AssertionError("app-direct grant/permission mutation — enforcement must be governed")
+
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    fake_client = NS(grants=NS(update=_boom), permissions=NS(update=_boom))
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: fake_client)
+    out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                      access_spec_=_spec_with_access(), github=gh)
+    assert out["pr"]["number"] == 7  # completed without ever invoking the fake grant/permission APIs
+
+
+def test_review_space_grant01_preview_checks_all_declared_principals(monkeypatch):
+    """The in-app GRANT-01 PREVIEW (only runs with a reachable grant_profile) checks every
+    principal the AccessSpec declares, union'd with the base consumer_group — never a replacement."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
+        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+
+    captured = {}
+
+    def fake_check_grants(space, principals, getter):
+        captured["principals"] = list(principals) if not isinstance(principals, str) else [principals]
+        return []
+
+    monkeypatch.setattr(app_logic.grant_check, "check_grants", fake_check_grants)
+    monkeypatch.setattr(app_logic.review_core, "build_space_context",
+                        lambda space: {"n_benchmark": 5})
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate",
+                        lambda *a, **k: {"status": "advisory", "summary": "ok"})
+
+    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),
+                                                 access_spec.Principal("data_analysts", is_group=True)))
+    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
+    assert set(captured["principals"]) == {"account users", "ana@x.com", "data_analysts"}
+    assert result["access_spec"] == spec.to_dict()
+
+
+def test_review_space_pii_interplay_flags_declared_access_to_masked_column(monkeypatch):
+    """PII-01/02 interplay (F2 acceptance criteria): declaring access that reaches a column with a
+    PII/bank-secrecy signal (CPF here) surfaces a grounded SUGGESTION so the Steward double-checks
+    masking before approving — it never silently grants broad SELECT past that concern."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
+        {"identifier": "prod_recebiveis.diamond.dim_cedente",
+         "column_configs": [{"column_name": "cpf"}, {"column_name": "nome"}]}]}})
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic.review_core, "build_space_context",
+                        lambda space: {"n_benchmark": 5})
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate",
+                        lambda *a, **k: {"status": "advisory", "summary": "ok"})
+
+    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("data_analysts", is_group=True),))
+    result = app_logic.review_space("sp1", access_spec_=spec)  # no grant_profile -> GRANT-01 preview skipped
+    pii = [f for f in result["findings"] if f["rule_id"] == "PII-01"]
+    assert len(pii) == 1 and pii[0]["severity"] == "SUGGESTION"
+    assert "cpf" in pii[0]["message"].lower()
+
+
+def test_review_space_no_pii_finding_when_no_access_declared(monkeypatch):
+    """No AccessSpec declared -> no PII interplay noise, even on a Space with a flagged column
+    (the existing LLM-driven PII-01 still runs; this is only the F2-specific access-interplay note)."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
+        {"identifier": "prod_recebiveis.diamond.dim_cedente",
+         "column_configs": [{"column_name": "cpf"}]}]}})
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic.review_core, "build_space_context",
+                        lambda space: {"n_benchmark": 5})
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate",
+                        lambda *a, **k: {"status": "advisory", "summary": "ok"})
+
+    result = app_logic.review_space("sp1")
+    assert [f for f in result["findings"] if f["rule_id"] == "PII-01"] == []

@@ -58,6 +58,30 @@ export interface TimelineStep {
   status: StepStatus;
 }
 
+/** One Genie Space permission entry the Requester declared (F2, system 1). */
+export interface SpacePermissionEntry {
+  principal: string;
+  is_group: boolean;
+  level: string; // 'CAN_RUN' | 'CAN_VIEW'
+}
+
+/** One UC SELECT-grant principal the Requester declared (F2, system 2). */
+export interface AccessPrincipal {
+  principal: string;
+  is_group: boolean;
+}
+
+/**
+ * The Requester's declared access for this promotion (F2). Models BOTH systems explicitly —
+ * Genie Space permissions (who can open/run the Space) and UC data grants (who can SELECT the
+ * underlying tables) — so the Steward reviews and approves exactly what will be enforced by the
+ * governed CI pipeline (never applied app-direct). Empty arrays mean nothing was declared.
+ */
+export interface AccessSpec {
+  space_permissions: SpacePermissionEntry[];
+  uc_principals: AccessPrincipal[];
+}
+
 export interface Review {
   findings: Finding[];
   gate: Gate;
@@ -65,4 +89,7 @@ export interface Review {
   allowlist_violations: string[];
   consumer_group: string;
   timeline: TimelineStep[];
+  /** The declared AccessSpec (F2) — present once the engine always returns it; optional here so an
+   * older cached/recovered review payload (pre-F2) still type-checks. */
+  access_spec?: AccessSpec;
 }

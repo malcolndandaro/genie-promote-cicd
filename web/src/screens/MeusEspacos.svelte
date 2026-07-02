@@ -2,6 +2,7 @@
   import Button from '../lib/components/Button.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import SpaceCard from '../lib/components/SpaceCard.svelte';
+  import AccessSpecForm from '../lib/components/AccessSpecForm.svelte';
   import PromotionReview from '../lib/components/PromotionReview.svelte';
   import { getResources, isAuthError } from '../lib/api';
   import type { Promotion } from '../lib/promotion.svelte';
@@ -38,6 +39,13 @@
       <h2 class="screen-head__title">Meus espaços</h2>
       <p class="muted text-sm">Escolha um espaço e solicite a promoção governada para produção.</p>
     </header>
+
+    <!-- F2: optionally declare who may use the promoted Space + read its data. Rides the next
+         "Solicitar promoção"; shown in the Review for the Steward to approve; applied by the
+         governed pipeline (never app-direct). -->
+    <div class="access-slot">
+      <AccessSpecForm {promotion} />
+    </div>
 
     {#await resourcesP}
       <div class="space-grid">
@@ -92,6 +100,9 @@
 
 <style>
   .screen-head {
+    margin-bottom: var(--space-4);
+  }
+  .access-slot {
     margin-bottom: var(--space-4);
   }
   .screen-head__title {

@@ -12,7 +12,7 @@
  * deep-links the Steward there + reflects the result. `approval` below is a faithful PREVIEW of
  * that policy (the documented future `/api/approve` would re-check it server-side from the token).
  */
-import type { PromotableResource, Review } from './types';
+import type { AccessSpec, PromotableResource, Review } from './types';
 import {
   postPromote,
   getPromoteStatus,
@@ -127,6 +127,11 @@ export class Promotion {
     }
   }
 
+  /** The Requester's declared access for the CURRENT flow (F2) — captured before requesting the
+   * promotion, so it rides along on the SAME request the review reflects. Undeclared (undefined)
+   * is legal: no AccessSpec means nothing beyond the base consumer_group is being asked for. */
+  pendingAccessSpec = $state<AccessSpec | undefined>(undefined);
+
   /**
    * Request a promotion for the selected resource: review it (OBO export + app-SP reviewer) AND
    * open/update a real GitHub PR with the attributed review comment (bot). One action, one review.
@@ -141,7 +146,7 @@ export class Promotion {
     this.liveStatus = null;
     const resource = this.resource;
     try {
-      const res = await postPromote(resource);
+      const res = await postPromote(resource, this.pendingAccessSpec);
       if (this.resource?.id !== id) return; // selection changed mid-flight — drop the stale result
       this.review = res.review;
       this.pr = res.pr;
