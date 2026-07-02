@@ -304,7 +304,7 @@ def _pii_access_findings(space: dict, spec: "access_spec.AccessSpec") -> list[di
     grant, not just the Space's existing grants."""
     if spec.is_empty():
         return []
-    pii_terms = ("cpf", "titular", "portador", "pan", "cartao", "cartão")
+    pii_terms = handbook_rules.PII_SIGNAL_TERMS  # shared single source of truth (no drift)
     flagged_cols: list[str] = []
     for t in (space.get("data_sources") or {}).get("tables", []) or []:
         for c in (t.get("column_configs") or []):

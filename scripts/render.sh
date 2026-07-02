@@ -35,6 +35,9 @@ for src in src/genie/*.serialized_space.json; do
   if [ -f "src/genie/${slug}.title" ]; then
     title="$(tr -d '\n' < "src/genie/${slug}.title" | sed 's/"/\\"/g')"
     entries+="          title: \"${title}\"\n"
+    # Copy the title sidecar forward too (F2): apply_access.py resolves the deployed Space's live id
+    # by matching this title via genie.list_spaces() (the id isn't in bundle summary / the payload).
+    cp "src/genie/${slug}.title" "build/genie/${slug}.title"
   fi
   # Optional per-space AccessSpec sidecar (F2 — committed by the app, mirrors .title). It carries
   # only principal names (no env-scoped catalog refs), so it's copied as-is (no pre_render rebind

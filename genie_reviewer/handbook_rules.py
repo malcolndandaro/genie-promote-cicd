@@ -5,6 +5,11 @@ cites a rule_id per finding — no Vector Search needed (that's the scale path, 
 a future option). Source of truth: handbook/genie-handbook.md. Keep in sync.
 """
 
+# Column-name signal terms for PII / bank-secrecy (LGPD, sigilo bancário) — the ONE source of truth,
+# imported by both the PII-01 handbook rule text below and F2's app_logic._pii_access_findings (so a
+# declared AccessSpec can't silently grant broad SELECT over masked/PII columns). Lowercase.
+PII_SIGNAL_TERMS = ("cpf", "titular", "portador", "pan", "cartao", "cartão")
+
 RULES = [
     {
         "rule_id": "ENV-01",

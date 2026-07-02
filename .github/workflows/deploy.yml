@@ -53,25 +53,16 @@ jobs:
         # per-Space group's membership + UC SELECT grants + Genie Space permissions. Runs AFTER the
         # deploy (so each genie_spaces resource — and the Space it manages — already exists) and AS
         # the prod SP (same identity/job as the deploy + GRANT-01) — never app-direct. A space with
-        # no sidecar is a no-op. The deployed Space's live id (not in the committed
-        # serialized_space — Genie assigns it) is resolved from `bundle summary`.
+        # no AccessSpec sidecar is a no-op. apply_access.py resolves the deployed Space's live id by
+        # matching the <slug>.title sidecar via genie.list_spaces() (the id is NOT in bundle summary
+        # or the committed serialized_space) and FAILS the step if it can't — never warn-and-skip,
+        # which would silently leave declared access unapplied (defeats F2's governance).
         run: |
           python3 -m pip install -q 'databricks-sdk>=0.111.0'
-          databricks bundle summary -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}" -o json > /tmp/bundle_summary.json
           for f in build/genie/*.serialized_space.json; do
             [ -f "$f" ] || continue
             slug="$(basename "$f" .serialized_space.json)"
             [ -f "build/genie/${slug}.access.json" ] || continue   # nothing declared -> skip entirely
-            space_id="$(python3 -c "
-import json
-d = json.load(open('/tmp/bundle_summary.json'))
-res = (d.get('resources') or {}).get('genie_spaces') or {}
-entry = res.get('$slug') or {}
-print(entry.get('id') or '')
-")"
-            if [ -z "$space_id" ]; then
-              echo "::warning::could not resolve deployed space id for slug=$slug — skipping apply_access.py"
-              continue
-            fi
-            python3 scripts/apply_access.py "$f" "build/genie/${slug}.access.json" "$space_id"
+            title="$(cat "build/genie/${slug}.title" 2>/dev/null || true)"
+            python3 scripts/apply_access.py "$f" "build/genie/${slug}.access.json" "$title"
           done
