@@ -15,6 +15,37 @@ cd "$(dirname "$0")/.."
 
 OUT="build/promote_app"
 
+# ---- A2: resolve APP_DEV_HOST / APP_DEV_SP_SECRET_SCOPE from the SAME single source of truth
+# databricks.yml already declares (the `dev_host` / `dev_sp_secret_scope` bundle variables) —
+# instead of baking a hardcoded placeholder here, ask `databricks bundle validate` (which resolves
+# --var overrides / target defaults exactly like `bundle deploy` will) what those variables
+# currently resolve to, and interpolate the answer into the generated app.yaml. `bundle validate`
+# resolves variables from LOCAL bundle files without needing a live/authenticated round-trip, so
+# this stays fast and offline-friendly (pr-checks doesn't even reach this script — it stubs the
+# build dir — but deploy.yml and any local run do). ADR-0004: env var overrides
+# (BUNDLE_DEV_HOST / BUNDLE_DEV_SP_SECRET_SCOPE) still let CI/an operator override without editing
+# this file, and a hardcoded fallback keeps this script usable even if `bundle validate` can't run
+# (e.g. a bare checkout with no CLI installed yet).
+_bundle_var() {  # <var-name> <fallback>
+  local var_name="$1" fallback="$2" resolved
+  resolved=$(databricks bundle validate -t prod --var "warehouse_id=${DATABRICKS_BUNDLE_WAREHOUSE_ID:-placeholder}" -o json 2>/dev/null \
+    | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    v = d.get('variables', {}).get('$var_name', {})
+    out = v.get('value') or v.get('default') or ''
+    print(out)
+except Exception:
+    pass
+" || true)
+  echo "${resolved:-$fallback}"
+}
+
+APP_DEV_HOST="${BUNDLE_DEV_HOST:-$(_bundle_var dev_host https://your-dev-workspace.cloud.databricks.com)}"
+APP_DEV_SP_SECRET_SCOPE="${BUNDLE_DEV_SP_SECRET_SCOPE:-$(_bundle_var dev_sp_secret_scope genie_promote)}"
+echo "resolved APP_DEV_HOST=$APP_DEV_HOST APP_DEV_SP_SECRET_SCOPE=$APP_DEV_SP_SECRET_SCOPE"
+
 # 1. Build the Svelte SPA -> web/dist
 if [ ! -d web/node_modules ]; then
   (cd web && npm install)
@@ -30,6 +61,13 @@ cp requirements.txt "$OUT/requirements.txt"
 # The single app's OWN manifest (distinct from the legacy engine_api/app.yaml): same entrypoint,
 # but NO Bearer OBO fallback — it's same-origin, so the proxy always injects the user token and
 # the Bearer branch would be pure attack surface.
+#
+# NOTE: this heredoc stays QUOTED (<<'YAML' — no shell interpolation) because the comments below
+# are full of backticks (markdown-style code spans) and literal `$`-looking bundle-var references
+# that an UNQUOTED heredoc would try to execute as command substitution / variable expansion. The
+# two values that DO need to be config-driven (APP_DEV_HOST / APP_DEV_SP_SECRET_SCOPE, resolved
+# above) are written as __APP_DEV_HOST__ / __APP_DEV_SP_SECRET_SCOPE__ placeholders and swapped in
+# with `sed` AFTER the heredoc, so the rest of the file's `$`/backtick-heavy prose stays inert.
 cat > "$OUT/app.yaml" <<'YAML'
 command:
   - python
@@ -68,15 +106,26 @@ env:
     value: '{"01f16e8322661161a83f7d1f2a1bec14": "receivables"}'
   # Cross-workspace client factory (ADR-0006/A1): the app now runs in PROD and reaches into DEV for
   # the Genie-API ops that must run there. APP_DEV_HOST is the dev workspace URL (config-driven, ADR-
-  # 0004 — never hardcoded in code). The dev-reader/writer SP's OAuth credentials are read at runtime
-  # from the secret scope named by APP_DEV_SP_SECRET_SCOPE (keys: dev_sp_client_id,
-  # dev_sp_client_secret) — never a bundle var, never in this file. The SP is provisioned in A2; until
-  # then these vars are wired but unused (the dev-remote-SP client path isn't exercised live).
+  # 0004 — never hardcoded in code); it and APP_DEV_SP_SECRET_SCOPE are resolved ABOVE from the
+  # `dev_host` / `dev_sp_secret_scope` bundle variables (databricks.yml is the single source of
+  # truth — see the `_bundle_var` helper at the top of this script), not hardcoded here (A2). The
+  # dev-reader/writer SP's OAuth CREDENTIALS themselves are still read at runtime from the secret
+  # scope named by APP_DEV_SP_SECRET_SCOPE (keys: dev_sp_client_id, dev_sp_client_secret) — never a
+  # bundle var, never in this file. The SP is provisioned by scripts/provision_dev_sp.sh (A2).
   - name: APP_DEV_HOST
-    value: "https://your-dev-workspace.cloud.databricks.com"
+    value: "__APP_DEV_HOST__"
   - name: APP_DEV_SP_SECRET_SCOPE
-    value: "genie_promote"
+    value: "__APP_DEV_SP_SECRET_SCOPE__"
 YAML
+# Swap the two placeholders for the resolved bundle-variable values (see the `_bundle_var` helper
+# above) — done with `sed` rather than shell interpolation inside the heredoc so the heredoc's own
+# markdown-style prose (backticks, literal `$var` mentions in comments) never gets misread as
+# command substitution. `|` is used as the sed delimiter since a workspace URL contains `/`.
+sed -i.bak \
+  -e "s|__APP_DEV_HOST__|${APP_DEV_HOST}|" \
+  -e "s|__APP_DEV_SP_SECRET_SCOPE__|${APP_DEV_SP_SECRET_SCOPE}|" \
+  "$OUT/app.yaml"
+rm -f "$OUT/app.yaml.bak"  # BSD sed (macOS) requires -i's backup suffix arg; GNU sed treats it the same
 # The built SPA the FastAPI app serves (engine_api/main.py -> <app-root>/static).
 cp -R web/dist "$OUT/static"
 

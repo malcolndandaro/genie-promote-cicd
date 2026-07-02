@@ -16,6 +16,17 @@ OBO: the user token is read from EITHER the proxy-injected `x-forwarded-access-t
 `Authorization: Bearer <token>` header, and threaded into the engine as `user_token=` (the
 engine's `_client` OBO path). In the single-app design the proxy header is the live path; the
 Bearer branch is retained only for transitional app-to-app callers and tests.
+
+Authorization identity (A2): every authz decision in this module (admin/Steward gating, per-user
+promotion visibility) is derived from the platform-VERIFIED identity behind the OBO token
+(`authz.verify_identity`), never from the client/proxy-supplied `x-forwarded-email` header. That
+header is retained ONLY as display metadata (whoami's `email` field, audit attribution) — see
+`authz.py` for why a header, even a proxy-injected one, is not treated as an authorization input
+here. `_verified_email` below is the ONE place a request's verified identity is resolved; it fails
+closed (returns None -> "not admin, not this promotion's owner") on a missing/invalid token rather
+than raising, because most of these endpoints must still degrade gracefully for local/offline
+callers with no OBO token in play (bare `profile`-based local runs) — the None case is handled by
+every caller as "no elevated access", never as "skip the check".
 """
 from __future__ import annotations
 
@@ -26,6 +37,7 @@ import sys
 from contextlib import asynccontextmanager
 from typing import Callable
 
+from databricks.sdk.core import Config
 from databricks.sdk.errors import PermissionDenied, Unauthenticated
 from fastapi import APIRouter, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -37,6 +49,7 @@ from pydantic import BaseModel
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "app"))
 import app_logic  # noqa: E402
+import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
@@ -171,6 +184,32 @@ def _admin_emails() -> set[str]:
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
+def _verified_email(x_forwarded_access_token: str | None, authorization: str | None) -> str | None:
+    """Resolve the CALLER's platform-verified identity (email/user_name) for THIS request, from
+    their OBO token — never from `x-forwarded-email`. This is the single replacement for the old
+    (broken) control that authorized on the raw header.
+
+    Returns None when no usable token is present or verification fails (missing token, expired/
+    invalid token, dev unreachable) — callers MUST treat None as "no elevated access / not this
+    resource's owner", i.e. fail closed, never as "trust the display header instead" or "skip the
+    check". None also covers the legitimate local/offline case (no proxy, no token) where the
+    caller has no verified identity to check against at all; those callers get baseline (non-admin,
+    own-promotions-only-by-header-if-any) behavior, matching pre-A2 local-dev ergonomics.
+
+    NOT cached beyond this one call: resolved fresh on every request from that request's own
+    header, so a revoked/expired token can never authorize a subsequent request.
+    """
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        return None
+    try:
+        identity = authz.verify_identity(token, host=Config().host)
+    except authz.AccessDenied:
+        logger.info("OBO token present but did not verify to an identity")
+        return None
+    return identity.user_name
+
+
 def _is_admin(email: str | None) -> bool:
     return bool(email) and email.strip().lower() in _admin_emails()
 
@@ -182,18 +221,25 @@ def _repo_url() -> str:
 
 
 @api.get("/whoami")
-def whoami(x_forwarded_email: str | None = Header(default=None)) -> dict:
+def whoami(
+    x_forwarded_email: str | None = Header(default=None),
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
     """The caller identity the platform forwards (OBO context) + the configured Steward + whether the
     caller is an Admin/Steward (drives the LB5 `scope=all` history toggle).
 
-    `email` comes from `x-forwarded-email` (proxy-trust-only — display only, NEVER an
-    authorization input); `steward` is the `APP_STEWARD` config (the distinct approver for the
-    separation-of-duties model in SV4); `is_admin` reflects the config-driven admin/steward set.
-    Any security decision must use the OBO-token-resolved identity, not these raw headers — the
-    server re-checks the role on `scope=all` (this flag is only a UI convenience).
+    `email` is DISPLAY ONLY — sourced from `x-forwarded-email` purely for what the UI shows the
+    user as "you are signed in as"; it is NEVER used to compute `is_admin` (A2: replaces the
+    previous broken control, which authorized on this same header). `is_admin` is computed from the
+    request's OWN platform-VERIFIED identity (`_verified_email`, resolved from the OBO token) against
+    the config-driven admin/steward set — a caller with no valid OBO token verifies to no identity
+    and is never admin, regardless of what `x-forwarded-email` claims. `steward` is the `APP_STEWARD`
+    config (the distinct approver for the separation-of-duties model in SV4).
     """
+    verified = _verified_email(x_forwarded_access_token, authorization)
     return {"email": x_forwarded_email, "steward": os.environ.get("APP_STEWARD") or None,
-            "is_admin": _is_admin(x_forwarded_email), "repo_url": _repo_url()}
+            "is_admin": _is_admin(verified), "repo_url": _repo_url()}
 
 
 @api.get("/spaces")
@@ -379,16 +425,24 @@ def _snapshot_to_review(snap) -> dict:
 
 
 @api.get("/promotions")
-def list_promotions(scope: str = "mine", x_forwarded_email: str | None = Header(default=None)) -> dict:
+def list_promotions(
+    scope: str = "mine",
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
     """The caller's promotions (newest first), for recovery + the history view (LB3/LB5).
-    `scope=mine` filters by the OBO email (convenience; the proxy is the access boundary).
+    `scope=mine` filters by the caller's platform-VERIFIED identity (A2 — NOT the display-only
+    `x-forwarded-email` header; `requester_email` was itself recorded from that same display header
+    at promotion time, per ADR-0005, so this still matches the honest case while no longer trusting
+    the header as an authorization input for a DIFFERENT caller's request).
     `scope=all` (cross-user governance view) is ROLE-GATED server-side: only a configured
-    Steward/Admin gets it; anyone else is denied (403). Bot/SP owns the DB read."""
+    Steward/Admin (by verified identity) gets it; anyone else is denied (403). Bot/SP owns the DB read."""
     store = _require_store()
+    verified = _verified_email(x_forwarded_access_token, authorization)
     if scope == "mine":
-        promotions = store.list_promotions(x_forwarded_email)  # None email (local) => all
+        promotions = store.list_promotions(verified)  # None (no verified identity: local/no token) => all
     elif scope == "all":
-        if not _is_admin(x_forwarded_email):
+        if not _is_admin(verified):
             raise HTTPException(status_code=403, detail="Apenas Stewards/Admins veem todas as promoções.")
         promotions = store.list_promotions(None)  # cross-user
     else:
@@ -396,28 +450,37 @@ def list_promotions(scope: str = "mine", x_forwarded_email: str | None = Header(
     return {"promotions": [_promotion_summary(p) for p in promotions]}
 
 
-def _visible_promotion_or_403(store, promotion_id: str, email: str | None):
-    """Fetch a promotion the caller may see: their own (requester_email == OBO email) OR any if the
-    caller is a Steward/Admin. Defense-in-depth over the proxy boundary — a user can't read another
-    user's stored review/audit by guessing an id (they only ever learn their own ids via scope=mine)."""
+def _visible_promotion_or_403(store, promotion_id: str, verified_email: str | None):
+    """Fetch a promotion the caller may see: their own (requester_email == the caller's platform-
+    VERIFIED identity) OR any if the caller is a Steward/Admin (also by verified identity). This is
+    the entire per-user visibility boundary now (A2) — `verified_email` MUST come from
+    `_verified_email` (the OBO-token-resolved identity), never from `x-forwarded-email` directly, or
+    this collapses back into the exact "same untrusted header checked twice" no-op this replaces."""
     p = store.get_promotion(promotion_id)
     if p is None:
         raise HTTPException(status_code=404, detail="promoção não encontrada")
-    # No proxy email == local/dev (the deployed proxy always injects it) -> allow. Otherwise the
-    # caller must own the promotion or be an admin.
-    if email is None or _is_admin(email) or (
-            p.requester_email and p.requester_email.lower() == email.lower()):
+    # No verified identity == local/dev (no OBO token in play; the deployed proxy always supplies
+    # one) -> allow, matching pre-A2 local-dev ergonomics. Otherwise the caller must own the
+    # promotion (by verified identity) or be a verified admin.
+    if verified_email is None or _is_admin(verified_email) or (
+            p.requester_email and p.requester_email.lower() == verified_email.lower()):
         return p
     raise HTTPException(status_code=403, detail="Sem permissão para esta promoção.")
 
 
 @api.get("/promotions/{promotion_id}")
-def get_promotion(promotion_id: str, x_forwarded_email: str | None = Header(default=None)) -> dict:
+def get_promotion(
+    promotion_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
     """A single promotion + its LATEST stored Review Snapshot + PR ref — the recover-on-open payload
     (renders the stored review WITHOUT re-running the LLM reviewer). Live PR/CI/deploy status still
-    comes from the GitHub poll (`/promote/{n}/status`), unchanged. Caller must own it or be an admin."""
+    comes from the GitHub poll (`/promote/{n}/status`), unchanged. Caller must own it (by verified
+    identity) or be a verified admin (A2)."""
     store = _require_store()
-    p = _visible_promotion_or_403(store, promotion_id, x_forwarded_email)
+    verified = _verified_email(x_forwarded_access_token, authorization)
+    p = _visible_promotion_or_403(store, promotion_id, verified)
     snap = store.latest_snapshot(promotion_id)
     return {
         "promotion": _promotion_summary(p),
@@ -431,11 +494,17 @@ def get_promotion(promotion_id: str, x_forwarded_email: str | None = Header(defa
 
 
 @api.get("/promotions/{promotion_id}/audit")
-def get_promotion_audit(promotion_id: str, x_forwarded_email: str | None = Header(default=None)) -> dict:
+def get_promotion_audit(
+    promotion_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
     """The ordered, append-only audit trail for a promotion (LB4) — refreshed by the SPA as the
-    status poll reconciles, so the trail accrues live as the PR progresses. Owner-or-admin only."""
+    status poll reconciles, so the trail accrues live as the PR progresses. Owner-or-admin only,
+    gated on the caller's VERIFIED identity (A2)."""
     store = _require_store()
-    _visible_promotion_or_403(store, promotion_id, x_forwarded_email)
+    verified = _verified_email(x_forwarded_access_token, authorization)
+    _visible_promotion_or_403(store, promotion_id, verified)
     return {"audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)]}
 
 

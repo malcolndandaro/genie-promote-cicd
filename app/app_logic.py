@@ -32,6 +32,7 @@ for _p in ("genie_reviewer", "scripts"):
 
 import base64  # noqa: E402
 
+import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
 import eval_gate  # noqa: E402
 import grant_check  # noqa: E402
 import handbook_rules  # noqa: E402
@@ -162,16 +163,73 @@ def _dev_sp_client(*, secret_client: WorkspaceClient | None = None) -> Workspace
 
 def list_spaces(profile: str | None = None, *, client: WorkspaceClient | None = None,
                 user_token: str | None = None) -> list[dict]:
-    """The author's Genie Spaces (id + title). Acts as the logged-in user via ``user_token``
-    (OBO) on the deployed app, or a local ``profile``. ``client`` is injectable for tests."""
-    w = client or _client(profile, user_token=user_token)
+    """The author's Genie Spaces the VERIFIED identity may access (id + title).
+
+    Cross-workspace rewiring (A2 / ADR-0006 half-migration fix): once the app is prod-hosted, OBO
+    cannot reach the dev workspace — there is no forwarded dev token — so this reaches dev via the
+    standing dev-reader/writer SP (``scope="dev-sp"``), never the user's own token. The dev SP can
+    list EVERY dev Space by platform necessity (Genie has no per-Space delegation), which is exactly
+    the confused-deputy risk A2 exists to close: this function does NOT return the SP's raw view.
+    Instead it (1) verifies the caller's identity from their OBO token
+    (``authz.verify_identity``) and (2) filters the SP's list down to Spaces
+    ``authz.assert_can_access`` confirms that VERIFIED identity may use — a live, per-Space, never-
+    cached ACL check (fail-closed: a Space is dropped from the list on any check error, never
+    included on uncertainty).
+
+    ``client`` (injected) bypasses ALL of the above and is used as-is — the existing test/local-
+    override path (mirrors every other function in this module): callers that inject a fake/real
+    client are asserting they already hold the right transport + have done their own gating.
+    A bare local ``profile`` with no ``user_token`` (offline/local-dev convenience — e.g. a
+    developer running the engine against their own CLI profile with no app/OBO in the loop) also
+    skips the guard: there is no separate "caller" to check against the profile's own access, so the
+    profile's own Genie permissions ARE the access boundary, same as running the CLI directly.
+    """
+    if client is not None:
+        w = client
+    elif user_token:
+        # Verify WHO the OBO token belongs to against the app's OWN (prod) host — the token is
+        # prod-minted and cannot authenticate to dev (ADR-0006 Decision 2). Only the transport
+        # (scope="dev-sp") and the ACL read (assert_can_access) run against dev; the identity is
+        # prod-issued. (Same host as engine_api._verified_email.)
+        identity = authz.verify_identity(user_token, host=Config().host)
+        dev = _client(scope="dev-sp")
+        resp = dev.genie.list_spaces()
+        accessible = []
+        for s in (resp.spaces or []):
+            try:
+                authz.assert_can_access(identity, s.space_id, transport=dev)
+            except authz.AccessDenied:
+                continue
+            accessible.append({"space_id": s.space_id, "title": s.title or "(sem título)"})
+        return accessible
+    else:
+        w = _client(profile)
     resp = w.genie.list_spaces()
     return [{"space_id": s.space_id, "title": s.title or "(sem título)"}
             for s in (resp.spaces or [])]
 
 
-def export_serialized(space_id: str, profile: str, client: WorkspaceClient | None = None) -> dict:
-    w = client or _client(profile)
+def export_serialized(space_id: str, profile: str | None = None, client: WorkspaceClient | None = None,
+                      *, user_token: str | None = None) -> dict:
+    """Export a Space's ``serialized_space``. Cross-workspace rewiring (A2): with a ``user_token``
+    and no injected ``client``, this reaches dev via the dev-reader/writer SP (OBO can't span
+    workspaces once prod-hosted) but gates FIRST with ``authz.assert_can_access`` on the caller's
+    VERIFIED identity — denying (fail-closed) before ever touching the SP's broad dev reach. An
+    injected ``client`` (tests/local overrides) bypasses the guard, same convention as
+    ``list_spaces``; a bare ``profile`` with no token is the offline/local-dev path (the profile's
+    own Genie permission IS the access boundary, same as the CLI)."""
+    if client is not None:
+        w = client
+    elif user_token:
+        # Verify WHO the OBO token belongs to against the app's OWN (prod) host — the token is
+        # prod-minted and cannot authenticate to dev (ADR-0006 Decision 2). Only the transport
+        # (scope="dev-sp") and the ACL read (assert_can_access) run against dev; the identity is
+        # prod-issued. (Same host as engine_api._verified_email.)
+        identity = authz.verify_identity(user_token, host=Config().host)
+        w = _client(scope="dev-sp")
+        authz.assert_can_access(identity, space_id, transport=w)  # raises AccessDenied -> deny first
+    else:
+        w = _client(profile)
     space = w.genie.get_space(space_id, include_serialized_space=True)
     ss = space.serialized_space
     return json.loads(ss) if isinstance(ss, str) else (ss or {})
@@ -236,14 +294,19 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     configured (grant_profile arg or APP_PROD_PROFILE locally) — the prod catalog is
     workspace-isolated, so the dev-hosted app can't see it. On the deployed app it's skipped;
     the AUTHORITATIVE GRANT-01 runs in CI (pr-checks) as the prod SP (scripts/check_grants.py).
+
+    Cross-workspace rewiring (A2 / ADR-0006 half-migration fix): the export step is delegated to
+    ``export_serialized`` UNCLIENTED (no ``client=`` injected here) so it does its own identity
+    verification + ``assert_can_access`` gating + dev-sp transport selection when ``user_token`` is
+    set — this function no longer builds an OBO client for the export itself (OBO cannot reach dev
+    once the app is prod-hosted). Locally (``profile``, no token) the export still runs against the
+    given profile, unchanged.
     """
     consumer_group = consumer_group or os.environ.get("APP_CONSUMER_GROUP", "account users")
     grant_profile = grant_profile or os.environ.get("APP_PROD_PROFILE")  # None -> skip preview
-    # Auth split (see _client): `w` acts as the user (OBO) / local profile for the Genie
-    # export so we respect the user's own access; `gw` (built in the try) and the LLM
-    # reviewer run as the app SP — shared/cross-workspace ops that aren't user data.
-    w = _client(profile, user_token=user_token)
-    dev_serialized = export_serialized(space_id, profile, client=w)
+    # export_serialized resolves its OWN transport: dev-sp + assert_can_access(verified identity)
+    # when user_token is set (the only way to reach dev post-ADR-0006), else the local profile.
+    dev_serialized = export_serialized(space_id, profile, user_token=user_token)
     rendered = pre_render.rebind(json.dumps(dev_serialized, ensure_ascii=False), "dev", to_env, domain)
     prod_space = json.loads(rendered)
     violations = pre_render.find_violations(rendered, to_env, domain)  # deterministic ENV allowlist
@@ -267,9 +330,9 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
 
     ctx = review_core.build_space_context(prod_space)
     system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, deterministic)
-    # LLM reviewer = shared operation -> app SP (a serving scope isn't part of OBO; the
-    # reviewer agent doesn't read the user's data). Locally (no OBO) `w` is the profile client.
-    sp = _client(profile) if user_token else w
+    # LLM reviewer = shared operation -> app SP / local profile (a serving scope isn't part of
+    # OBO; the reviewer agent doesn't read the user's data, and it never runs against dev).
+    sp = _client(profile)
     review = review_core.parse_review(_claude(system, user, profile, client=sp))
     findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"])
     gate = review_core.decide_gate(findings)

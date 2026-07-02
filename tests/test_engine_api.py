@@ -4,18 +4,34 @@
 Verifies (1) the transport + OBO plumbing: the user token is resolved from either header source
 and threaded to the engine as `user_token`; the missing-token path is a 401; (2) the API is
 served at BOTH `/` and `/api/*`; (3) the SPA catch-all serves index.html for non-API routes
-WITHOUT shadowing the API.
+WITHOUT shadowing the API; (4) A2 — authorization (`is_admin`, promotion visibility) is derived
+from the platform-VERIFIED identity behind the OBO token, NEVER from the display-only
+`x-forwarded-email` header (see `_verify_as` below, which fakes `authz.verify_identity` so tests
+never hit a live workspace).
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine_api"))
+import authz  # noqa: E402  (app/authz.py — on sys.path via the app/ insert above)
 import main as engine_api  # engine_api/main.py  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(engine_api.app)
+
+
+def _verify_as(monkeypatch, token_to_email: dict[str, str]):
+    """Fake `authz.verify_identity` so a given OBO token string "verifies" to a given email/
+    user_name, with NO live workspace call. Any token not in the mapping raises AccessDenied
+    (fail-closed), matching a token that doesn't resolve on a real workspace."""
+    def fake_verify(token, *, host=None):
+        if token in token_to_email:
+            return authz.VerifiedIdentity(user_name=token_to_email[token], group_names=frozenset())
+        raise authz.AccessDenied(f"no such token: {token}")
+
+    monkeypatch.setattr(engine_api.authz, "verify_identity", fake_verify)
 
 
 def test_health_no_auth():
@@ -390,16 +406,33 @@ def test_promote_rerequest_adds_snapshot_and_re_reviewed_to_same_promotion(monke
 
 
 def test_list_promotions_scope_mine_filters_by_email(monkeypatch, store):
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-bob": "bob@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))
     client.post("/api/promote", json={"space_id": "s1"},
-                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"})
+                headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=12))
     client.post("/api/promote", json={"space_id": "s2"},
-                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "bob@x"})
-    r = client.get("/api/promotions?scope=mine", headers={"x-forwarded-email": "ana@x"})
+                headers={"x-forwarded-access-token": "tok-bob", "x-forwarded-email": "bob@x"})
+    # scope=mine is keyed on the VERIFIED identity (A2) — the request must carry a token that
+    # verifies to ana's email, not just a matching display header.
+    r = client.get("/api/promotions?scope=mine", headers={"x-forwarded-access-token": "tok-ana",
+                                                           "x-forwarded-email": "ana@x"})
     assert r.status_code == 200
     prs = [p["pr_number"] for p in r.json()["promotions"]]
     assert prs == [11]  # only ana's
+
+
+def test_list_promotions_scope_mine_spoofed_header_does_not_leak_others(monkeypatch, store):
+    # A caller whose OWN verified identity is bob cannot see ana's promotions by merely sending
+    # ana's email as the display header (A2: x-forwarded-email is never an authz input).
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-bob": "bob@x"})
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))
+    client.post("/api/promote", json={"space_id": "s1"},
+                headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"})
+    r = client.get("/api/promotions?scope=mine",
+                   headers={"x-forwarded-access-token": "tok-bob", "x-forwarded-email": "ana@x"})
+    assert r.status_code == 200
+    assert r.json()["promotions"] == []  # bob's verified identity owns nothing, despite the header
 
 
 def test_get_promotion_recovers_stored_review_without_calling_engine(monkeypatch, store):
@@ -457,31 +490,73 @@ def test_re_review_only_requested_carries_app_email_and_bumps_updated_at(monkeyp
 
 
 def test_whoami_reports_admin_from_config(monkeypatch):
+    # is_admin is computed from the VERIFIED identity behind the OBO token, never the display
+    # header alone — so a real client must present a token that verifies to the admin email.
     monkeypatch.setenv("APP_ADMINS", "admin@x, boss@x")
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.setenv("APP_STEWARD", "pedro@x")
-    assert client.get("/whoami", headers={"x-forwarded-email": "ADMIN@x"}).json()["is_admin"] is True
-    assert client.get("/whoami", headers={"x-forwarded-email": "pedro@x"}).json()["is_admin"] is True  # steward
-    assert client.get("/whoami", headers={"x-forwarded-email": "rando@x"}).json()["is_admin"] is False
+    _verify_as(monkeypatch, {"tok-admin": "ADMIN@x", "tok-steward": "pedro@x", "tok-rando": "rando@x"})
+    assert client.get("/whoami", headers={"x-forwarded-access-token": "tok-admin",
+                                          "x-forwarded-email": "ADMIN@x"}).json()["is_admin"] is True
+    assert client.get("/whoami", headers={"x-forwarded-access-token": "tok-steward",
+                                          "x-forwarded-email": "pedro@x"}).json()["is_admin"] is True  # steward
+    assert client.get("/whoami", headers={"x-forwarded-access-token": "tok-rando",
+                                          "x-forwarded-email": "rando@x"}).json()["is_admin"] is False
+
+
+def test_whoami_is_admin_ignores_spoofed_display_header(monkeypatch):
+    # A2's whole point: x-forwarded-email is NEVER an authz input. A caller whose OBO token
+    # verifies to a non-admin identity cannot become admin by sending a different display header.
+    monkeypatch.setenv("APP_ADMINS", "admin@x")
+    monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_STEWARD", raising=False)
+    _verify_as(monkeypatch, {"tok-mallory": "mallory@x"})  # verifies to a NON-admin identity
+    r = client.get("/whoami", headers={"x-forwarded-access-token": "tok-mallory",
+                                       "x-forwarded-email": "admin@x"})  # spoofed display header
+    body = r.json()
+    assert body["email"] == "admin@x"  # display-only field still reflects the (untrusted) header
+    assert body["is_admin"] is False   # but authorization used the VERIFIED identity, not the header
+
+
+def test_whoami_unverifiable_token_is_not_admin(monkeypatch):
+    # An expired/invalid OBO token must fail closed: no admin, not "trust the header instead".
+    monkeypatch.setenv("APP_ADMINS", "admin@x")
+
+    def boom(token, *, host=None):
+        raise authz.AccessDenied("token expired")
+
+    monkeypatch.setattr(engine_api.authz, "verify_identity", boom)
+    r = client.get("/whoami", headers={"x-forwarded-access-token": "stale-token",
+                                       "x-forwarded-email": "admin@x"})
+    assert r.status_code == 200
+    assert r.json()["is_admin"] is False
 
 
 def test_scope_all_role_gated(monkeypatch, store):
     monkeypatch.setenv("APP_ADMINS", "admin@x")
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-bob": "bob@x", "tok-admin": "admin@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=21))
     client.post("/api/promote", json={"space_id": "s1"},
-                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"})
+                headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=22))
     client.post("/api/promote", json={"space_id": "s2"},
-                headers={"x-forwarded-access-token": "t", "x-forwarded-email": "bob@x"})
-    # An admin sees ALL promotions (cross-user governance view).
-    admin = client.get("/api/promotions?scope=all", headers={"x-forwarded-email": "admin@x"})
+                headers={"x-forwarded-access-token": "tok-bob", "x-forwarded-email": "bob@x"})
+    # An admin (by VERIFIED identity) sees ALL promotions (cross-user governance view).
+    admin = client.get("/api/promotions?scope=all", headers={"x-forwarded-access-token": "tok-admin",
+                                                             "x-forwarded-email": "admin@x"})
     assert admin.status_code == 200 and {p["pr_number"] for p in admin.json()["promotions"]} == {21, 22}
-    # A non-admin requesting scope=all is denied (server-enforced, not just hidden in the UI).
-    assert client.get("/api/promotions?scope=all", headers={"x-forwarded-email": "ana@x"}).status_code == 403
-    # scope=mine still filters by the caller.
-    mine = client.get("/api/promotions?scope=mine", headers={"x-forwarded-email": "ana@x"})
+    # A non-admin requesting scope=all is denied (server-enforced, not just hidden in the UI) —
+    # even if they spoof the display header to look like the admin.
+    assert client.get("/api/promotions?scope=all",
+                      headers={"x-forwarded-access-token": "tok-ana",
+                               "x-forwarded-email": "admin@x"}).status_code == 403
+    # scope=mine still filters by the caller's VERIFIED identity.
+    mine = client.get("/api/promotions?scope=mine", headers={"x-forwarded-access-token": "tok-ana",
+                                                              "x-forwarded-email": "ana@x"})
     assert {p["pr_number"] for p in mine.json()["promotions"]} == {21}
-    assert client.get("/api/promotions?scope=bogus", headers={"x-forwarded-email": "admin@x"}).status_code == 400
+    assert client.get("/api/promotions?scope=bogus",
+                      headers={"x-forwarded-access-token": "tok-admin",
+                               "x-forwarded-email": "admin@x"}).status_code == 400
 
 
 def test_status_read_reconciles_and_caches(monkeypatch, store):
@@ -517,14 +592,32 @@ def test_promotion_detail_includes_audit_and_cached_status(monkeypatch, store):
 
 def test_get_promotion_ownership_gated(monkeypatch, store):
     monkeypatch.setenv("APP_ADMINS", "admin@x")
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-admin": "admin@x", "tok-mallory": "mallory@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=31))
     pid = client.post("/api/promote", json={"space_id": "s1"},
-                      headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
-    # The owner sees it; an admin sees it; another user is denied (can't read by guessing an id).
-    assert client.get(f"/api/promotions/{pid}", headers={"x-forwarded-email": "ana@x"}).status_code == 200
-    assert client.get(f"/api/promotions/{pid}", headers={"x-forwarded-email": "admin@x"}).status_code == 200
-    assert client.get(f"/api/promotions/{pid}", headers={"x-forwarded-email": "mallory@x"}).status_code == 403
-    assert client.get(f"/api/promotions/{pid}/audit", headers={"x-forwarded-email": "mallory@x"}).status_code == 403
+                      headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
+    # The owner sees it; an admin sees it; another user is denied (can't read by guessing an id) —
+    # gated on each caller's own VERIFIED identity.
+    assert client.get(f"/api/promotions/{pid}",
+                      headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}).status_code == 200
+    assert client.get(f"/api/promotions/{pid}",
+                      headers={"x-forwarded-access-token": "tok-admin", "x-forwarded-email": "admin@x"}).status_code == 200
+    assert client.get(f"/api/promotions/{pid}",
+                      headers={"x-forwarded-access-token": "tok-mallory", "x-forwarded-email": "mallory@x"}).status_code == 403
+    assert client.get(f"/api/promotions/{pid}/audit",
+                      headers={"x-forwarded-access-token": "tok-mallory", "x-forwarded-email": "mallory@x"}).status_code == 403
+
+
+def test_get_promotion_denies_spoofed_display_header(monkeypatch, store):
+    # Mallory cannot see ana's promotion by sending ana's email as the display header — access is
+    # gated on mallory's own VERIFIED identity (from mallory's OWN token), not the header (A2).
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-mallory": "mallory@x"})
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=32))
+    pid = client.post("/api/promote", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
+    r = client.get(f"/api/promotions/{pid}",
+                   headers={"x-forwarded-access-token": "tok-mallory", "x-forwarded-email": "ana@x"})
+    assert r.status_code == 403
 
 
 def test_get_promotion_404_for_unknown(store):
