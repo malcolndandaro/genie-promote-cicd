@@ -38,6 +38,8 @@ jobs:
           python3 -m pytest tests/ -q
       - name: Pre-render + identifier allowlist (rejects foreign-env / cross-domain refs)
         run: bash scripts/render.sh prod
+      - name: Assemble the app source (ADR-0006/A1 — promote_app now deploys to prod)
+        run: bash scripts/build_promote_app.sh
       - name: Validate bundle (prod target)
         run: databricks bundle validate -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
       - name: GRANT-01 — consumer group can SELECT the prod tables (governance gate)
