@@ -414,3 +414,67 @@ def test_installation_token_is_cached_across_calls():
     pr = gh.open_or_update_promotion(branch="b", path="p", content="x", title="t", body="b")
     gh.upsert_comment(pr["number"], "<!--m-->", "<!--m-->\nx")
     assert n["c"] == 1  # token minted once, then cached (not re-minted per request)
+
+
+# --- F5 Phase 1: READ-ONLY gate introspection (drift detection) -------------------------------
+
+
+def _reader_transport(env_response=None, protection_response=None):
+    """A minimal fake transport for the two new read-only accessors — (status, body) per path,
+    independent of the FakeGitHub fixture above (these two calls don't touch refs/files/pulls)."""
+
+    def transport(method, url, headers, body):
+        path = url.split("api.github.com", 1)[-1]
+        if "/environments/" in path:
+            return env_response
+        if "/branches/" in path and path.endswith("/protection"):
+            return protection_response
+        return 500, {"message": f"unhandled {method} {path}"}
+
+    return transport
+
+
+def test_get_environment_reviewers_extracts_logins():
+    body = {"protection_rules": [
+        {"type": "required_reviewers", "reviewers": [
+            {"reviewer": {"login": "pedro-gh"}}, {"reviewer": {"login": "malcoln-gh"}}]},
+        {"type": "wait_timer"},  # a non-reviewer rule must be ignored, not crash
+    ]}
+    gh = GitHubApp(owner="o", repo="r", transport=_reader_transport(env_response=(200, body)),
+                  token_provider=lambda: "tok")
+    assert gh.get_environment_reviewers("prod") == ["pedro-gh", "malcoln-gh"]
+
+
+def test_get_environment_reviewers_missing_environment_is_empty_not_error():
+    gh = GitHubApp(owner="o", repo="r", transport=_reader_transport(env_response=(404, {})),
+                  token_provider=lambda: "tok")
+    assert gh.get_environment_reviewers("prod") == []
+
+
+def test_get_environment_reviewers_raises_on_other_failures():
+    gh = GitHubApp(owner="o", repo="r",
+                  transport=_reader_transport(env_response=(403, {"message": "missing scope"})),
+                  token_provider=lambda: "tok")
+    with pytest.raises(GitHubError):
+        gh.get_environment_reviewers("prod")
+
+
+def test_get_branch_protection_returns_none_when_absent():
+    gh = GitHubApp(owner="o", repo="r", transport=_reader_transport(protection_response=(404, {})),
+                  token_provider=lambda: "tok")
+    assert gh.get_branch_protection("main") is None
+
+
+def test_get_branch_protection_returns_body_when_present():
+    body = {"required_pull_request_reviews": {"required_approving_review_count": 1}}
+    gh = GitHubApp(owner="o", repo="r", transport=_reader_transport(protection_response=(200, body)),
+                  token_provider=lambda: "tok")
+    assert gh.get_branch_protection("main") == body
+
+
+def test_get_branch_protection_raises_on_other_failures():
+    gh = GitHubApp(owner="o", repo="r",
+                  transport=_reader_transport(protection_response=(500, {"message": "boom"})),
+                  token_provider=lambda: "tok")
+    with pytest.raises(GitHubError):
+        gh.get_branch_protection("main")

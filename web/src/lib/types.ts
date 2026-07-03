@@ -167,3 +167,40 @@ export interface AdminAuditRow {
   resource_id: string;
   resource_title: string | null;
 }
+
+/** F5 Phase 1: a configurable role — who is Steward/Admin/approver, in-app (Lakebase-backed), plus
+ * the email<->GitHub-username mapping used by drift detection. */
+export type RoleName = 'steward' | 'admin' | 'approver';
+
+export interface RoleAssignment {
+  id: string;
+  email: string;
+  role: RoleName;
+  github_username: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** F5: the roles the app currently sees + which env vars would apply as the bootstrap fallback if
+ * the store were empty (surfaced so an admin understands WHY a role is in effect). */
+export interface RolesList {
+  roles: RoleAssignment[];
+  bootstrap_env: { admins: string[]; stewards: string[] };
+}
+
+/** F5 Phase 1: one READ-ONLY divergence between the app's role config and GitHub's enforced gates.
+ * `severity: 'unknown'` means the GitHub read itself failed/degraded — NEVER treated as "no drift". */
+export type DriftSeverity = 'warning' | 'unknown';
+
+export interface DriftFinding {
+  kind: string;
+  severity: DriftSeverity;
+  message: string;
+  detail: Record<string, unknown>;
+}
+
+export interface DriftReport {
+  has_drift: boolean;
+  has_unknown: boolean;
+  findings: DriftFinding[];
+}

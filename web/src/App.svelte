@@ -8,6 +8,7 @@
   import NovoEspaco from './screens/NovoEspaco.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
   import Admin from './screens/Admin.svelte';
+  import Settings from './screens/Settings.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
   import { Router } from './lib/router.svelte';
@@ -53,6 +54,9 @@
     { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
     { id: 'novo', label: '＋ Novo Genie Space', icon: 'plus-circle' },
     ...(who?.is_admin ? [{ id: 'admin' as const, label: 'Administração', icon: 'shield' as const }] : []),
+    ...(who?.is_admin
+      ? [{ id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const }]
+      : []),
   ]);
 
   const SECTION_TITLE: Record<RouteId, string> = {
@@ -62,6 +66,7 @@
     acesso: 'Acesso',
     novo: 'Novo Genie Space',
     admin: 'Administração',
+    configuracoes: 'Configurações',
   };
 
   // Start a promotion for a space and drop into the in-place review flow on "Meus espaços".
@@ -104,6 +109,8 @@
     <AcessoEspacos {who} />
   {:else if router.route.id === 'admin'}
     <Admin />
+  {:else if router.route.id === 'configuracoes'}
+    <Settings />
   {:else}
     <NovoEspaco />
   {/if}

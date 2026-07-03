@@ -20,6 +20,7 @@ describe('parseHash', () => {
     expect(parseHash('#/novo')).toEqual({ id: 'novo' });
     expect(parseHash('#/acesso')).toEqual({ id: 'acesso' });
     expect(parseHash('#/admin')).toEqual({ id: 'admin' });
+    expect(parseHash('#/configuracoes')).toEqual({ id: 'configuracoes' });
   });
 
   it('parses a promotion id param on #/promocoes/:id', () => {
@@ -65,6 +66,7 @@ describe('round-trip', () => {
     { id: 'novo' },
     { id: 'acesso' },
     { id: 'admin' },
+    { id: 'configuracoes' },
   ];
   it('parseHash(formatHash(r)) === r for every route', () => {
     for (const r of routes) expect(parseHash(formatHash(r))).toEqual(r);
