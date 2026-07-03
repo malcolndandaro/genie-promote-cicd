@@ -52,7 +52,10 @@ class FakeGitHub:
                 branch = body["branch"]
             key = (branch, fp)
             if method == "GET":
-                return (200, {"sha": self.files[key]["sha"]}) if key in self.files else (404, {})
+                # Real GitHub returns both `sha` and base64 `content` — the fake mirrors both so
+                # get_file_content (F3) can decode it, same as _put_file only ever used `sha`.
+                return (200, {"sha": self.files[key]["sha"], "content": self.files[key]["content"]}) \
+                    if key in self.files else (404, {})
             if method == "PUT":
                 self._cid_file = self.files.get(key, {})
                 self.files[key] = {"sha": f"blob-{len(self.files) + 1}", "content": body["content"],
@@ -135,6 +138,28 @@ def test_open_commits_extra_files_alongside_the_artifact():
     assert ("promote/x", "src/genie/s.json") in fg.files
     assert ("promote/x", "src/genie/s.title") in fg.files
     assert base64.b64decode(fg.files[("promote/x", "src/genie/s.title")]["content"]).decode() == "My Space\n"
+
+
+def test_get_file_content_returns_none_when_absent():
+    fg = FakeGitHub()
+    assert _app(fg).get_file_content("src/genie/s.access.json") is None
+
+
+def test_get_file_content_reads_and_decodes_from_base_by_default():
+    # F3: reading an existing sidecar off `main` (the default `ref`) so a caller can merge into it
+    # rather than blindly overwrite. Seed the fake as if a prior PR had already merged the file.
+    fg = FakeGitHub()
+    fg.files[("main", "src/genie/s.access.json")] = {
+        "sha": "sha1", "content": base64.b64encode(b'{"space_permissions": []}').decode()}
+    got = _app(fg).get_file_content("src/genie/s.access.json")
+    assert got == '{"space_permissions": []}'
+
+
+def test_get_file_content_reads_from_an_explicit_ref():
+    fg = FakeGitHub()
+    fg.files[("promote/x", "p")] = {"sha": "s", "content": base64.b64encode(b"branch content").decode()}
+    assert _app(fg).get_file_content("p", ref="promote/x") == "branch content"
+    assert _app(fg).get_file_content("p", ref="main") is None
 
 
 def test_idempotent_reuses_pr_and_updates_file_in_place():

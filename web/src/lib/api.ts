@@ -3,7 +3,15 @@
  * same origin — the server reads the user's OBO token (`x-forwarded-access-token`) in-process and
  * NO token is ever handled client-side.
  */
-import type { AccessSpec, Whoami, PromotableResource, Review, ResourceKind } from './types';
+import type {
+  AccessSpec,
+  Whoami,
+  PromotableResource,
+  Review,
+  ResourceKind,
+  AccessRequest,
+  AccessRequestAuditEvent,
+} from './types';
 import { spaceToResource } from './resources';
 
 /** A failed API call. `status` lets callers distinguish a 401 (re-auth) from a 502 (engine). */
@@ -207,4 +215,60 @@ export async function postRehydrate(opts: {
   });
   if (!r.ok) throw await toError(r);
   return (await r.json()) as RehydrateResult;
+}
+
+// --- F3: self-service access requests ---------------------------------------
+
+async function postJSON<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw await toError(r);
+  return (await r.json()) as T;
+}
+
+/** Request access to a Space the caller can't use. The requester identity is derived server-side
+ * from the verified OBO token — never sent by the client. */
+export function postAccessRequest(opts: {
+  spaceId: string;
+  spaceTitle?: string;
+  note?: string;
+  wantSpacePermission: boolean;
+  spacePermissionLevel: 'CAN_RUN' | 'CAN_VIEW';
+  wantUcSelect: boolean;
+}): Promise<{ request: AccessRequest }> {
+  return postJSON('/api/access-requests', {
+    space_id: opts.spaceId,
+    space_title: opts.spaceTitle ?? null,
+    note: opts.note ?? null,
+    want_space_permission: opts.wantSpacePermission,
+    space_permission_level: opts.spacePermissionLevel,
+    want_uc_select: opts.wantUcSelect,
+  });
+}
+
+/** `scope=mine` (default): the caller's own requests, any state — their status view.
+ * `scope=pending`: the approver queue (role-gated server-side to Steward/Admin). */
+export async function getAccessRequests(scope: 'mine' | 'pending' = 'mine'): Promise<AccessRequest[]> {
+  const data = await getJSON<{ requests: AccessRequest[] }>(`/api/access-requests?scope=${scope}`);
+  return data.requests ?? [];
+}
+
+export function getAccessRequestDetail(
+  id: string
+): Promise<{ request: AccessRequest; audit: AccessRequestAuditEvent[] }> {
+  return getJSON(`/api/access-requests/${id}`);
+}
+
+/** Approve or deny a request. SoD (approver != requester) is enforced server-side (403) — this
+ * call surfaces that as an `ApiError`, never silently no-ops. On approval the server applies the
+ * grant via the GOVERNED sidecar->PR path (F2) and returns the PR it opened. */
+export function decideAccessRequest(
+  id: string,
+  approve: boolean,
+  note?: string
+): Promise<{ request: AccessRequest; pr?: PullRequestRef }> {
+  return postJSON(`/api/access-requests/${id}/decide`, { approve, note: note ?? null });
 }

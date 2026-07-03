@@ -160,6 +160,22 @@ class GitHubApp:
             self._put_file(branch, p, c, f"promote: update {p}")
         return pr if pr is not None else self._create_pr(branch, title, body)
 
+    def get_file_content(self, path: str, *, ref: str | None = None) -> str | None:
+        """Read a committed file's raw text content (decoded from the GitHub contents API's base64
+        body), or None if absent on `ref` (defaults to `self.base`, i.e. `main`). Used by callers
+        that need to MERGE into an existing committed artifact (e.g. F3 adding a principal to an
+        already-committed AccessSpec sidecar) rather than blindly overwrite it via
+        `open_or_update_promotion`."""
+        ref = ref or self.base
+        status, body = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/contents/{path}')}?ref={ref}",
+            self._headers(self._token()), None)
+        if status == 404:
+            return None
+        if status != 200 or not body:
+            raise GitHubError(status, "get file content", body)
+        return base64.b64decode(body["content"]).decode()
+
     def _reset_branch_to_base(self, branch: str) -> None:
         """Point the branch at the base sha — creating it if absent (a fresh per-space branch) or
         force-resetting it if it exists. Check existence with a GET first: GitHub returns 404 on a

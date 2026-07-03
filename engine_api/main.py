@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(_REPO, "app"))
 import app_logic  # noqa: E402  (MUST import before access_spec/github_app — it puts genie_reviewer/ on sys.path)
 import access_spec as access_spec_mod  # noqa: E402  (F2 — declared-access model)
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
+import access_request_store  # noqa: E402  (F3 — self-service access requests: store + audit)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
@@ -69,6 +70,11 @@ async def _lifespan(app: FastAPI):
     app.state.store = promotion_store.build_store_from_env()  # raises (fail-fast) if Lakebase is down
     logger.info("Lakebase store: %s",
                 "initialized (migrations applied)" if app.state.store else "absent (no PGHOST — local/test)")
+    # F3: the access-request store — independent tables/pool, same hard-dependency contract (fails
+    # fast + loud if PGHOST is set but unreachable; None locally/offline with no PGHOST).
+    app.state.access_store = access_request_store.build_store_from_env()
+    logger.info("Access-request store: %s",
+                "initialized (migrations applied)" if app.state.access_store else "absent (no PGHOST — local/test)")
     reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
@@ -81,6 +87,8 @@ async def _lifespan(app: FastAPI):
                 pass
         if app.state.store is not None:
             app.state.store.close()  # release the connection pool on graceful shutdown
+        if app.state.access_store is not None:
+            app.state.access_store.close()
 
 
 def _start_scheduled_reconciler(store):
@@ -124,6 +132,7 @@ def _start_scheduled_reconciler(store):
 app = FastAPI(title="genie-promote app", lifespan=_lifespan)
 # Default so requests before/without lifespan (e.g. module-level TestClient) see a defined attribute.
 app.state.store = None
+app.state.access_store = None  # F3
 api = APIRouter()
 
 
@@ -157,6 +166,15 @@ def _engine_call(label: str, fn: Callable):
         # from a 403: the caller isn't denied, the dev environment needs a re-bootstrap.
         logger.warning("dev environment not bootstrapped in %s (%s)", label, e)
         raise HTTPException(status_code=503, detail=str(e))
+    except access_request_store.SelfApprovalError as e:
+        # F3 SoD: a caller tried to approve/deny their own access request — server-enforced,
+        # never just a UI affordance. A plain 403, distinct from authz.AccessDenied (that's about
+        # RESOURCE access; this is about WHO may decide on THIS request).
+        logger.info("self-approval rejected in %s (%s)", label, e)
+        raise HTTPException(status_code=403, detail=str(e))
+    except access_request_store.InvalidTransition as e:
+        logger.info("invalid access-request transition in %s (%s)", label, e)
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception:  # noqa: BLE001
         logger.exception("engine call failed: %s", label)
         raise HTTPException(status_code=502, detail=f"engine error: {label}")
@@ -490,6 +508,191 @@ def rehydrate(
         return {"space_id": result.space_id, "mode": result.mode, "title": result.title}
 
     return _engine_call("rehydrate_space", _run)
+
+
+# --- F3: self-service access requests ---------------------------------------
+#
+# Request -> SoD-clean approval -> GOVERNED grant application (F2's sidecar->PR->apply_access.py
+# path, never an app-direct w.grants/w.permissions call) -> audit. Mirrors the promotion
+# endpoints' shape (persist via an injectable store; identity ALWAYS from the verified OBO token,
+# never a header) but uses its OWN store/tables (`access_request_store`) — see that module's
+# docstring for why it isn't folded into `promotion_store.audit_events`.
+
+
+def _require_access_store():
+    store = getattr(app.state, "access_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+def _access_request_summary(r) -> dict:
+    return {"id": r.id, "space_id": r.space_id, "space_title": r.space_title,
+            "requester_email": r.requester_email, "note": r.note,
+            "want_space_permission": r.want_space_permission,
+            "space_permission_level": r.space_permission_level, "want_uc_select": r.want_uc_select,
+            "state": r.state, "decided_by": r.decided_by, "decided_at": r.decided_at,
+            "decision_note": r.decision_note, "pr_number": r.pr_number, "pr_url": r.pr_url,
+            "created_at": r.created_at, "updated_at": r.updated_at}
+
+
+def _access_audit_event(e) -> dict:
+    return {"seq": e.seq, "event_type": e.event_type, "occurred_at": e.occurred_at,
+            "actor_email": e.actor_email, "detail": e.detail}
+
+
+class AccessRequestIn(BaseModel):
+    space_id: str
+    space_title: str | None = None
+    note: str | None = None
+    want_space_permission: bool = True
+    space_permission_level: str = "CAN_RUN"
+    want_uc_select: bool = False
+
+
+@api.post("/access-requests")
+def create_access_request(
+    body: AccessRequestIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """A user who lacks access to a prod Space requests it. The requester identity is the caller's
+    platform-VERIFIED identity (A2) — never a display header — so the SoD check on approval has a
+    trustworthy value to compare against."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    store = _require_access_store()
+
+    def _run() -> dict:
+        identity = authz.verify_identity(token, host=Config().host)
+        req = store.create_request(
+            space_id=body.space_id, space_title=body.space_title,
+            requester_email=identity.user_name, note=body.note,
+            want_space_permission=body.want_space_permission,
+            space_permission_level=body.space_permission_level, want_uc_select=body.want_uc_select)
+        return {"request": _access_request_summary(req)}
+
+    return _engine_call("create_access_request", _run)
+
+
+@api.get("/access-requests")
+def list_access_requests(
+    scope: str = "mine",
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """`scope=mine` (default): the caller's own requests, any state — their status view.
+    `scope=pending` (the approver queue): EVERY requester's `requested`-state requests — ROLE-GATED
+    to a configured Steward/Admin (verified identity), same gate as promotions' `scope=all` (LB5).
+    """
+    store = _require_access_store()
+    verified = _verified_email(x_forwarded_access_token, authorization)
+    if scope == "mine":
+        if verified is None:
+            requests = store.list_requests()  # local/offline (no OBO token) — pre-A2 ergonomics
+        else:
+            requests = store.list_requests(requester_email=verified)
+    elif scope == "pending":
+        if not _is_admin(verified):
+            raise HTTPException(status_code=403,
+                                detail="Apenas Stewards/Admins veem a fila de aprovação.")
+        requests = store.list_requests(state="requested")
+    else:
+        raise HTTPException(status_code=400, detail="scope inválido; use 'mine' ou 'pending'")
+    return {"requests": [_access_request_summary(r) for r in requests]}
+
+
+def _visible_access_request_or_403(store, request_id: str, verified_email: str | None):
+    r = store.get_request(request_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="solicitação de acesso não encontrada")
+    if verified_email is None or _is_admin(verified_email) or (
+            r.requester_email.lower() == verified_email.lower()):
+        return r
+    raise HTTPException(status_code=403, detail="Sem permissão para esta solicitação.")
+
+
+@api.get("/access-requests/{request_id}")
+def get_access_request(
+    request_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """A single request + its append-only audit trail. Owner-or-admin only (A2)."""
+    store = _require_access_store()
+    verified = _verified_email(x_forwarded_access_token, authorization)
+    r = _visible_access_request_or_403(store, request_id, verified)
+    return {"request": _access_request_summary(r),
+            "audit": [_access_audit_event(e) for e in store.list_audit_events(request_id)]}
+
+
+class AccessDecisionIn(BaseModel):
+    approve: bool
+    note: str | None = None
+
+
+@api.post("/access-requests/{request_id}/decide")
+def decide_access_request(
+    request_id: str,
+    body: AccessDecisionIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Approve or deny an access request. Approver authority is EXPLICIT: only a configured
+    Steward/Admin (by VERIFIED identity, A2) may decide at all — a random authenticated user
+    cannot self-serve their own approval by simply calling this endpoint. SoD is then enforced a
+    SECOND time, server-side, inside the store itself (`AccessRequestStore.decide`): the approver's
+    verified identity is compared against the REQUEST's OWN recorded `requester_email` (never a
+    client-supplied value) and a match raises `SelfApprovalError` -> 403 (mirrors
+    `prevent_self_review`; caught centrally in `_engine_call`).
+
+    On approval, the grant is applied via the GOVERNED path ONLY (F2's sidecar -> bot PR ->
+    `scripts/apply_access.py`, run by CI as the prod SP behind the Steward's deploy gate) — this
+    endpoint never calls `w.grants`/`w.permissions`. A failure opening the PR after the decision is
+    recorded is NOT silently swallowed: the request stays `approved` (not `applied`), an
+    `apply_failed` audit event captures the reason, and the HTTP call itself surfaces the error
+    (502/503 via `_engine_call`) so the Steward sees the grant did NOT land and can retry.
+    """
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    store = _require_access_store()
+    # Resolved + role-checked BEFORE _engine_call (not inside `_run`): _engine_call's broad
+    # `except Exception` would otherwise catch this HTTPException and remap it to a generic 502,
+    # hiding the real 403 from the caller.
+    try:
+        identity = authz.verify_identity(token, host=Config().host)
+    except authz.AccessDenied:
+        raise HTTPException(status_code=401, detail="Sessão expirada — recarregue para reautenticar.")
+    if not _is_admin(identity.user_name):
+        raise HTTPException(status_code=403,
+                            detail="Apenas Stewards/Admins aprovam ou negam solicitações de acesso.")
+    if store.get_request(request_id) is None:
+        raise HTTPException(status_code=404, detail="solicitação de acesso não encontrada")
+
+    def _run() -> dict:
+        req = store.decide(request_id, approve=body.approve, approver_email=identity.user_name,
+                           decision_note=body.note)
+        if not body.approve:
+            return {"request": _access_request_summary(req)}
+        # Approved -> apply via the governed path (sidecar -> bot PR). A failure here must NOT look
+        # like a silent success: record apply_failed and let the exception surface to the caller.
+        try:
+            applied = app_logic.apply_access_request(
+                space_id=req.space_id, principal_email=req.requester_email,
+                want_space_permission=req.want_space_permission,
+                space_permission_level=req.space_permission_level,
+                want_uc_select=req.want_uc_select, resource_title=req.space_title,
+                approver_email=identity.user_name)
+        except Exception as e:  # noqa: BLE001 — record the failure, then re-raise for _engine_call
+            store.mark_apply_failed(request_id, actor_email=identity.user_name, reason=str(e))
+            raise
+        req = store.mark_applied(request_id, actor_email=identity.user_name,
+                                 pr_number=applied["pr"]["number"], pr_url=applied["pr"]["url"])
+        return {"request": _access_request_summary(req), "pr": applied["pr"]}
+
+    return _engine_call("decide_access_request", _run)
 
 
 # --- LB3: durable history + recover-on-open (no reviewer re-run) ------------
