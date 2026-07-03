@@ -109,3 +109,39 @@ def test_effective_emails_scoped_to_the_requested_role(store):
 def test_healthcheck_and_close_do_not_raise(store):
     store.healthcheck()
     store.close()
+
+
+def test_revoke_last_admin_steward_is_refused_when_store_nonempty(store):
+    # F5 review should-fix: revoking the last admin/steward while other rows remain would empty the
+    # admin-gate set (no env fallback for a non-empty store) -> lock everyone out. Refuse it.
+    from roles_store import LastAdminError
+    store.assign(email="pedro@acme.com", role="steward")
+    store.assign(email="ana@acme.com", role="approver")   # keeps the store non-empty after the revoke
+    with pytest.raises(LastAdminError):
+        store.revoke(email="pedro@acme.com", role="steward")
+    # still there — the revoke did not take effect
+    assert any(r.email == "pedro@acme.com" and r.role == "steward" for r in store.list_all())
+
+
+def test_revoke_admin_ok_when_a_replacement_admin_remains(store):
+    store.assign(email="pedro@acme.com", role="steward")
+    store.assign(email="malcoln@acme.com", role="admin")
+    store.revoke(email="pedro@acme.com", role="steward")  # malcoln (admin) still gates -> allowed
+    assert [(r.email, r.role) for r in store.list_all()] == [("malcoln@acme.com", "admin")]
+
+
+def test_revoke_down_to_empty_store_is_allowed_env_fallback_applies(store):
+    # Revoking the very last row leaves a COMPLETELY empty store -> env fallback takes over, so this
+    # is NOT a lockout and must be permitted (distinct from the non-empty case above).
+    store.assign(email="solo@acme.com", role="admin")
+    store.revoke(email="solo@acme.com", role="admin")
+    assert store.list_all() == []
+    # empty store -> env fallback is authoritative again
+    assert store.effective_emails("admin", env_fallback=frozenset({"boot@acme.com"})) == frozenset({"boot@acme.com"})
+
+
+def test_revoke_nonadmin_role_never_triggers_lockout_guard(store):
+    store.assign(email="pedro@acme.com", role="steward")
+    store.assign(email="ana@acme.com", role="approver")
+    store.revoke(email="ana@acme.com", role="approver")  # approver isn't an admin role -> always ok
+    assert any(r.role == "steward" for r in store.list_all())

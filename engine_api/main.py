@@ -1047,7 +1047,11 @@ def revoke_role(
     "already gone", mirroring the DELETE-semantics convention used elsewhere in this app."""
     _require_admin(x_forwarded_access_token, authorization)
     store = _require_roles_store()
-    store.revoke(email=body.email, role=body.role)
+    try:
+        store.revoke(email=body.email, role=body.role)
+    except roles_store.LastAdminError as e:
+        # Refuse a revoke that would lock everyone out of the admin console (incl. this CRUD).
+        raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True}
 
 

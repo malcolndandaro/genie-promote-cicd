@@ -45,6 +45,18 @@ from typing import Callable, Optional, Protocol
 # need a migration when that distinction is actually needed.
 ROLES = ("steward", "admin", "approver")
 
+# The roles that grant admin-console/gate access (`_admin_emails` unions these). Removing the LAST
+# of these while the store is otherwise non-empty locks EVERYONE out (env fallback only applies to a
+# COMPLETELY empty store) — see `RolesStore.revoke`'s guard + `LastAdminError`.
+_ADMIN_ROLES = ("admin", "steward")
+
+
+class LastAdminError(ValueError):
+    """Raised when a revoke would remove the last effective admin/steward while the store still holds
+    other rows — which would drive the admin-gate set to empty (no env fallback for a non-empty
+    store), 403-ing EVERYONE out of every admin endpoint including the role CRUD needed to recover.
+    The operator must assign a replacement admin/steward first."""
+
 
 @dataclasses.dataclass
 class RoleAssignment:
@@ -118,8 +130,23 @@ class RolesStore:
 
     def revoke(self, *, email: str, role: str) -> None:
         """Remove a role assignment. A no-op if it didn't exist (idempotent, mirrors DELETE
-        semantics elsewhere in the app — never a 404 for "already gone")."""
-        self._b.delete(_norm_email(email), role)
+        semantics elsewhere in the app — never a 404 for "already gone").
+
+        LOCKOUT GUARD (F5 review): if this row is an existing admin/steward and removing it would
+        leave the store non-empty but with ZERO admin/steward rows, raise `LastAdminError` — every
+        admin endpoint (incl. this CRUD) would otherwise 403 for everyone, with no env fallback
+        (env only backs a COMPLETELY empty store). Revoking down to a fully-empty store IS allowed
+        (env fallback then applies), as is revoking a non-admin role."""
+        ne = _norm_email(email)
+        if role in _ADMIN_ROLES:
+            rows = self.list_all()
+            removing = any(_norm_email(r.email) == ne and r.role == role for r in rows)
+            if removing:
+                remaining = [r for r in rows if not (_norm_email(r.email) == ne and r.role == role)]
+                if remaining and not any(r.role in _ADMIN_ROLES for r in remaining):
+                    raise LastAdminError(
+                        "cannot remove the last admin/steward — assign a replacement first")
+        self._b.delete(ne, role)
 
     def list_all(self) -> list[RoleAssignment]:
         return [_as(RoleAssignment, r) for r in self._b.list_all()]

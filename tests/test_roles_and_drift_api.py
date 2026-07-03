@@ -124,6 +124,20 @@ def test_admin_can_assign_list_and_revoke_a_role(monkeypatch, roles_store_fixtur
     assert [row["email"] for row in remaining] == ["admin@x"]
 
 
+def test_revoke_last_admin_returns_409_not_a_lockout(monkeypatch, roles_store_fixture):
+    # F5 review should-fix: removing the last admin/steward while the store stays non-empty would
+    # 403 EVERYONE out of the admin console (incl. this CRUD) — the endpoint refuses with 409.
+    _setup_admin(monkeypatch)
+    roles_store_fixture.assign(email="admin@x", role="admin")
+    roles_store_fixture.assign(email="ana@x", role="approver")  # keeps the store non-empty
+    r = client.post("/api/admin/roles/revoke", json={"email": "admin@x", "role": "admin"},
+                    headers=ADMIN_HEADERS)
+    assert r.status_code == 409
+    # the admin row survived -> the caller is NOT locked out
+    still = client.get("/api/admin/roles", headers=ADMIN_HEADERS).json()["roles"]
+    assert any(row["email"] == "admin@x" and row["role"] == "admin" for row in still)
+
+
 def test_assign_role_rejects_unknown_role(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
     r = client.post("/api/admin/roles", json={"email": "x@y", "role": "superuser"},
