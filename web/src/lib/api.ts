@@ -11,6 +11,9 @@ import type {
   ResourceKind,
   AccessRequest,
   AccessRequestAuditEvent,
+  InventorySpace,
+  OrphanedPromotion,
+  AdminAuditRow,
 } from './types';
 import { spaceToResource } from './resources';
 
@@ -271,4 +274,27 @@ export function decideAccessRequest(
   note?: string
 ): Promise<{ request: AccessRequest; pr?: PullRequestRef }> {
   return postJSON(`/api/access-requests/${id}/decide`, { approve, note: note ?? null });
+}
+
+// --- F4: admin console (server-gated to Steward/Admin — a 403 surfaces as an ApiError) -----------
+
+/** The live prod inventory: every deployed Space joined with its owner/declared access/phase (read
+ * fresh from prod on every call — never cached client-side). */
+export async function getAdminInventory(): Promise<{
+  spaces: InventorySpace[];
+  orphaned_promotions: OrphanedPromotion[];
+}> {
+  return getJSON('/api/admin/inventory');
+}
+
+/** Every access request in any state (pending/approved/denied/applied), newest first. */
+export async function getAdminAccessRequests(): Promise<AccessRequest[]> {
+  const data = await getJSON<{ requests: AccessRequest[] }>('/api/admin/access-requests');
+  return data.requests ?? [];
+}
+
+/** The cross-Promotion audit trail ("who changed what, when"), newest first. */
+export async function getAdminAudit(limit = 200): Promise<AdminAuditRow[]> {
+  const data = await getJSON<{ audit: AdminAuditRow[] }>(`/api/admin/audit?limit=${limit}`);
+  return data.audit ?? [];
 }

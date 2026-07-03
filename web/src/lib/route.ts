@@ -6,7 +6,7 @@
  * carries a path param (a promotion id, for the `#/promocoes/:id` deep-link). The reactive wrapper
  * that touches `window.location`/`hashchange` lives in `router.svelte.ts`.
  */
-export type RouteId = 'inicio' | 'espacos' | 'promocoes' | 'novo' | 'acesso';
+export type RouteId = 'inicio' | 'espacos' | 'promocoes' | 'novo' | 'acesso' | 'admin';
 
 export interface Route {
   id: RouteId;
@@ -14,7 +14,14 @@ export interface Route {
   param?: string;
 }
 
-export const ROUTE_IDS: readonly RouteId[] = ['inicio', 'espacos', 'promocoes', 'novo', 'acesso'];
+export const ROUTE_IDS: readonly RouteId[] = [
+  'inicio',
+  'espacos',
+  'promocoes',
+  'novo',
+  'acesso',
+  'admin',
+];
 
 /** The default landing route — the business-user home/dashboard (UI4). */
 export const DEFAULT_ROUTE: Route = { id: 'inicio' };

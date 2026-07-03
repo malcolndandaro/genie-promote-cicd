@@ -7,6 +7,7 @@
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
   import NovoEspaco from './screens/NovoEspaco.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
+  import Admin from './screens/Admin.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
   import { Router } from './lib/router.svelte';
@@ -42,13 +43,17 @@
   // the exact target — running recover there would race it and could surface the WRONG promotion.
   if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  const NAV_ITEMS: NavItem[] = [
+  // The admin nav item is only OFFERED when who.is_admin — the real gate is server-side (every F4
+  // endpoint 403s a non-admin on the VERIFIED identity regardless), this is purely a UX affordance
+  // so a non-admin never sees an entry point to a screen that would just error for them.
+  const NAV_ITEMS: NavItem[] = $derived([
     { id: 'inicio', label: 'Início', icon: 'home' },
     { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
     { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
     { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
     { id: 'novo', label: '＋ Novo Genie Space', icon: 'plus-circle' },
-  ];
+    ...(who?.is_admin ? [{ id: 'admin' as const, label: 'Administração', icon: 'shield' as const }] : []),
+  ]);
 
   const SECTION_TITLE: Record<RouteId, string> = {
     inicio: 'Início',
@@ -56,6 +61,7 @@
     promocoes: 'Minhas promoções',
     acesso: 'Acesso',
     novo: 'Novo Genie Space',
+    admin: 'Administração',
   };
 
   // Start a promotion for a space and drop into the in-place review flow on "Meus espaços".
@@ -96,6 +102,8 @@
     />
   {:else if router.route.id === 'acesso'}
     <AcessoEspacos {who} />
+  {:else if router.route.id === 'admin'}
+    <Admin />
   {:else}
     <NovoEspaco />
   {/if}

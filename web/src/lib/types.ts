@@ -129,3 +129,41 @@ export interface AccessRequestAuditEvent {
   actor_email: string;
   detail: Record<string, unknown> | null;
 }
+
+/** F4: one row in the admin's live prod inventory — a Space currently deployed in prod, joined
+ * with whatever governance record (if any) matches it. `owner`/`phase`/`access_spec` are null when
+ * no Promotion record matches this live Space (rendered "—" by the UI), never a crash. */
+export interface InventorySpace {
+  space_id: string;
+  title: string;
+  owner: string | null;
+  phase: string | null;
+  access_spec: AccessSpec | null;
+  promotion_id: string | null;
+  terminal: boolean | null;
+}
+
+/** F4: a Promotion whose target Space is no longer visible in the live prod listing (deleted,
+ * renamed) — surfaced distinctly from a live inventory row. */
+export interface OrphanedPromotion {
+  promotion_id: string;
+  resource_id: string;
+  resource_title: string | null;
+  owner: string | null;
+  phase: string | null;
+}
+
+/** F4: one cross-Promotion audit row — the same shape as a per-promotion audit event, plus which
+ * Promotion/resource it belongs to (so the admin can trace an action back to its Promotion). */
+export interface AdminAuditRow {
+  seq: number;
+  event_type: string;
+  occurred_at: string;
+  actor_github_login: string | null;
+  actor_app_email: string | null;
+  github_event_at: string | null;
+  detail: Record<string, unknown> | null;
+  promotion_id: string;
+  resource_id: string;
+  resource_title: string | null;
+}

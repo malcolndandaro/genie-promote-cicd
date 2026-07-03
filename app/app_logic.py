@@ -228,6 +228,30 @@ def list_spaces(profile: str | None = None, *, client: WorkspaceClient | None = 
             for s in (resp.spaces or [])]
 
 
+def list_prod_spaces(profile: str | None = None, *, client: WorkspaceClient | None = None) -> list[dict]:
+    """F4: EVERY Genie Space currently deployed in PROD (id + title) — the raw feed the admin
+    inventory (`admin_inventory.load_inventory`) joins against the promotion index.
+
+    Deliberately NOT identity-filtered like `list_spaces`: this is an ADMIN-ONLY read (gated at the
+    API layer on the A2-hardened `_is_admin` check, never exposed to a non-admin caller), and its
+    whole purpose is a cross-user inventory of what's live in prod — filtering it down to "what this
+    admin could open themselves" would defeat that. Because the app itself now runs IN prod
+    (ADR-0006), this is a plain same-workspace call as the app's own prod-local identity (the SP in
+    the deployed app, or a `profile` locally) — no OBO, no dev-sp cross-workspace hop, no
+    `assert_can_access` guard (that guard exists specifically for the confused-deputy risk of the
+    STANDING DEV SP's broad reach; there is no equivalent standing broad-reach credential on the
+    prod side here — the app SP's own prod Genie access IS the intended admin-inventory boundary,
+    same as every other prod-local admin read in this app).
+
+    Called FRESH on every invocation (no caching anywhere in this call chain) so the inventory
+    reflects live prod state, per the F4 acceptance criteria — a caller must not wrap this in any
+    memoization.
+    """
+    w = client or _client(profile)
+    resp = w.genie.list_spaces()
+    return [{"space_id": s.space_id, "title": s.title or "(sem título)"} for s in (resp.spaces or [])]
+
+
 def export_serialized(space_id: str, profile: str | None = None, client: WorkspaceClient | None = None,
                       *, user_token: str | None = None) -> dict:
     """Export a Space's ``serialized_space``. Cross-workspace rewiring (A2): with a ``user_token``
