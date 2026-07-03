@@ -128,6 +128,9 @@ class StoreBackend(Protocol):
     def list_snapshots(self, promotion_id: str) -> list[dict]: ...  # oldest -> newest
     def insert_audit_event(self, row: dict) -> Optional[int]: ...  # seq, or None if a dup milestone
     def list_audit_events(self, promotion_id: str) -> list[dict]: ...  # ordered by seq
+    # Cross-Promotion audit (F4): all events joined with resource_id/resource_title, newest-first,
+    # bounded — ONE query (no per-Promotion N+1).
+    def list_recent_audit_events(self, limit: int) -> list[dict]: ...
     def healthcheck(self) -> None: ...
     def close(self) -> None: ...
 
@@ -237,6 +240,13 @@ class PromotionStore:
     def list_audit_events(self, promotion_id: str) -> list[AuditEvent]:
         return [_as(AuditEvent, r) for r in self._b.list_audit_events(promotion_id)]
 
+    def list_recent_audit_events(self, limit: int = 200) -> list[dict]:
+        """Cross-Promotion audit (F4): every Promotion's audit events, newest-first, each joined with
+        its Promotion's `resource_id`/`resource_title`, in ONE backend query (replaces the per-
+        Promotion N+1). Returns plain dicts (not `AuditEvent`) because the resource fields live on
+        the Promotion, not the event."""
+        return self._b.list_recent_audit_events(limit)
+
 
 def _as(cls, row: Optional[dict]):
     """Build a dataclass from a backend row dict (only the dataclass's own fields)."""
@@ -319,6 +329,17 @@ class InMemoryBackend:
     def list_audit_events(self, promotion_id: str) -> list[dict]:
         rows = [dict(e) for e in self._events if e["promotion_id"] == promotion_id]
         return sorted(rows, key=lambda e: e["seq"])
+
+    def list_recent_audit_events(self, limit: int) -> list[dict]:
+        out = []
+        for e in self._events:
+            p = self._promotions.get(e["promotion_id"], {})
+            out.append({**e, "resource_id": p.get("resource_id"),
+                        "resource_title": p.get("resource_title")})
+        # newest-first; (promotion_id, seq) are the stable tiebreakers so equal timestamps (a fixed
+        # test clock) still order deterministically.
+        out.sort(key=lambda e: (e["occurred_at"], e["promotion_id"], e["seq"]), reverse=True)
+        return out[: max(0, limit)]
 
     def healthcheck(self) -> None:
         return None
@@ -529,6 +550,15 @@ class PgBackend:
     def list_audit_events(self, promotion_id: str) -> list[dict]:
         return self._all(
             "SELECT * FROM audit_events WHERE promotion_id = %s ORDER BY seq", (promotion_id,))
+
+    def list_recent_audit_events(self, limit: int) -> list[dict]:
+        # ONE query (no per-Promotion N+1): join each event to its Promotion's resource fields,
+        # newest-first, bounded. (promotion_id, seq) break ties deterministically.
+        return self._all(
+            "SELECT ae.*, p.resource_id, p.resource_title "
+            "FROM audit_events ae JOIN promotions p ON ae.promotion_id = p.id "
+            "ORDER BY ae.occurred_at DESC, ae.promotion_id DESC, ae.seq DESC "
+            "LIMIT %s", (max(0, limit),))
 
     def healthcheck(self) -> None:
         with self._pool.connection() as conn, conn.cursor() as cur:

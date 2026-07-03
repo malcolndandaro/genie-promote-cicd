@@ -899,15 +899,16 @@ def admin_audit(
     store = _require_store()
 
     def _run() -> dict:
-        rows = []
-        for p in store.list_promotions(None):
-            for e in store.list_audit_events(p.id):
-                rows.append({
-                    **_audit_event(e), "promotion_id": p.id, "resource_id": p.resource_id,
-                    "resource_title": p.resource_title,
-                })
-        rows.sort(key=lambda r: r["occurred_at"], reverse=True)
-        return {"audit": rows[: max(0, limit)]}
+        # ONE joined query (store.list_recent_audit_events), newest-first + bounded — no per-Promotion
+        # N+1 (F4 review should-fix). Rows are dicts already joined with resource_id/resource_title.
+        rows = [{
+            "seq": r["seq"], "event_type": r["event_type"], "occurred_at": r["occurred_at"],
+            "actor_github_login": r["actor_github_login"], "actor_app_email": r["actor_app_email"],
+            "github_event_at": r["github_event_at"], "detail": r["detail"],
+            "promotion_id": r["promotion_id"], "resource_id": r["resource_id"],
+            "resource_title": r["resource_title"],
+        } for r in store.list_recent_audit_events(limit)]
+        return {"audit": rows}
 
     return _engine_call("admin_audit", _run)
 
