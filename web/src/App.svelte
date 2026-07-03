@@ -6,6 +6,7 @@
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
   import NovoEspaco from './screens/NovoEspaco.svelte';
+  import AcessoEspacos from './screens/AcessoEspacos.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
   import { Router } from './lib/router.svelte';
@@ -45,6 +46,7 @@
     { id: 'inicio', label: 'Início', icon: 'home' },
     { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
     { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
+    { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
     { id: 'novo', label: '＋ Novo Genie Space', icon: 'plus-circle' },
   ];
 
@@ -52,6 +54,7 @@
     inicio: 'Início',
     espacos: 'Meus espaços',
     promocoes: 'Minhas promoções',
+    acesso: 'Acesso',
     novo: 'Novo Genie Space',
   };
 
@@ -91,6 +94,8 @@
       detailId={router.route.param}
       onBack={() => router.navigate('promocoes')}
     />
+  {:else if router.route.id === 'acesso'}
+    <AcessoEspacos {who} />
   {:else}
     <NovoEspaco />
   {/if}

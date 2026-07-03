@@ -93,3 +93,39 @@ export interface Review {
    * older cached/recovered review payload (pre-F2) still type-checks. */
   access_spec?: AccessSpec;
 }
+
+/** F3: the self-service access-request state machine. `applied` is distinct from `approved` —
+ * the grant is only actually queued once the governed sidecar PR has been opened. */
+export type AccessRequestState = 'requested' | 'approved' | 'denied' | 'applied';
+
+/** F3: one self-service access request — a user asking for access to a Space they can't use. */
+export interface AccessRequest {
+  id: string;
+  space_id: string;
+  space_title: string | null;
+  /** The requester's platform-VERIFIED identity at request time (never a display header). */
+  requester_email: string;
+  note: string | null;
+  want_space_permission: boolean;
+  space_permission_level: string; // 'CAN_RUN' | 'CAN_VIEW'
+  want_uc_select: boolean;
+  state: AccessRequestState;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_note: string | null;
+  /** The governed sidecar-update PR the approval opened (F2's apply path), once applied. */
+  pr_number: number | null;
+  pr_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** F3: one append-only access-request audit event. `actor_email` is ALWAYS the verified acting
+ * identity (requester on `requested`, approver on `approved`/`denied`/`applied`/`apply_failed`). */
+export interface AccessRequestAuditEvent {
+  seq: number;
+  event_type: string;
+  occurred_at: string;
+  actor_email: string;
+  detail: Record<string, unknown> | null;
+}
