@@ -90,15 +90,19 @@
     }
   }
 
+  // Applying the grant is SYNCHRONOUS with approval (decide -> apply_access_request -> mark_applied,
+  // all in the one /decide call). So a request that stays `approved` (never reaching `applied`) means
+  // the governed apply FAILED — surface that as a warning to the requester, not a forever-spinning
+  // "aplicando…" (F3 review should-fix). `applied` is the only success state.
   const STATE_TONE: Record<AccessRequestState, 'neutral' | 'success' | 'warning' | 'destructive'> = {
     requested: 'warning',
-    approved: 'neutral',
+    approved: 'destructive',
     applied: 'success',
     denied: 'destructive',
   };
   const STATE_LABEL: Record<AccessRequestState, string> = {
     requested: 'Aguardando aprovação',
-    approved: 'Aprovado — aplicando',
+    approved: 'Aprovado — falha ao aplicar (contate um admin)',
     applied: 'Acesso concedido',
     denied: 'Negado',
   };
