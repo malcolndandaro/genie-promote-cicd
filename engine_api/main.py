@@ -52,6 +52,7 @@ import app_logic  # noqa: E402  (MUST import before access_spec/github_app — i
 import access_spec as access_spec_mod  # noqa: E402  (F2 — declared-access model)
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
 import access_request_store  # noqa: E402  (F3 — self-service access requests: store + audit)
+import admin_inventory  # noqa: E402  (F4 — live-prod-inventory join, pure/offline-testable)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
@@ -821,6 +822,95 @@ def get_promotion_audit(
     verified = _verified_email(x_forwarded_access_token, authorization)
     _visible_promotion_or_403(store, promotion_id, verified)
     return {"audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)]}
+
+
+# --- F4: admin console — live prod inventory + access-request queue + cross-Promotion audit -------
+#
+# One source of truth over prod (US-27..31): all three surfaces are READ-ONLY aggregation over data
+# this app already owns (the Lakebase promotion + access-request stores) plus a live prod Genie read
+# — F4 never mutates prod or a grant itself. Every endpoint here is gated the SAME way: resolve the
+# caller's PLATFORM-VERIFIED identity (`_verified_email`, never `x-forwarded-email`) and require
+# `_is_admin` on it, else 403 — server-side, so an admin-only surface can't be reached by simply
+# hiding a UI affordance.
+
+
+def _require_admin(x_forwarded_access_token: str | None, authorization: str | None) -> str:
+    """Resolve + enforce the A2-hardened admin gate for an F4 endpoint. Returns the verified email
+    (rarely needed by the caller, but handy for logging/consistency with the other gated endpoints).
+    Raises 403 for anyone whose VERIFIED identity isn't a configured admin/Steward — including a
+    caller with NO usable token at all (`_verified_email` -> None -> never admin), which is the
+    correct fail-closed behavior for an admin surface (unlike the `scope=mine`-style endpoints,
+    F4 has no legitimate "local/offline, no token" degraded mode to fall back to)."""
+    verified = _verified_email(x_forwarded_access_token, authorization)
+    if not _is_admin(verified):
+        raise HTTPException(status_code=403, detail="Apenas Stewards/Admins acessam o console de administração.")
+    return verified
+
+
+@api.get("/admin/inventory")
+def admin_inventory_endpoint(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-27/US-30: every prod-deployed Genie Space (owner, declared access, current phase),
+    reflecting LIVE prod state — `app_logic.list_prod_spaces` is called fresh on this request (never
+    served from a cache), then joined against the Lakebase promotion index by `admin_inventory`. A
+    live Space with no matching Promotion still appears (owner/access/phase all null → the UI
+    renders "—"); a Promotion whose Space is no longer live is returned separately as
+    `orphaned_promotions`, never silently dropped or crashed on."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_store()
+
+    def _run() -> dict:
+        return admin_inventory.load_inventory(app_logic.list_prod_spaces, store.list_promotions(None))
+
+    return _engine_call("admin_inventory", _run)
+
+
+@api.get("/admin/access-requests")
+def admin_access_requests(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-28: every access request in ANY state (pending/approved/denied/applied), newest first, in
+    one place — reuses `AccessRequestStore.list_requests()` with no filters (already returns every
+    requester/every state; F3's `scope=pending` narrows to `requested`-only for the approver's
+    action queue, this is the admin's full-history view)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_access_store()
+    return {"requests": [_access_request_summary(r) for r in store.list_requests()]}
+
+
+@api.get("/admin/audit")
+def admin_audit(
+    limit: int = 200,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-29: "who changed what, when" across EVERY Promotion (not just one), newest first. Unions
+    each Promotion's own append-only audit trail (already ordered oldest->newest per-Promotion by
+    `seq`) and re-sorts the combined set by `occurred_at` descending, carrying the acting identity
+    (`actor_github_login` when GitHub-attributed, else the display-only `actor_app_email`) and which
+    Promotion/resource the event belongs to, so an admin can trace an action back to its Promotion.
+    `limit` bounds the response for a workspace with a long history (default 200, newest first —
+    truncation drops the OLDEST events, never the most recent ones an admin is most likely to want).
+    """
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_store()
+
+    def _run() -> dict:
+        # ONE joined query (store.list_recent_audit_events), newest-first + bounded — no per-Promotion
+        # N+1 (F4 review should-fix). Rows are dicts already joined with resource_id/resource_title.
+        rows = [{
+            "seq": r["seq"], "event_type": r["event_type"], "occurred_at": r["occurred_at"],
+            "actor_github_login": r["actor_github_login"], "actor_app_email": r["actor_app_email"],
+            "github_event_at": r["github_event_at"], "detail": r["detail"],
+            "promotion_id": r["promotion_id"], "resource_id": r["resource_id"],
+            "resource_title": r["resource_title"],
+        } for r in store.list_recent_audit_events(limit)]
+        return {"audit": rows}
+
+    return _engine_call("admin_audit", _run)
 
 
 # Mount the API twice: at root (legacy engine-API contract) and under /api (what the SPA calls).

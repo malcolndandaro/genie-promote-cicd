@@ -217,3 +217,23 @@ def test_access_spec_survives_a_re_review_snapshot_without_being_overwritten(sto
                           findings=[], eval=None, timeline=[])
     store.touch(p.id)
     assert store.get_promotion(p.id).access_spec == _ACCESS_SPEC
+
+
+def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(store):
+    # F4 review should-fix: the cross-Promotion audit is ONE joined query, newest-first, bounded.
+    p1 = _mk(store, pr_number=201, resource_id="space-A")
+    p2 = _mk(store, pr_number=202, resource_id="space-B")
+    store.append_audit_event(p1.id, "requested", actor_app_email="ana@acme.com")   # oldest
+    store.append_audit_event(p2.id, "requested", actor_app_email="bob@acme.com")
+    store.append_audit_event(p1.id, "pr_opened", actor_github_login="genie-promote-bot")  # newest
+
+    rows = store.list_recent_audit_events(limit=200)
+    # spans BOTH promotions, newest-first (strictly-increasing clock)
+    assert [r["event_type"] for r in rows] == ["pr_opened", "requested", "requested"]
+    assert rows[0]["promotion_id"] == p1.id
+    # each row is joined with its Promotion's resource fields
+    assert rows[0]["resource_id"] == "space-A" and rows[0]["resource_title"] == "Recebíveis"
+    assert {r["resource_id"] for r in rows} == {"space-A", "space-B"}
+    # limit truncates the OLDEST, never the newest
+    top1 = store.list_recent_audit_events(limit=1)
+    assert len(top1) == 1 and top1[0]["event_type"] == "pr_opened"
