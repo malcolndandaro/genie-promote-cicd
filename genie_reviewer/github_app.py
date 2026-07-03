@@ -20,7 +20,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import Callable
+from typing import Callable, Optional
 
 _API = "https://api.github.com"
 Transport = Callable[[str, str, dict, dict | None], "tuple[int, dict | None]"]
@@ -343,6 +343,52 @@ class GitHubApp:
             if a.get("state") == "approved":
                 return (a.get("user") or {}).get("login")
         return None
+
+    # --- F5 Phase 1: READ-ONLY gate introspection (drift detection) ---------
+    #
+    # These two accessors are the ENTIRE GitHub-write-adjacent surface `github_drift.py` uses. Both
+    # are GET-only — no `administration:write` scope is requested or required. Phase 2 (writing
+    # these gates) is explicitly out of scope (see genie_reviewer/github_drift.py's docstring).
+
+    def get_environment_reviewers(self, environment: str) -> list[str]:
+        """The GitHub logins configured as required reviewers on a deployment Environment (e.g.
+        'prod') — what actually gates `deploy.yml`. Requires `administration:read` (or repo admin)
+        on the classic Environments API; a 404 means the Environment doesn't exist (returns an
+        empty list, not an error — "no environment" and "no reviewers" both mean nobody is
+        specifically gated by name). Any OTHER failure (403 missing scope, 5xx, etc.) raises
+        `GitHubError` so the caller (`github_drift.check_drift`) can surface it as `unknown_*`
+        rather than silently reporting an empty (and therefore falsely "no drift") reviewer list."""
+        status, body = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/environments/{environment}')}",
+            self._headers(self._token()), None)
+        if status == 404:
+            return []
+        if status != 200 or not body:
+            raise GitHubError(status, "get environment", body)
+        logins: list[str] = []
+        for rule in (body.get("protection_rules") or []):
+            if rule.get("type") != "required_reviewers":
+                continue
+            for reviewer in (rule.get("reviewers") or []):
+                r = reviewer.get("reviewer") or {}
+                login = r.get("login")
+                if login:
+                    logins.append(login)
+        return logins
+
+    def get_branch_protection(self, branch: str) -> Optional[dict]:
+        """The branch protection settings for `branch` (e.g. 'main'), or None if the branch has NO
+        protection at all (a 404 from this endpoint — a legitimate, common state, not an error).
+        Any OTHER failure raises `GitHubError` (surfaced as `unknown_branch_protection` by the
+        caller) so an unreachable/unscoped read is never mistaken for "no protection configured"."""
+        status, body = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/branches/{branch}/protection')}",
+            self._headers(self._token()), None)
+        if status == 404:
+            return None
+        if status != 200 or not body:
+            raise GitHubError(status, "get branch protection", body)
+        return body
 
     # --- comment (one canonical, updated in place) --------------------------
     def upsert_comment(self, number: int, marker: str, body: str) -> dict:

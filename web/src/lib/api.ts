@@ -14,6 +14,9 @@ import type {
   InventorySpace,
   OrphanedPromotion,
   AdminAuditRow,
+  RoleName,
+  RolesList,
+  DriftReport,
 } from './types';
 import { spaceToResource } from './resources';
 
@@ -297,4 +300,41 @@ export async function getAdminAccessRequests(): Promise<AccessRequest[]> {
 export async function getAdminAudit(limit = 200): Promise<AdminAuditRow[]> {
   const data = await getJSON<{ audit: AdminAuditRow[] }>(`/api/admin/audit?limit=${limit}`);
   return data.audit ?? [];
+}
+
+// --- F5 Phase 1: configurable roles + READ-ONLY GitHub drift detection (server-gated to admins) --
+
+/** Every configured role assignment + which env vars would apply as the bootstrap fallback. */
+export function getRoles(): Promise<RolesList> {
+  return getJSON('/api/admin/roles');
+}
+
+/** Assign (or update) a role for an email — idempotent upsert; takes effect with NO redeploy. */
+export function assignRole(opts: {
+  email: string;
+  role: RoleName;
+  githubUsername?: string;
+}): Promise<{ role: RolesList['roles'][number] }> {
+  return postJSON('/api/admin/roles', {
+    email: opts.email,
+    role: opts.role,
+    github_username: opts.githubUsername ?? null,
+  });
+}
+
+/** Remove a role assignment. Idempotent — a no-op if it didn't exist. */
+export function revokeRole(email: string, role: RoleName): Promise<{ ok: boolean }> {
+  return postJSON('/api/admin/roles/revoke', { email, role });
+}
+
+/** US-34: drift between the app's role config and GitHub's enforced gates (prod Environment
+ * required-reviewers + branch protection), for the Settings screen. READ-ONLY (Phase 1). */
+export function getAdminDrift(): Promise<DriftReport> {
+  return getJSON('/api/admin/drift');
+}
+
+/** US-35: the SAME drift check, contextual to one promotion — surfaced on the review screen for
+ * the assigned Steward (visible to the promotion's owner or an admin, same as the promotion itself). */
+export function getPromotionDrift(promotionId: string): Promise<DriftReport> {
+  return getJSON(`/api/promotions/${promotionId}/drift`);
 }

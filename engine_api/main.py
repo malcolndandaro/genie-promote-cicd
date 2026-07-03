@@ -56,7 +56,9 @@ import admin_inventory  # noqa: E402  (F4 — live-prod-inventory join, pure/off
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
+import roles_store  # noqa: E402  (F5 — configurable roles store, store-over-env precedence)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
+import github_drift  # noqa: E402  (F5 — READ-ONLY GitHub gate drift detection)
 
 logger = logging.getLogger("engine_api")
 
@@ -76,6 +78,13 @@ async def _lifespan(app: FastAPI):
     app.state.access_store = access_request_store.build_store_from_env()
     logger.info("Access-request store: %s",
                 "initialized (migrations applied)" if app.state.access_store else "absent (no PGHOST — local/test)")
+    # F5: the roles store — Steward/Admin/approver + email<->GitHub-username mapping, same
+    # hard-dependency contract. `whoami`/`_is_admin` read it with the env vars as a bootstrap
+    # fallback (see `_admin_emails`/`_steward_emails` below) so a fresh install with an empty store
+    # keeps working exactly as before F5.
+    app.state.roles_store = roles_store.build_store_from_env()
+    logger.info("Roles store: %s",
+                "initialized (migrations applied)" if app.state.roles_store else "absent (no PGHOST — local/test)")
     reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
@@ -90,6 +99,8 @@ async def _lifespan(app: FastAPI):
             app.state.store.close()  # release the connection pool on graceful shutdown
         if app.state.access_store is not None:
             app.state.access_store.close()
+        if app.state.roles_store is not None:
+            app.state.roles_store.close()
 
 
 def _start_scheduled_reconciler(store):
@@ -134,6 +145,7 @@ app = FastAPI(title="genie-promote app", lifespan=_lifespan)
 # Default so requests before/without lifespan (e.g. module-level TestClient) see a defined attribute.
 app.state.store = None
 app.state.access_store = None  # F3
+app.state.roles_store = None  # F5
 api = APIRouter()
 
 
@@ -208,12 +220,44 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-def _admin_emails() -> set[str]:
-    """The config-driven set of Steward/Admin emails who may see ALL promotions (LB5) — lowercased.
-    Sourced from `APP_ADMINS` + `APP_STEWARDS` (comma-separated) + the single `APP_STEWARD` (SoD).
-    NO hardcoded identities (ADR-0004): a new customer sets these env vars + redeploys."""
-    raw = ",".join(os.environ.get(k, "") for k in ("APP_ADMINS", "APP_STEWARDS", "APP_STEWARD"))
-    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+def _env_emails(*keys: str) -> frozenset[str]:
+    """The comma-separated emails in the given env vars, lowercased — the F5 BOOTSTRAP FALLBACK
+    (only consulted when the roles store is empty; see `_roles_store` callers below)."""
+    raw = ",".join(os.environ.get(k, "") for k in keys)
+    return frozenset(e.strip().lower() for e in raw.split(",") if e.strip())
+
+
+def _roles_store():
+    return getattr(app.state, "roles_store", None)
+
+
+def _steward_emails() -> frozenset[str]:
+    """The effective set of Steward emails (F5): the roles store is authoritative once it holds ANY
+    role rows; `APP_STEWARDS` + `APP_STEWARD` (comma-separated) is the bootstrap fallback for a
+    fresh/unconfigured store. NO hardcoded identities (ADR-0004)."""
+    store = _roles_store()
+    env_fallback = _env_emails("APP_STEWARDS", "APP_STEWARD")
+    if store is None:
+        return env_fallback
+    return store.effective_emails("steward", env_fallback=env_fallback)
+
+
+def _admin_emails() -> frozenset[str]:
+    """The effective set of Steward/Admin emails who may see ALL promotions (LB5) + reach admin-
+    gated endpoints — lowercased. F5: the roles store is authoritative (unioning its `admin` +
+    `steward` role rows) once it holds ANY role rows at all; `APP_ADMINS` + `APP_STEWARDS` +
+    `APP_STEWARD` (comma-separated) is the BOOTSTRAP FALLBACK for a fresh/unconfigured store — so
+    an existing env-only deployment keeps working unchanged, and changing an approver in-app takes
+    effect with NO redeploy once at least one role has been configured. Fails closed either way: an
+    empty store AND empty/unset env vars yields an EMPTY set (`roles_store.effective_emails`'s own
+    contract), never "everyone" and never a silently-open gate. NO hardcoded identities (ADR-0004)."""
+    store = _roles_store()
+    env_fallback = _env_emails("APP_ADMINS", "APP_STEWARDS", "APP_STEWARD")
+    if store is None:
+        return env_fallback
+    admins = store.effective_emails("admin", env_fallback=env_fallback)
+    stewards = store.effective_emails("steward", env_fallback=env_fallback)
+    return admins | stewards
 
 
 def _verified_email(x_forwarded_access_token: str | None, authorization: str | None) -> str | None:
@@ -246,6 +290,19 @@ def _is_admin(email: str | None) -> bool:
     return bool(email) and email.strip().lower() in _admin_emails()
 
 
+def _steward_display() -> str | None:
+    """A single Steward email for `whoami`'s legacy `steward` field (SV4's SoD UI just needs ONE
+    "the distinct approver" identity to compare the viewer against). F5: prefers the roles store's
+    effective Steward set (deterministically the lexicographically-first email, so the value is
+    stable across calls rather than an arbitrary set-iteration order); falls back to `APP_STEWARD`
+    unchanged when the store is empty/absent, so existing single-Steward deployments see the exact
+    same value as before F5."""
+    stewards = sorted(_steward_emails())
+    if stewards:
+        return stewards[0]
+    return os.environ.get("APP_STEWARD") or None
+
+
 def _repo_url() -> str:
     """The source/CI repo the header links to. Config-driven (`APP_REPO_URL`) with the accelerator's
     own repo as the default — NO customer binding (ADR-0004): a fork sets its own URL + redeploys."""
@@ -266,11 +323,12 @@ def whoami(
     previous broken control, which authorized on this same header). `is_admin` is computed from the
     request's OWN platform-VERIFIED identity (`_verified_email`, resolved from the OBO token) against
     the config-driven admin/steward set — a caller with no valid OBO token verifies to no identity
-    and is never admin, regardless of what `x-forwarded-email` claims. `steward` is the `APP_STEWARD`
-    config (the distinct approver for the separation-of-duties model in SV4).
+    and is never admin, regardless of what `x-forwarded-email` claims. `steward` (F5: now
+    store-backed, `APP_STEWARD`/`APP_STEWARDS` as the bootstrap fallback — see `_steward_display`)
+    is the distinct approver for the separation-of-duties model (SV4).
     """
     verified = _verified_email(x_forwarded_access_token, authorization)
-    return {"email": x_forwarded_email, "steward": os.environ.get("APP_STEWARD") or None,
+    return {"email": x_forwarded_email, "steward": _steward_display(),
             "is_admin": _is_admin(verified), "repo_url": _repo_url()}
 
 
@@ -911,6 +969,150 @@ def admin_audit(
         return {"audit": rows}
 
     return _engine_call("admin_audit", _run)
+
+
+# --- F5 Phase 1: configurable roles (Lakebase-backed) + READ-ONLY GitHub drift detection ---------
+#
+# Roles CRUD is admin-gated the SAME way as F4 (`_require_admin`, on the VERIFIED identity). Drift
+# is READ-ONLY (Phase 1 only — see genie_reviewer/github_drift.py's docstring for why Phase 2
+# write-through is explicitly out of scope) and is surfaced from TWO places: a Settings screen
+# (`GET /admin/roles`, `GET /admin/drift`) and, contextually, the promotion-review screen for the
+# ASSIGNED Steward (`GET /promotions/{id}/drift`) — never only a passive panel nobody opens.
+
+
+def _require_roles_store():
+    store = _roles_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+def _role_summary(r) -> dict:
+    return {"id": r.id, "email": r.email, "role": r.role, "github_username": r.github_username,
+            "created_at": r.created_at, "updated_at": r.updated_at}
+
+
+@api.get("/admin/roles")
+def list_roles(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-32/US-33: every configured role assignment (Steward/Admin/approver) + its GitHub-username
+    mapping. Admin-gated (A2-hardened verified identity, same as every other F4/F5 admin endpoint)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_roles_store()
+    return {"roles": [_role_summary(r) for r in store.list_all()],
+            "bootstrap_env": {  # so the UI can show WHY a role is in effect when the store is empty
+                "admins": sorted(_env_emails("APP_ADMINS")),
+                "stewards": sorted(_env_emails("APP_STEWARDS", "APP_STEWARD")),
+            }}
+
+
+class RoleAssignIn(BaseModel):
+    email: str
+    role: str  # "steward" | "admin" | "approver"
+    github_username: str | None = None
+
+
+@api.post("/admin/roles")
+def assign_role(
+    body: RoleAssignIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-32: set who is Steward/Admin/approver, in-app, with NO redeploy. Idempotent upsert keyed
+    on (email, role) — re-assigning the same role just refreshes the GitHub-username mapping."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_roles_store()
+    try:
+        assignment = store.assign(email=body.email, role=body.role,
+                                  github_username=body.github_username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"role": _role_summary(assignment)}
+
+
+class RoleRevokeIn(BaseModel):
+    email: str
+    role: str
+
+
+@api.post("/admin/roles/revoke")
+def revoke_role(
+    body: RoleRevokeIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Remove a role assignment. Idempotent (a no-op if it didn't exist) — never a 404 for
+    "already gone", mirroring the DELETE-semantics convention used elsewhere in this app."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_roles_store()
+    try:
+        store.revoke(email=body.email, role=body.role)
+    except roles_store.LastAdminError as e:
+        # Refuse a revoke that would lock everyone out of the admin console (incl. this CRUD).
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True}
+
+
+def _run_drift_check() -> dict:
+    """The actual GitHub read + comparison (US-34), shared by the Settings panel and the
+    promotion-review contextual surface. Never raises: `github_drift.check_drift` degrades any
+    GitHub read failure to an `unknown_*` finding internally; the one thing THIS wrapper guards
+    against is the bot client itself failing to CONSTRUCT (e.g. the secret scope is unreachable),
+    which is a distinct, even-earlier failure than a bad API response — surfaced the same way
+    (an `unknown_environment` + `unknown_branch_protection` pair) so the caller never has to
+    special-case "the reader couldn't even be built" vs "a GitHub call failed"."""
+    store = _roles_store()
+    stewards = sorted(_steward_emails())
+    admins = sorted(_admin_emails())
+
+    def github_username_for(email: str) -> str | None:
+        return store.github_username_for(email) if store is not None else None
+
+    try:
+        reader = app_logic.github_app_factory()
+    except Exception as e:  # noqa: BLE001 — the bot client itself is unreachable/misconfigured
+        logger.warning("F5 drift check: could not build the GitHub bot client (%s)", e)
+        unreachable = github_drift.DriftFinding(
+            kind="unknown_environment", severity="unknown",
+            message="Não foi possível conectar ao GitHub (bot) para verificar os gates de aprovação.",
+            detail={"error": str(e)})
+        return github_drift.summarize([unreachable])
+
+    findings = github_drift.check_drift(
+        stewards=stewards, admins=admins, github_username_for=github_username_for, reader=reader)
+    return github_drift.summarize(findings)
+
+
+@api.get("/admin/drift")
+def admin_drift(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-34: drift between the app's role config and GitHub's enforced gates (prod Environment
+    required-reviewers + base branch protection), for the Settings screen. Admin-gated + READ-ONLY
+    (Phase 1 — see github_drift.py)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    return _engine_call("admin_drift", _run_drift_check)
+
+
+@api.get("/promotions/{promotion_id}/drift")
+def promotion_drift(
+    promotion_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-35: the SAME drift check, surfaced CONTEXTUALLY on the promotion-review screen for the
+    assigned Steward — not only a passive Settings panel nobody opens. Visible to whoever may see
+    the promotion at all (owner or admin/Steward, the existing A2 visibility boundary) — the
+    Steward specifically is who acts on it, but a Requester seeing "your Steward's GitHub gate
+    looks misconfigured" is still useful, non-sensitive information (no secrets, just role-mapping
+    divergence), so this reuses the existing visibility check rather than a stricter one."""
+    store = _require_store()
+    verified = _verified_email(x_forwarded_access_token, authorization)
+    _visible_promotion_or_403(store, promotion_id, verified)
+    return _engine_call("promotion_drift", _run_drift_check)
 
 
 # Mount the API twice: at root (legacy engine-API contract) and under /api (what the SPA calls).
