@@ -95,6 +95,19 @@ def render_file(in_path: str, out_path: str, from_env: str, to_env: str, domain:
     return out
 
 
+def apply_mapping_file(in_path: str, mapping_path: str, from_env: str, to_env: str, domain: str) -> str:
+    """G7 (promotion's table de-para): apply `mapping_path`'s JSON (source-env ref -> target ref) to
+    an ALREADY `render_file`-ed file, IN PLACE. Thin CLI wrapper over `apply_table_mapping` — the
+    caller (render.sh) runs this AFTER `render` and BEFORE `check`, so the strict allowlist still
+    catches a mapped target outside `<to_env>_<domain>` (ENV-01), same as an un-mapped leak."""
+    mapping = json.load(open(mapping_path, encoding="utf-8"))
+    raw = open(in_path, encoding="utf-8").read()
+    out = apply_table_mapping(raw, mapping, from_env=from_env, to_env=to_env, domain=domain)
+    json.loads(out)  # the mapping must keep the JSON valid
+    open(in_path, "w", encoding="utf-8").write(out)
+    return out
+
+
 def main(argv: "list[str] | None" = None) -> int:
     p = argparse.ArgumentParser(description="Genie serialized_space pre-render + allowlist")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -105,6 +118,14 @@ def main(argv: "list[str] | None" = None) -> int:
     r.add_argument("--to", dest="to_env", required=True)
     r.add_argument("--domain", required=True)
     r.add_argument("--out", required=True)
+
+    m = sub.add_parser("apply-mapping",
+                       help="apply a table de-para (mapping.json) to an already-rendered file, in place")
+    m.add_argument("infile")
+    m.add_argument("--mapping", required=True, help="path to a mapping.json (source-env ref -> target ref)")
+    m.add_argument("--from", dest="from_env", required=True)
+    m.add_argument("--to", dest="to_env", required=True)
+    m.add_argument("--domain", required=True)
 
     c = sub.add_parser("check", help="fail if any catalog ref isn't <to>_<domain>")
     c.add_argument("infile")
@@ -119,6 +140,11 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"ERROR: post-render leaks remain: {leaks}", file=sys.stderr)
             return 2
         print(f"rendered {a.infile} -> {a.out} ({a.from_env}_{a.domain} -> {a.to_env}_{a.domain})")
+        return 0
+    if a.cmd == "apply-mapping":
+        mapping = json.load(open(a.mapping, encoding="utf-8"))
+        apply_mapping_file(a.infile, a.mapping, a.from_env, a.to_env, a.domain)
+        print(f"applied mapping ({len(mapping)} override(s)) from {a.mapping} to {a.infile}")
         return 0
     # check
     raw = open(a.infile, encoding="utf-8").read()

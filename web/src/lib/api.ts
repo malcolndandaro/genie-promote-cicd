@@ -116,19 +116,28 @@ export interface PromoteResult {
  * `accessSpec` (F2, optional) is the Requester's declared access — DECLARATION only (this call);
  * the server writes it to a git sidecar the governed CI pipeline enforces, it never mutates a live
  * grant/permission from this request.
+ *
+ * `prodTitle` (G7, optional) overrides `resource.title` as the prod Space name declaration — the
+ * confirm step pre-fills it WITH the dev title but lets the caller edit it before requesting;
+ * omitted/blank falls back to the dev title exactly as before G7. `tableMapping` (G7, optional) is
+ * the Requester's declared table de-para (source dev ref -> desired prod ref overrides) — ALSO
+ * only a declaration; CI applies it, never this request.
  */
 export async function postPromote(
   resource: PromotableResource,
-  accessSpec?: AccessSpec
+  accessSpec?: AccessSpec,
+  prodTitle?: string,
+  tableMapping?: Record<string, string>
 ): Promise<PromoteResult> {
   const r = await fetch('/api/promote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
       space_id: resource.id,
-      resource_title: resource.title,
+      resource_title: prodTitle?.trim() || resource.title,
       resource_kind: resource.kind,
       ...(accessSpec ? { access_spec: accessSpec } : {}),
+      ...(tableMapping && Object.keys(tableMapping).length > 0 ? { table_mapping: tableMapping } : {}),
     }),
   });
   if (!r.ok) throw await toError(r);
@@ -150,6 +159,10 @@ export interface PromotionSummary {
   terminal: boolean;
   created_at: string;
   updated_at: string;
+  /** G7: the declared table de-para (source dev ref -> prod ref overrides) persisted WITH the
+   * Promotion, independent of the `.mapping.json` sidecar's own PR/branch lifetime — so reopening
+   * shows exactly what was declared. Empty/null means no overrides (plain dev_->prod_ defaults). */
+  table_mapping: Record<string, string> | null;
 }
 
 /** One append-only audit event (LB4). `actor_github_login` is the AUTHORITATIVE governance identity;
@@ -182,6 +195,25 @@ export async function getPromotions(scope: 'mine' | 'all' = 'mine'): Promise<Pro
 /** A single promotion + its stored review + PR ref + audit — renders WITHOUT re-running the reviewer. */
 export function getPromotionDetail(id: string): Promise<PromotionDetail> {
   return getJSON<PromotionDetail>(`/api/promotions/${id}`);
+}
+
+/** G7: one row of the promotion-preview table de-para. */
+export interface PromotePreviewTable {
+  /** The DEV ref this row is FOR — the key a `tableMapping` override to `postPromote` must use. */
+  source: string;
+  /** The plain dev_->prod_ target the CI render would use if this row is left unchanged. */
+  default_target: string;
+}
+
+export interface PromotePreview {
+  /** The dev Space's title — the default the editable prod-name field is pre-filled with. */
+  title: string | null;
+  tables: PromotePreviewTable[];
+}
+
+/** G7: preview a promotion's table de-para BEFORE requesting it — read-only, persists nothing. */
+export function getPromotePreview(spaceId: string): Promise<PromotePreview> {
+  return getJSON(`/api/promote/preview?space_id=${encodeURIComponent(spaceId)}`);
 }
 
 /** The append-only audit trail for a promotion (LB4) — refreshed as the status poll reconciles. */

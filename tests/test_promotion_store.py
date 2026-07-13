@@ -219,6 +219,44 @@ def test_access_spec_survives_a_re_review_snapshot_without_being_overwritten(sto
     assert store.get_promotion(p.id).access_spec == _ACCESS_SPEC
 
 
+# --- G7: the declared table de-para persists WITH the Promotion (mirrors access_spec above) -----
+
+_TABLE_MAPPING = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
+
+
+def test_promotion_persists_and_round_trips_the_declared_table_mapping(store):
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        table_mapping=_TABLE_MAPPING)
+    assert p.table_mapping == _TABLE_MAPPING
+    got = store.get_promotion(p.id)
+    assert got.table_mapping == _TABLE_MAPPING  # survives the round trip through the backend
+
+
+def test_promotion_table_mapping_defaults_to_none_when_not_declared(store):
+    """A promotion with no declared table de-para (the plain dev_->prod_ default) persists cleanly
+    with None — G7 is additive, not a breaking schema change for existing promotions."""
+    p = _mk(store)
+    assert p.table_mapping is None
+    assert store.get_promotion(p.id).table_mapping is None
+
+
+def test_table_mapping_survives_a_re_review_snapshot_without_being_overwritten(store):
+    """Mirrors test_access_spec_survives_a_re_review_snapshot_without_being_overwritten: a re-review
+    snapshot must not clobber the Promotion's already-declared table de-para."""
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        table_mapping=_TABLE_MAPPING)
+    store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="blocked",
+                          findings=[], eval=None, timeline=[])
+    store.touch(p.id)
+    assert store.get_promotion(p.id).table_mapping == _TABLE_MAPPING
+
+
 def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(store):
     # F4 review should-fix: the cross-Promotion audit is ONE joined query, newest-first, bounded.
     p1 = _mk(store, pr_number=201, resource_id="space-A")

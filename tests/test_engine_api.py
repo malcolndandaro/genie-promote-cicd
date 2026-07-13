@@ -613,6 +613,43 @@ def test_rehydrate_preview_access_denied_maps_to_403(monkeypatch):
     assert r.status_code == 403
 
 
+# --- GET /promote/preview (G7): read-only de-para preview before the caller requests a promotion ---
+
+
+def test_promote_preview_requires_a_token():
+    r = client.get("/promote/preview", params={"space_id": "x"})
+    assert r.status_code == 401
+
+
+def test_promote_preview_returns_title_and_tables(monkeypatch):
+    captured = {}
+
+    def fake_preview(space_id, *, user_token):
+        captured.update(space_id=space_id, user_token=user_token)
+        return {"title": "Recebíveis", "tables": [
+            {"source": "dev_recebiveis.diamond.fato_recebiveis",
+             "default_target": "prod_recebiveis.diamond.fato_recebiveis"},
+        ]}
+
+    monkeypatch.setattr(engine_api.app_logic, "preview_promotion", fake_preview)
+    r = client.get("/promote/preview", params={"space_id": "dev-1"},
+                   headers={"x-forwarded-access-token": "tok-p"})
+    assert r.status_code == 200
+    assert captured == {"space_id": "dev-1", "user_token": "tok-p"}  # the token, never a header identity
+    assert r.json()["title"] == "Recebíveis"
+    assert r.json()["tables"][0]["default_target"] == "prod_recebiveis.diamond.fato_recebiveis"
+
+
+def test_promote_preview_access_denied_maps_to_403(monkeypatch):
+    def boom(space_id, *, user_token):
+        raise authz.AccessDenied("mallory@x may not access space dev-1")
+
+    monkeypatch.setattr(engine_api.app_logic, "preview_promotion", boom)
+    r = client.get("/promote/preview", params={"space_id": "dev-1"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 403
+
+
 # --- /api/* mount (SV1): the SPA calls the API under /api; same handlers as the legacy paths ---
 
 
@@ -825,6 +862,51 @@ def test_promote_without_access_spec_persists_none(monkeypatch, store):
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     pid = r.json()["promotion_id"]
     assert store.get_promotion(pid).access_spec is None
+
+
+# --- G7: the declared prod name + table de-para thread into request_promotion + persist ----------
+
+_TABLE_MAPPING_WIRE = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
+
+
+def test_promote_threads_prod_title_and_table_mapping_to_the_engine(monkeypatch, store):
+    """G7: `resource_title` (the declared prod name) and `table_mapping` both reach
+    app_logic.request_promotion — the app-direct DECLARATION step; CI is what actually applies the
+    mapping, never this endpoint."""
+    captured = {}
+
+    def fake_request_promotion(space_id, *a, resource_title=None, table_mapping=None, **k):
+        captured.update(resource_title=resource_title, table_mapping=table_mapping)
+        return _fake_promote()(space_id, *a, **k)
+
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake_request_promotion)
+    r = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis PROD",
+                                          "table_mapping": _TABLE_MAPPING_WIRE},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    assert r.status_code == 200
+    assert captured == {"resource_title": "Recebíveis PROD", "table_mapping": _TABLE_MAPPING_WIRE}
+
+
+def test_promote_persists_the_declared_table_mapping(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
+    r = client.post("/api/promote", json={"space_id": "s1", "table_mapping": _TABLE_MAPPING_WIRE},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    pid = r.json()["promotion_id"]
+    p = store.get_promotion(pid)
+    assert p.table_mapping == _TABLE_MAPPING_WIRE
+
+    # the Steward-facing recovery payload (get_promotion) echoes the SAME declaration
+    detail = client.get(f"/api/promotions/{pid}",
+                        headers={"x-forwarded-access-token": "tok"}).json()
+    assert detail["promotion"]["table_mapping"] == _TABLE_MAPPING_WIRE
+
+
+def test_promote_without_table_mapping_persists_none(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
+    r = client.post("/api/promote", json={"space_id": "s1"},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    pid = r.json()["promotion_id"]
+    assert store.get_promotion(pid).table_mapping is None
 
 
 def test_promote_rerequest_adds_snapshot_and_re_reviewed_to_same_promotion(monkeypatch, store):

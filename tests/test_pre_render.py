@@ -274,3 +274,75 @@ def test_find_violations_extra_allowed_catalogs_does_not_exempt_the_source_env()
     blob = json.dumps({"a": "prod_recebiveis.x.y"})
     violations = pre_render.find_violations(blob, "dev", "recebiveis", extra_allowed_catalogs={"dev_sandbox"})
     assert violations == ["prod_recebiveis"]
+
+
+# --- G7: the `apply-mapping` CLI (render.sh's promotion-time table de-para) --------------------
+#
+# Unlike rehydrate's G6 (which widens ITS OWN allowlist for the caller's chosen catalogs), the
+# promotion direction never widens — render.sh runs `apply-mapping` then `check` with the PLAIN
+# <to_env>_<domain> allowlist, so a mapped target outside it fails exactly like an un-mapped leak.
+# That `check` step is unchanged/already tested above; these tests cover only the new CLI plumbing.
+
+DEV_WITH_TWO_TABLES = json.dumps(
+    {
+        "data_sources": {
+            "tables": [
+                {"identifier": "dev_recebiveis.diamond.fato_recebiveis"},
+                {"identifier": "dev_recebiveis.diamond.dim_cedente"},
+            ]
+        },
+    },
+    ensure_ascii=False,
+)
+
+
+def test_apply_mapping_file_rewrites_the_rendered_file_in_place(tmp_path):
+    rendered = tmp_path / "out.json"
+    rendered.write_text(pre_render.rebind(DEV_WITH_TWO_TABLES, "dev", "prod", "recebiveis"), encoding="utf-8")
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        json.dumps({"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}),
+        encoding="utf-8",
+    )
+
+    pre_render.apply_mapping_file(str(rendered), str(mapping_path), "dev", "prod", "recebiveis")
+
+    body = json.loads(rendered.read_text(encoding="utf-8"))
+    idents = [t["identifier"] for t in body["data_sources"]["tables"]]
+    assert idents == ["prod_recebiveis.diamond.fato_recebiveis", "prod_recebiveis.diamond.dim_cedente_v2"]
+
+
+def test_apply_mapping_file_to_a_foreign_catalog_still_fails_the_strict_check(tmp_path):
+    # THE G7 acceptance criterion: promotion's allowlist stays UNWIDENED — a mapping override that
+    # escapes prod_<domain> must still be caught by `check`, never silently let through.
+    rendered = tmp_path / "out.json"
+    rendered.write_text(pre_render.rebind(DEV_WITH_TWO_TABLES, "dev", "prod", "recebiveis"), encoding="utf-8")
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        json.dumps({"dev_recebiveis.diamond.dim_cedente": "prod_outrodominio.diamond.dim_cedente"}),
+        encoding="utf-8",
+    )
+
+    pre_render.apply_mapping_file(str(rendered), str(mapping_path), "dev", "prod", "recebiveis")
+
+    leaks = pre_render.find_violations(rendered.read_text(encoding="utf-8"), "prod", "recebiveis")
+    assert leaks == ["prod_outrodominio"]
+
+
+def test_cli_apply_mapping_subcommand_rewrites_the_file(tmp_path, capsys):
+    rendered = tmp_path / "out.json"
+    rendered.write_text(pre_render.rebind(DEV_WITH_TWO_TABLES, "dev", "prod", "recebiveis"), encoding="utf-8")
+    mapping_path = tmp_path / "mapping.json"
+    mapping_path.write_text(
+        json.dumps({"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.renamed"}),
+        encoding="utf-8",
+    )
+
+    rc = pre_render.main([
+        "apply-mapping", str(rendered), "--mapping", str(mapping_path),
+        "--from", "dev", "--to", "prod", "--domain", "recebiveis",
+    ])
+
+    assert rc == 0
+    assert "prod_recebiveis.diamond.renamed" in rendered.read_text(encoding="utf-8")
+    assert "1 override(s)" in capsys.readouterr().out

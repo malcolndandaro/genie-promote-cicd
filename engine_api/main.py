@@ -496,6 +496,12 @@ class PromoteRequest(BaseModel):
     # request — persisted with the Promotion + committed to the PR as a sidecar (declaration is
     # app-direct; enforcement is governed, see app_logic.request_promotion).
     access_spec: AccessSpecIn | None = None
+    # G7: the Requester's declared table de-para (source DEV ref -> desired prod ref overrides),
+    # keyed exactly like `/promote/preview`'s `source` field — only entries actually changed away
+    # from the preview's `default_target` need be sent (an identity mapping is a harmless no-op).
+    # None/empty means "use the plain dev_->prod_ defaults", unchanged from before G7. ALSO only a
+    # declaration (committed to a git sidecar); CI applies it, never this endpoint.
+    table_mapping: dict[str, str] | None = None
 
 
 def _persist_promotion(store, result: dict, body: PromoteRequest, requester_email: str | None) -> str:
@@ -518,7 +524,11 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
                 # F2: persist the declared AccessSpec WITH the Promotion (echoed back by
                 # request_promotion's review payload) so it survives independently of the PR/branch
                 # and renders in the recovery/history view without re-parsing the sidecar from git.
-                access_spec=review.get("access_spec") or None)
+                access_spec=review.get("access_spec") or None,
+                # G7: persist the declared table de-para the SAME way — straight from the request
+                # body (unlike access_spec, `table_mapping` isn't part of the reviewer's own
+                # payload; it never rides the review, only the promotion request).
+                table_mapping=body.table_mapping or None)
             promotion_id, event = promotion.id, "requested"
         except DuplicatePRNumber:
             # Concurrent request created it between our find_by_pr and create (TOCTOU). Recover by
@@ -567,12 +577,36 @@ def promote(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
-            resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides),
+            resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides,
+            table_mapping=body.table_mapping),
     )
     store = getattr(app.state, "store", None)
     if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips
         result["promotion_id"] = _persist_promotion(store, result, body, x_forwarded_email)
     return result
+
+
+@api.get("/promote/preview")
+def promote_preview(
+    space_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G7: a READ-ONLY preview of a promotion's table de-para, called BEFORE `/promote` — the DEV
+    Space's title + every 3-part table ref it references, each with its plain dev_->prod_ default
+    target, so the confirm step can render an editable prod Space name + a table de-para for the
+    caller to review/override BEFORE requesting the promotion. Persists nothing. Gated the SAME way
+    as the review's own export — the dev-sp transport + `authz.assert_can_access` guard (the ONE
+    blast site a preview touches: dev). Distinct from `/rehydrate/preview`, which reads PROD as the
+    app SP (the opposite direction) — never reused here."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        return app_logic.preview_promotion(space_id, user_token=token)
+
+    return _engine_call("promote_preview", _run)
 
 
 @api.get("/promote/{number}/status")
@@ -915,7 +949,10 @@ def _promotion_summary(p) -> dict:
             "created_at": p.created_at, "updated_at": p.updated_at,
             # F2: the declared AccessSpec persisted with the Promotion (independent of the review
             # snapshot, and of the sidecar's own PR/branch lifetime) — the Steward reviews this.
-            "access_spec": p.access_spec}
+            "access_spec": p.access_spec,
+            # G7: the declared table de-para, persisted the same way — reopening a promotion shows
+            # exactly what was declared, without re-parsing the `.mapping.json` sidecar from git.
+            "table_mapping": p.table_mapping}
 
 
 def _audit_event(e) -> dict:

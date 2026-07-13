@@ -132,6 +132,17 @@ export class Promotion {
    * is legal: no AccessSpec means nothing beyond the base consumer_group is being asked for. */
   pendingAccessSpec = $state<AccessSpec | undefined>(undefined);
 
+  /** G7: the editable prod Space name for the CURRENT flow — mirrors `pendingAccessSpec`, captured
+   * by `PromotionMappingForm` before requesting the promotion. Pre-filled with the dev title;
+   * undefined falls back to the resource's own title (unchanged from before G7). */
+  pendingProdTitle = $state<string | undefined>(undefined);
+
+  /** G7: the Requester's declared table de-para for the CURRENT flow (source dev ref -> desired
+   * prod ref overrides) — mirrors `pendingAccessSpec`. Only entries actually changed away from the
+   * `/promote/preview` default need be present; undeclared (undefined/empty) means "use the plain
+   * dev_->prod_ defaults", exactly as before G7. */
+  pendingTableMapping = $state<Record<string, string> | undefined>(undefined);
+
   /**
    * Request a promotion for the selected resource: review it (OBO export + app-SP reviewer) AND
    * open/update a real GitHub PR with the attributed review comment (bot). One action, one review.
@@ -146,7 +157,12 @@ export class Promotion {
     this.liveStatus = null;
     const resource = this.resource;
     try {
-      const res = await postPromote(resource, this.pendingAccessSpec);
+      const res = await postPromote(
+        resource,
+        this.pendingAccessSpec,
+        this.pendingProdTitle,
+        this.pendingTableMapping
+      );
       if (this.resource?.id !== id) return; // selection changed mid-flight — drop the stale result
       this.review = res.review;
       this.pr = res.pr;

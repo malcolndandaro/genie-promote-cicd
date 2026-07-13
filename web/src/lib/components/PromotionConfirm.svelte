@@ -2,12 +2,13 @@
   // G3: the confirmation step between "choose a space" and "request the promotion" — replaces the
   // old page-level "Declarar Acesso (opcional)" block. Renders ONLY once a space is selected and
   // BEFORE any review runs (promotion.resource set, phase still 'idle'), clearly bound to that space
-  // (title visible here). The Requester may optionally declare access (F2), then confirms — the
-  // AccessSpec rides `requestPromotion()` exactly as before (same payload/contract, only the capture
-  // moment moved).
+  // (title visible here). The Requester declares the prod Space name + table de-para (G7) and may
+  // optionally declare access (F2), then confirms — all of it rides `requestPromotion()`'s payload
+  // (pendingProdTitle/pendingTableMapping/pendingAccessSpec, same capture-before-confirm pattern).
   import Card from './Card.svelte';
   import Button from './Button.svelte';
   import AccessSpecForm from './AccessSpecForm.svelte';
+  import PromotionMappingForm from './PromotionMappingForm.svelte';
   import type { Promotion } from '../promotion.svelte';
 
   interface Props {
@@ -28,6 +29,7 @@
         <h3 class="confirm__title">{resource.title}</h3>
       </header>
 
+      <PromotionMappingForm {promotion} />
       <AccessSpecForm {promotion} />
 
       <div class="confirm__actions">
