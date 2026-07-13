@@ -11,9 +11,8 @@
   interface Props {
     promotion: Promotion;
     userEmail: string | null;
-    onGoToNew?: () => void;
   }
-  let { promotion, userEmail, onGoToNew }: Props = $props();
+  let { promotion, userEmail }: Props = $props();
 
   // The user's promotable resources (OBO). In $state so an error is retryable.
   let resourcesP = $state(getResources());
@@ -58,11 +57,8 @@
         <div class="empty">
           <p class="empty__title">Nenhum Genie Space encontrado</p>
           <p class="muted text-sm">
-            Crie um para começar a promover — a autoria rica acontece no Genie nativo.
+            Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção.
           </p>
-          {#if onGoToNew}
-            <Button variant="outline" onclick={onGoToNew}>＋ Novo Genie Space</Button>
-          {/if}
         </div>
       {:else}
         <div class="space-grid">

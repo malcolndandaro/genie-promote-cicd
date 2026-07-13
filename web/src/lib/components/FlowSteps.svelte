@@ -7,7 +7,7 @@
     {
       icon: 'grid',
       title: 'Autoria no dev',
-      desc: 'Você cria e ajusta o Genie Space no ambiente de desenvolvimento.',
+      desc: 'Você cria e ajusta o Genie Space no Genie nativo do workspace de dev.',
     },
     {
       icon: 'git-branch',

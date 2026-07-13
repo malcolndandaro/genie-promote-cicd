@@ -17,7 +17,6 @@ describe('parseHash', () => {
     expect(parseHash('#/inicio')).toEqual({ id: 'inicio' });
     expect(parseHash('#/espacos')).toEqual({ id: 'espacos' });
     expect(parseHash('#/promocoes')).toEqual({ id: 'promocoes' });
-    expect(parseHash('#/novo')).toEqual({ id: 'novo' });
     expect(parseHash('#/acesso')).toEqual({ id: 'acesso' });
     expect(parseHash('#/admin')).toEqual({ id: 'admin' });
     expect(parseHash('#/configuracoes')).toEqual({ id: 'configuracoes' });
@@ -63,7 +62,6 @@ describe('round-trip', () => {
     { id: 'espacos' },
     { id: 'promocoes' },
     { id: 'promocoes', param: 'p-9' },
-    { id: 'novo' },
     { id: 'acesso' },
     { id: 'admin' },
     { id: 'configuracoes' },

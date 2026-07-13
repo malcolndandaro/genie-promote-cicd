@@ -5,7 +5,6 @@
   import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
-  import NovoEspaco from './screens/NovoEspaco.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
   import Admin from './screens/Admin.svelte';
   import Settings from './screens/Settings.svelte';
@@ -52,7 +51,6 @@
     { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
     { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
     { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
-    { id: 'novo', label: '＋ Novo Genie Space', icon: 'plus-circle' },
     ...(who?.is_admin ? [{ id: 'admin' as const, label: 'Administração', icon: 'shield' as const }] : []),
     ...(who?.is_admin
       ? [{ id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const }]
@@ -64,7 +62,6 @@
     espacos: 'Meus espaços',
     promocoes: 'Minhas promoções',
     acesso: 'Acesso',
-    novo: 'Novo Genie Space',
     admin: 'Administração',
     configuracoes: 'Configurações',
   };
@@ -92,11 +89,10 @@
     <Home
       onPromote={promoteSpace}
       onOpenPromotion={openPromotion}
-      onGoToNew={() => router.navigate('novo')}
       promoting={promotion.phase === 'reviewing'}
     />
   {:else if router.route.id === 'espacos'}
-    <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => router.navigate('novo')} />
+    <MeusEspacos {promotion} userEmail={who?.email ?? null} />
   {:else if router.route.id === 'promocoes'}
     <MinhasPromocoes
       {who}
@@ -111,7 +107,5 @@
     <Admin />
   {:else if router.route.id === 'configuracoes'}
     <Settings />
-  {:else}
-    <NovoEspaco />
   {/if}
 </AppShell>

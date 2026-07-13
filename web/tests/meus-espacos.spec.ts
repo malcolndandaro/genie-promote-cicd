@@ -18,7 +18,6 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
 
   // App shell sidebar present.
   await expect(page.getByRole('link', { name: 'Meus espaços' })).toBeVisible();
-  await expect(page.getByRole('link', { name: /Novo Genie Space/ })).toBeVisible();
 
   // The space renders as a card: kind badge + title + a per-space "Solicitar promoção" button
   // (named with the space title so each card's action is distinct).
@@ -56,19 +55,12 @@ test('while one space is promoting, the other space cards are disabled', async (
   release();
 });
 
-test('navigates to the "Novo Genie Space" screen and shows the placeholder', async ({ page }) => {
-  await page.route('**/api/spaces', oneSpace);
-  await page.goto('/#/espacos');
-  await page.getByRole('link', { name: /Novo Genie Space/ }).click();
-  await expect(page.getByText('Em breve — assistente de criação', { exact: false })).toBeVisible();
-});
-
-test('shows the empty state with a next action when there are no spaces', async ({ page }) => {
+test('shows the empty state pointing to the dev workspace when there are no spaces', async ({ page }) => {
   await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [] } }));
   await page.goto('/#/espacos');
 
   await expect(page.getByText('Nenhum Genie Space encontrado')).toBeVisible();
-  await expect(page.getByRole('button', { name: /Novo Genie Space/ })).toBeVisible();
+  await expect(page.getByText('Genie nativo do workspace de dev', { exact: false })).toBeVisible();
 });
 
 test('shows an error state with retry when /api/spaces fails', async ({ page }) => {

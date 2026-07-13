@@ -16,7 +16,7 @@ test.beforeEach(async ({ page }) => {
 test('lands on the default route with the sidebar nav and an active item', async ({ page }) => {
   await page.goto('/');
   // The four primary destinations are present as nav links.
-  for (const label of ['Início', 'Meus espaços', 'Minhas promoções', /Novo Genie Space/]) {
+  for (const label of ['Início', 'Meus espaços', 'Minhas promoções', 'Acesso']) {
     await expect(page.getByRole('link', { name: label })).toBeVisible();
   }
   // Default route is the home ("Início"), reflected in the URL and the active link.
@@ -35,10 +35,6 @@ test('sidebar navigation switches the screen AND the URL hash', async ({ page })
   await page.getByRole('link', { name: 'Minhas promoções' }).click();
   await expect(page).toHaveURL(/#\/promocoes$/);
   await expect(page.getByText('Nenhuma promoção ainda')).toBeVisible();
-
-  await page.getByRole('link', { name: /Novo Genie Space/ }).click();
-  await expect(page).toHaveURL(/#\/novo$/);
-  await expect(page.getByText('Em breve — assistente de criação', { exact: false })).toBeVisible();
 });
 
 test('a deep-linked hash lands on the right screen on load', async ({ page }) => {

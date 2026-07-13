@@ -14,12 +14,10 @@
     onPromote: (resource: PromotableResource) => void;
     /** Open a promotion (deep-link to its detail). */
     onOpenPromotion: (summary: PromotionSummary) => void;
-    /** Go to the authoring guide. */
-    onGoToNew: () => void;
     /** A promotion is already in flight — disable the cards to avoid a concurrent request. */
     promoting?: boolean;
   }
-  let { onPromote, onOpenPromotion, onGoToNew, promoting = false }: Props = $props();
+  let { onPromote, onOpenPromotion, promoting = false }: Props = $props();
 
   // Compose the existing OBO reads — no aggregate endpoint needed. Retryable via $state.
   // NB this duplicates the `getPromotions('mine')` that App's recover-on-load also issues; both are
@@ -62,8 +60,9 @@
         <Card>
           <div class="empty">
             <p class="empty__title">Nenhum Genie Space encontrado</p>
-            <p class="muted text-sm">Crie um para começar — a autoria acontece no Genie nativo.</p>
-            <Button variant="outline" onclick={onGoToNew}>＋ Novo Genie Space</Button>
+            <p class="muted text-sm">
+              Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção.
+            </p>
           </div>
         </Card>
       {:else}
