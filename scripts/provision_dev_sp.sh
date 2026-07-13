@@ -90,6 +90,7 @@ fi
 # present is a no-op, unlike `service-principals update` (a full replace) which would risk
 # clobbering entitlements this script doesn't know about.
 databricks service-principals patch "$SP_NUM_ID" -p "$DEV_PROFILE" --json '{
+  "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
   "Operations": [{"op": "add", "path": "entitlements", "value": [{"value": "workspace-access"}]}]
 }'
 echo "workspace-access entitlement asserted"
