@@ -19,6 +19,7 @@ import os
 import sys
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service import iam
 
 # Reuse the exact same resolve-by-title logic (and its fail-loud contract) as apply_access.
 sys.path.insert(0, os.path.dirname(__file__))
@@ -45,10 +46,10 @@ def main() -> int:
     w.permissions.update(
         request_object_type="genie",
         request_object_id=space_id,
-        access_control_list=[{
-            "service_principal_name": app_sp,
-            "permission_level": "CAN_READ",
-        }],
+        access_control_list=[iam.AccessControlRequest(
+            service_principal_name=app_sp,
+            permission_level=iam.PermissionLevel.CAN_READ,
+        )],
     )
     print(f"grant_app_sp_read: CAN_READ -> app SP ({app_sp}) on space '{title}' (id={space_id})")
     return 0
