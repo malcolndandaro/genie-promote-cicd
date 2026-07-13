@@ -21,6 +21,7 @@ import type {
   RulesList,
   RuleSeverity,
   CheckDetail,
+  DeployDetail,
 } from './types';
 import { spaceToResource } from './resources';
 
@@ -252,6 +253,9 @@ export interface PromoteStatus {
     run_id?: number | null;
     approver?: string | null;
   };
+  /** Fix C: WHY the deploy failed — only populated when `deploy.conclusion === 'failure'` (the
+   * bot degrades to `null` on any GitHub read hiccup, same contract as `checks_detail`). */
+  deploy_detail?: DeployDetail | null;
   pr_url: string;
   phase: PromotePhase;
 }

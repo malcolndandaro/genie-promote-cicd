@@ -533,9 +533,9 @@ class _FakeGitHubApp:
         self.promo = kw
         return {"number": 7, "html_url": "https://github.com/o/r/pull/7"}
 
-    def upsert_comment(self, number, marker, body):
+    def post_review_comment(self, number, marker, body):
         self.comment = {"number": number, "marker": marker, "body": body}
-        return {"id": 1, "updated": False}
+        return {"id": 1, "seq": 1}
 
 
 _FULL_REVIEW = {

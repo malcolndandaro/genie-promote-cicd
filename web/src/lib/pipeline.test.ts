@@ -70,3 +70,55 @@ describe('buildPromotionSteps — G8 checks_detail', () => {
     expect(checks?.detail).toBeNull();
   });
 });
+
+// Fix C: mirrors G8 one level down — a DEPLOY failure (e.g. apply_access.py crashing on real
+// declared access) must surface WHY, not a bare "Falha", via the same <details> mechanism.
+describe('buildPromotionSteps — Fix C deploy_detail', () => {
+  it('leaves the deploy step pending with no detail before any live status has landed', () => {
+    const steps = buildPromotionSteps(review, null);
+    const deploy = steps.find((s) => s.key === 'deploy');
+    expect(deploy?.status).toBe('pending');
+    expect(deploy?.detail).toBeNull();
+  });
+
+  it('does not attach detail when the deploy succeeded', () => {
+    const steps = buildPromotionSteps(review, liveStatus({ phase: 'deployed' }));
+    const deploy = steps.find((s) => s.key === 'deploy');
+    expect(deploy?.status).toBe('pass');
+    expect(deploy?.detail).toBeNull();
+  });
+
+  it('marks the deploy step fail and attaches the adapted deploy_detail on a live failure', () => {
+    const steps = buildPromotionSteps(
+      review,
+      liveStatus({
+        phase: 'deploy_failed',
+        deploy_detail: {
+          failed_step: 'Apply declared access',
+          summary: "AttributeError: 'dict' object has no attribute 'as_dict'",
+          details_url: 'https://github.com/o/r/actions/runs/9/jobs/101',
+        },
+      }),
+    );
+    const deploy = steps.find((s) => s.key === 'deploy');
+    expect(deploy?.status).toBe('fail');
+    expect(deploy?.detail).toEqual([
+      {
+        name: 'Apply declared access',
+        conclusion: 'failure',
+        summary: "AttributeError: 'dict' object has no attribute 'as_dict'",
+        details_url: 'https://github.com/o/r/actions/runs/9/jobs/101',
+      },
+    ]);
+  });
+
+  it('sets detail=null when the deploy failed but the bot could not fetch job detail', () => {
+    const steps = buildPromotionSteps(
+      review,
+      liveStatus({ phase: 'deploy_failed', deploy_detail: null }),
+    );
+    const deploy = steps.find((s) => s.key === 'deploy');
+    expect(deploy?.status).toBe('fail');
+    expect(deploy?.detail).toBeNull();
+  });
+});

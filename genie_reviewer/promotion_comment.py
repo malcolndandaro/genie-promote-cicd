@@ -7,7 +7,9 @@ tested in isolation and stays in sync with the UI's fields.
 """
 from __future__ import annotations
 
-# A hidden marker so the bot updates ONE canonical comment instead of spamming the PR.
+# A hidden marker tagging every review comment the bot posts — a re-request POSTS A NEW comment
+# (history on the PR timeline), never PATCHes a prior one; `marker` is how a caller recognizes
+# "one of ours" and picks the LATEST if it needs the current state.
 PROMOTION_COMMENT_MARKER = "<!-- genie-promote:promotion-summary -->"
 
 _STEP_ICON = {"pass": "✅", "fail": "❌", "running": "⏳", "pending": "⬜"}
@@ -44,7 +46,13 @@ def _mapping_lines(table_mapping: dict | None) -> list[str]:
 def render_promotion_comment(review: dict, requester_email: str | None, *,
                              resource_title: str | None = None,
                              table_mapping: dict | None = None) -> str:
-    """Markdown mirroring the Revisão UI. First line is the marker (for in-place upsert).
+    """Markdown mirroring the Revisão UI. First line is the marker (every review comment carries
+    it — GitHub history is NEW comments, not one canonical comment mutated in place).
+
+    The visible "Revisão #N — <timestamp> UTC" header is deliberately NOT added here: it depends
+    on GitHub's own comment history + clock, which this function stays pure/side-effect-free about
+    (see the module docstring) — it's injected downstream by
+    ``github_app.GitHubApp.post_review_comment``.
 
     ``resource_title``/``table_mapping`` (G7, optional) are the Requester's declared prod Space
     name + table de-para — surfaced here for transparency, in ADDITION to being visible in the

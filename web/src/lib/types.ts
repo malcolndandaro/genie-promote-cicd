@@ -79,6 +79,15 @@ export interface CheckDetail {
   details_url: string | null;
 }
 
+/** Fix C: WHY a merged PR's prod DEPLOY run failed (e.g. a script crashing on a real declared
+ * access) — the first failing job step + a best-effort annotations summary, mirroring
+ * `CheckDetail` one level down (a deploy failure is a workflow JOB failing, not a PR check-run). */
+export interface DeployDetail {
+  failed_step: string;
+  summary: string;
+  details_url: string | null;
+}
+
 export interface TimelineStep {
   key: string;
   label: string;

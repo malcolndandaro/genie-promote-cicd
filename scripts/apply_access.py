@@ -35,7 +35,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "genie_reviewer
 import access_spec  # noqa: E402
 
 from databricks.sdk import WorkspaceClient  # noqa: E402
-from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel  # noqa: E402
+from databricks.sdk.service.catalog import PermissionsChange, Privilege  # noqa: E402
+from databricks.sdk.service.iam import (  # noqa: E402
+    AccessControlRequest, Patch, PatchOp, PatchSchema, PermissionLevel,
+)
 
 
 def _table_containers(space: dict) -> set[tuple[str, str]]:
@@ -80,7 +83,11 @@ def reconcile_membership(w: WorkspaceClient, group, principals: list[access_spec
     """Add any declared principal not already a member, referencing each by its numeric id (SCIM
     member `value` must be an id, not a name). Idempotent on the member-id SET — re-running with the
     same AccessSpec is a no-op. Never REMOVES a member — F2 only grows access via this path;
-    revocation is a separate, explicit governed change (out of scope here, same as GRANT-02)."""
+    revocation is a separate, explicit governed change (out of scope here, same as GRANT-02).
+
+    Adds are issued as ONE `groups.patch` call PER principal (not batched) so a failure is
+    attributable: if adding one principal raises, the exception names exactly that principal —
+    the other adds already succeeded aren't rolled back or hidden behind a bundled error."""
     current_ids = {m.value for m in (group.members or []) if getattr(m, "value", None)}
     to_add: list[tuple[access_spec.Principal, str]] = []
     for p in principals:
@@ -92,23 +99,33 @@ def reconcile_membership(w: WorkspaceClient, group, principals: list[access_spec
         return
     for p, pid in to_add:
         kind = "group" if p.is_group else "user/service-principal"
-        print(f"group {group.display_name}: adding {kind} '{p.name}' (id={pid})")
-    w.groups.patch(group.id, operations=[{
-        "op": "add", "path": "members",
-        "value": [{"value": pid} for _, pid in to_add],  # SCIM member ref = numeric id, not name
-    }])
+        try:
+            # SCIM member ref = numeric id, not name; typed Patch (NOT a raw dict — the SDK calls
+            # `.as_dict()` on each operation before serializing, which raises AttributeError on a dict).
+            w.groups.patch(
+                group.id,
+                operations=[Patch(op=PatchOp.ADD, value={"members": [{"value": pid}]})],
+                schemas=[PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
+            )
+        except Exception as exc:  # noqa: BLE001 - re-raised below with the failing principal attributed
+            raise RuntimeError(
+                f"apply_access: failed to add {kind} '{p.name}' (id={pid}) to group "
+                f"'{group.display_name}': {exc}") from exc
+        print(f"group {group.display_name}: added {kind} '{p.name}' (id={pid})")
 
 
 def apply_uc_grants(w: WorkspaceClient, group_name: str, containers: set[tuple[str, str]]) -> None:
     """GRANT USE_CATALOG/USE_SCHEMA/SELECT on each table's (catalog, schema) to the per-Space group.
     Idempotent: re-applying an already-held grant is a no-op (mirrors seed_recebiveis.py)."""
     for catalog, schema in sorted(containers):
+        # Typed PermissionsChange (NOT a raw dict — grants.update calls `.as_dict()` on each change
+        # before serializing, which raises AttributeError on a dict, same class of bug as groups.patch).
         w.grants.update(
             securable_type="catalog", full_name=catalog,
-            changes=[{"principal": group_name, "add": ["USE_CATALOG"]}])
+            changes=[PermissionsChange(principal=group_name, add=[Privilege.USE_CATALOG])])
         w.grants.update(
             securable_type="schema", full_name=f"{catalog}.{schema}",
-            changes=[{"principal": group_name, "add": ["USE_SCHEMA", "SELECT"]}])
+            changes=[PermissionsChange(principal=group_name, add=[Privilege.USE_SCHEMA, Privilege.SELECT])])
         print(f"granted USE_SCHEMA+SELECT on {catalog}.{schema} to {group_name}")
 
 
