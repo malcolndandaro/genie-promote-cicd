@@ -11,8 +11,10 @@
   interface Props {
     promotion: Promotion;
     userEmail: string | null;
+    /** The dev workspace host (G5) — threaded down to PromotionReview's RehydrateAction. */
+    devHost?: string | null;
   }
-  let { promotion, userEmail }: Props = $props();
+  let { promotion, userEmail, devHost = null }: Props = $props();
 
   // The user's promotable resources (OBO). In $state so an error is retryable.
   let resourcesP = $state(getResources());
@@ -99,7 +101,7 @@
   {/if}
 
   <!-- The active promotion's review/pipeline/approval (in-place below the grid). -->
-  <PromotionReview {promotion} {userEmail} />
+  <PromotionReview {promotion} {userEmail} {devHost} />
 </div>
 
 <style>

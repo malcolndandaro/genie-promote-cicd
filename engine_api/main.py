@@ -325,11 +325,14 @@ def whoami(
     the config-driven admin/steward set — a caller with no valid OBO token verifies to no identity
     and is never admin, regardless of what `x-forwarded-email` claims. `steward` (F5: now
     store-backed, `APP_STEWARD`/`APP_STEWARDS` as the bootstrap fallback — see `_steward_display`)
-    is the distinct approver for the separation-of-duties model (SV4).
+    is the distinct approver for the separation-of-duties model (SV4). `dev_host` (G5) is the dev
+    workspace host (`APP_DEV_HOST`, the same one `rehydrate.py` targets) — exposed purely so the SPA
+    can build a deep-link to a just-rehydrated dev Space; `None` when unconfigured (local/offline).
     """
     verified = _verified_email(x_forwarded_access_token, authorization)
     return {"email": x_forwarded_email, "steward": _steward_display(),
-            "is_admin": _is_admin(verified), "repo_url": _repo_url()}
+            "is_admin": _is_admin(verified), "repo_url": _repo_url(),
+            "dev_host": os.environ.get("APP_DEV_HOST")}
 
 
 @api.get("/spaces")
@@ -573,6 +576,22 @@ class RehydrateRequest(BaseModel):
     promotion_id: str | None = None
 
 
+def _find_promotion_id_for_resource(store, resource_id: str) -> str | None:
+    """G5: resolve which Promotion produced a live prod Space, by resource_id — mirrors
+    `admin_inventory`'s id-match join (F4) but scoped to one id, no title fallback (rehydrate always
+    has an EXACT space id to export, unlike the inventory's softer display-only join). Lets the
+    standalone "Exportar para Dev" screen call `/rehydrate` with just the prod Space it picked from
+    `getProdSpaces` (title+id only, no promotion_id) — RehydrateAction (started FROM a promotion's
+    OWN detail) already knows its promotion_id and never needs this. Several Promotions can share a
+    resource_id (re-promotions accumulate history); the most recently updated one wins. Returns None
+    when no Promotion has ever targeted this resource — the caller still fails closed (400) rather
+    than rehydrating unaudited."""
+    candidates = [p for p in store.list_promotions(None) if p.resource_id == resource_id]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.updated_at).id
+
+
 @api.post("/rehydrate")
 def rehydrate(
     body: RehydrateRequest,
@@ -600,11 +619,17 @@ def rehydrate(
     # to promotions(id), so the promotion must also exist. Store=None (local/offline) keeps the
     # prior no-audit ergonomics; the gap was only reachable in prod, where the store is required.
     store = getattr(app.state, "store", None)
+    promotion_id = body.promotion_id
     if store is not None:
-        if not body.promotion_id:
+        # G5: the standalone screen has no promotion_id to hand back (it picked a prod Space from
+        # the plain getProdSpaces listing) — resolve it server-side before falling back to the
+        # explicit-omission 400, so that flow never has to know what a "promotion_id" is.
+        if not promotion_id:
+            promotion_id = _find_promotion_id_for_resource(store, body.source_prod_space_id)
+        if not promotion_id:
             raise HTTPException(status_code=400,
                                 detail="rehydrate requer promotion_id (a promoção de origem) para a trilha de auditoria")
-        if store.get_promotion(body.promotion_id) is None:
+        if store.get_promotion(promotion_id) is None:
             raise HTTPException(status_code=404, detail="promoção de origem não encontrada")
 
     def _run() -> dict:
@@ -612,7 +637,7 @@ def rehydrate(
         result = rehydrate_mod.rehydrate_space(
             source_prod_space_id=body.source_prod_space_id, identity=identity, mode=body.mode,
             dev_space_id=body.dev_space_id, title=body.title,
-            store=store, promotion_id=body.promotion_id)
+            store=store, promotion_id=promotion_id)
         return {"space_id": result.space_id, "mode": result.mode, "title": result.title}
 
     return _engine_call("rehydrate_space", _run)

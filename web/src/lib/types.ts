@@ -12,6 +12,9 @@ export interface Whoami {
   /** The source/CI repo the header's GitHub link points to (config-driven; the SPA falls back to a
    * default if absent). */
   repo_url?: string | null;
+  /** The dev workspace host (G5, `APP_DEV_HOST`) — lets the SPA build a deep-link to a Space just
+   * rehydrated back into dev. `null`/absent when unconfigured (local/offline; the link is omitted). */
+  dev_host?: string | null;
 }
 
 /**

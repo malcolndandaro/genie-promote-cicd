@@ -44,10 +44,11 @@ def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_DEV_HOST", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False,
-                        "repo_url": "https://gh/acme/repo"}
+                        "repo_url": "https://gh/acme/repo", "dev_host": None}
 
 
 def test_whoami_steward_none_when_unset(monkeypatch):
@@ -55,10 +56,11 @@ def test_whoami_steward_none_when_unset(monkeypatch):
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_DEV_HOST", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False,
-                        "repo_url": "https://gh/acme/repo"}
+                        "repo_url": "https://gh/acme/repo", "dev_host": None}
 
 
 def test_whoami_repo_url_defaults_when_unset(monkeypatch):
@@ -66,6 +68,13 @@ def test_whoami_repo_url_defaults_when_unset(monkeypatch):
     monkeypatch.delenv("APP_REPO_URL", raising=False)
     body = client.get("/whoami", headers={"x-forwarded-email": "m@x"}).json()
     assert body["repo_url"] == "https://github.com/malcolndandaro/genie-promote-cicd"
+
+
+def test_whoami_dev_host_reflects_env(monkeypatch):
+    # G5: the standalone rehydrate screen builds a deep-link to the resulting dev Space from this.
+    monkeypatch.setenv("APP_DEV_HOST", "https://dev.cloud.databricks.com")
+    body = client.get("/whoami", headers={"x-forwarded-email": "m@x"}).json()
+    assert body["dev_host"] == "https://dev.cloud.databricks.com"
 
 
 def test_spaces_threads_proxy_header_token(monkeypatch):
@@ -427,6 +436,43 @@ def test_rehydrate_with_valid_promotion_id_runs_when_store_present(monkeypatch, 
     assert r.json()["space_id"] == "new-dev-id"
 
 
+def test_rehydrate_auto_resolves_promotion_id_by_resource_id_when_omitted(monkeypatch, store):
+    # G5: the standalone "Exportar para Dev" screen picks a prod Space from getProdSpaces (title+id
+    # only) and never sends promotion_id — the endpoint must resolve it from source_prod_space_id
+    # itself so that flow stays auditable without the client knowing what a promotion_id is.
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    p = store.create_promotion(
+        resource_id="prod-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@x", pr_number=9, pr_url="https://gh/pr/9", branch="promote/x",
+        current_phase="deployed", live_status=None)
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        assert store is not None and promotion_id == p.id  # resolved, not just accepted as None
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "new-dev-id"
+
+
+def test_rehydrate_resolution_does_not_match_a_different_resource(monkeypatch, store):
+    # A Promotion exists, but for a DIFFERENT resource — must not be picked up as a false match; the
+    # request still 400s exactly like the empty-store case (rehydrate stays auditable, never guesses).
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    _mk_promotion(store)  # resource_id="dev-src", unrelated to "prod-1" below
+    called = {"ran": False}
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
+                        lambda *a, **k: called.__setitem__("ran", True))
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+    assert called["ran"] is False
+
+
 def test_rehydrate_access_denied_maps_to_403_not_bootstrap_error(monkeypatch):
     _verify_as(monkeypatch, {"tok": "mallory@x"})
 
@@ -466,9 +512,11 @@ def test_api_prefix_whoami(monkeypatch):
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_DEV_HOST", raising=False)
     r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
     assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x",
-                                                 "is_admin": False, "repo_url": "https://gh/acme/repo"}
+                                                 "is_admin": False, "repo_url": "https://gh/acme/repo",
+                                                 "dev_host": None}
 
 
 def test_api_prefix_spaces_threads_token(monkeypatch):

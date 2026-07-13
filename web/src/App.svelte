@@ -6,6 +6,7 @@
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
+  import Rehidratar from './screens/Rehidratar.svelte';
   import Admin from './screens/Admin.svelte';
   import Settings from './screens/Settings.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
@@ -51,6 +52,7 @@
     { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
     { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
     { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
+    { id: 'rehidratar', label: 'Trazer de volta para o dev', icon: 'download' },
     ...(who?.is_admin ? [{ id: 'admin' as const, label: 'Administração', icon: 'shield' as const }] : []),
     ...(who?.is_admin
       ? [{ id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const }]
@@ -62,6 +64,7 @@
     espacos: 'Meus espaços',
     promocoes: 'Minhas promoções',
     acesso: 'Acesso',
+    rehidratar: 'Trazer de volta para o dev',
     admin: 'Administração',
     configuracoes: 'Configurações',
   };
@@ -93,7 +96,7 @@
       promoting={promotion.phase === 'reviewing'}
     />
   {:else if router.route.id === 'espacos'}
-    <MeusEspacos {promotion} userEmail={who?.email ?? null} />
+    <MeusEspacos {promotion} userEmail={who?.email ?? null} devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'promocoes'}
     <MinhasPromocoes
       {who}
@@ -104,6 +107,8 @@
     />
   {:else if router.route.id === 'acesso'}
     <AcessoEspacos {who} />
+  {:else if router.route.id === 'rehidratar'}
+    <Rehidratar devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'admin'}
     <Admin />
   {:else if router.route.id === 'configuracoes'}

@@ -17,8 +17,10 @@
   interface Props {
     promotion: Promotion;
     userEmail: string | null;
+    /** The dev workspace host (G5, `/api/whoami.dev_host`) — threaded down to RehydrateAction. */
+    devHost?: string | null;
   }
-  let { promotion, userEmail }: Props = $props();
+  let { promotion, userEmail, devHost = null }: Props = $props();
 
   // F5 US-35: contextual drift, surfaced HERE for the assigned Steward — not only on a passive
   // Settings panel nobody opens. Fetched once per promotion (not polled — role/GitHub-gate drift
@@ -104,7 +106,7 @@
           <AuditTrail events={promotion.audit} />
         </div>
       {/if}
-      <RehydrateAction {promotion} />
+      <RehydrateAction {promotion} {devHost} />
     {/if}
   </Card>
 {/if}
