@@ -177,3 +177,100 @@ def test_bidirectional_rebind_is_a_pure_inverse_round_trip():
     prod_shaped = pre_render.rebind(DEV, "dev", "prod", "recebiveis")
     back_to_dev = pre_render.rebind(prod_shaped, "prod", "dev", "recebiveis")
     assert json.loads(back_to_dev) == json.loads(DEV)
+
+
+# --- G6: find_refs + apply_table_mapping (the rehydrate table de-para) -------------------------
+
+PROD_WITH_TWO_TABLES = json.dumps(
+    {
+        "data_sources": {
+            "tables": [
+                {"identifier": "prod_recebiveis.diamond.fato_recebiveis"},
+                {"identifier": "prod_recebiveis.diamond.dim_cedente"},
+            ]
+        },
+        "instructions": {
+            "example_question_sqls": [
+                {"sql": ["SELECT * FROM prod_recebiveis.diamond.fato_recebiveis f "
+                        "JOIN `prod_recebiveis`.`diamond`.`dim_cedente` c ON f.id = c.id"]}
+            ]
+        },
+    },
+    ensure_ascii=False,
+)
+
+
+def test_find_refs_returns_distinct_refs_in_first_appearance_order():
+    refs = pre_render.find_refs(PROD_WITH_TWO_TABLES)
+    assert refs == [
+        "prod_recebiveis.diamond.fato_recebiveis",
+        "prod_recebiveis.diamond.dim_cedente",
+    ]  # the SQL join repeats both refs — de-duped, not doubled
+
+
+def test_find_refs_strips_backticks():
+    blob = json.dumps({"sql": ["SELECT * FROM `prod_recebiveis`.`diamond`.`dim_cedente`"]})
+    assert pre_render.find_refs(blob) == ["prod_recebiveis.diamond.dim_cedente"]
+
+
+def test_apply_table_mapping_default_is_a_no_op():
+    # An IDENTITY mapping (target == the plain default) must round-trip unchanged — the UI only
+    # ever sends OVERRIDDEN rows, but the function itself must be safe if a caller sends one anyway.
+    rebound = pre_render.rebind(PROD_WITH_TWO_TABLES, "prod", "dev", "recebiveis")
+    mapping = {"prod_recebiveis.diamond.fato_recebiveis": "dev_recebiveis.diamond.fato_recebiveis"}
+    out = pre_render.apply_table_mapping(rebound, mapping, from_env="prod", to_env="dev", domain="recebiveis")
+    assert json.loads(out) == json.loads(rebound)
+
+
+def test_apply_table_mapping_overrides_the_identifier_and_the_sql_occurrence():
+    rebound = pre_render.rebind(PROD_WITH_TWO_TABLES, "prod", "dev", "recebiveis")
+    mapping = {"prod_recebiveis.diamond.dim_cedente": "dev_recebiveis.diamond.dim_cedente_v2"}
+    out = pre_render.apply_table_mapping(rebound, mapping, from_env="prod", to_env="dev", domain="recebiveis")
+    body = json.loads(out)
+    idents = [t["identifier"] for t in body["data_sources"]["tables"]]
+    # the OTHER table's identifier is untouched; the MAPPED one is exactly the override, not a
+    # partial/duplicated match (proves the old default target is fully gone, not just prefixed).
+    assert idents == ["dev_recebiveis.diamond.fato_recebiveis", "dev_recebiveis.diamond.dim_cedente_v2"]
+    # the SQL occurrence (backtick-quoted in the fixture) was ALSO rewritten, not just the identifier
+    sql = body["instructions"]["example_question_sqls"][0]["sql"][0]
+    assert "dev_recebiveis.diamond.dim_cedente_v2" in sql
+
+
+def test_apply_table_mapping_matches_a_backtick_quoted_default_target():
+    # The DEFAULT target (post-rebind) may itself appear backtick-quoted in the source JSON (as in
+    # PROD_WITH_TWO_TABLES's SQL) — apply_table_mapping must match it regardless.
+    rebound = pre_render.rebind(PROD_WITH_TWO_TABLES, "prod", "dev", "recebiveis")
+    assert "`dev_recebiveis`.`diamond`.`dim_cedente`" in rebound  # sanity: the fixture backtick-quotes this one
+    mapping = {"prod_recebiveis.diamond.dim_cedente": "dev_recebiveis.diamond.renamed"}
+    out = pre_render.apply_table_mapping(rebound, mapping, from_env="prod", to_env="dev", domain="recebiveis")
+    assert "dev_recebiveis.diamond.renamed" in out
+    assert "dim_cedente" not in out
+
+
+def test_apply_table_mapping_can_retarget_to_a_different_catalog():
+    # A de-para may point at a catalog OTHER than the plain dev_<domain> default (e.g. a
+    # differently-named dev catalog) — apply_table_mapping itself has no opinion on that; the
+    # anti-leak invariant (never prod_<domain>) is enforced by the CALLER (app/rehydrate.py), not here.
+    rebound = pre_render.rebind(PROD_WITH_TWO_TABLES, "prod", "dev", "recebiveis")
+    mapping = {"prod_recebiveis.diamond.dim_cedente": "dev_sandbox.diamond.dim_cedente"}
+    out = pre_render.apply_table_mapping(rebound, mapping, from_env="prod", to_env="dev", domain="recebiveis")
+    assert "dev_sandbox.diamond.dim_cedente" in out
+
+
+def test_find_violations_extra_allowed_catalogs_widens_the_allowlist():
+    # A ref retargeted (via apply_table_mapping) to a catalog OTHER than dev_<domain> must NOT be
+    # flagged once that catalog is explicitly allowed — but anything ELSE unlisted still is.
+    blob = json.dumps({"a": "dev_recebiveis.x.y", "b": "dev_sandbox.x.y", "c": "sbx_recebiveis.x.y"})
+    assert pre_render.find_violations(blob, "dev", "recebiveis") == ["dev_sandbox", "sbx_recebiveis"]
+    widened = pre_render.find_violations(blob, "dev", "recebiveis", extra_allowed_catalogs={"dev_sandbox"})
+    assert widened == ["sbx_recebiveis"]
+
+
+def test_find_violations_extra_allowed_catalogs_does_not_exempt_the_source_env():
+    # The widened allowlist is ADDITIVE — it must never accidentally re-open the door to the
+    # source (prod) catalog just because SOME other override was allowed (app/rehydrate.py is the
+    # one that explicitly refuses a prod-pointing override before ever calling find_violations, but
+    # this pins that find_violations itself never silently exempts it either).
+    blob = json.dumps({"a": "prod_recebiveis.x.y"})
+    violations = pre_render.find_violations(blob, "dev", "recebiveis", extra_allowed_catalogs={"dev_sandbox"})
+    assert violations == ["prod_recebiveis"]

@@ -238,6 +238,10 @@ export async function postRehydrate(opts: {
   devSpaceId?: string;
   title?: string;
   promotionId?: string;
+  /** G6: source prod ref -> desired dev ref — only entries actually OVERRIDDEN away from the
+   * preview's `default_target` (an identity mapping is a harmless no-op, but there's no reason to
+   * send it). Omit/empty means "use the plain defaults", same as before G6. */
+  tableMapping?: Record<string, string>;
 }): Promise<RehydrateResult> {
   const r = await fetch('/api/rehydrate', {
     method: 'POST',
@@ -248,10 +252,34 @@ export async function postRehydrate(opts: {
       dev_space_id: opts.devSpaceId ?? null,
       title: opts.title ?? null,
       promotion_id: opts.promotionId ?? null,
+      table_mapping:
+        opts.tableMapping && Object.keys(opts.tableMapping).length > 0 ? opts.tableMapping : null,
     }),
   });
   if (!r.ok) throw await toError(r);
   return (await r.json()) as RehydrateResult;
+}
+
+/** G6: one row of the rehydrate-preview table de-para. */
+export interface RehydratePreviewTable {
+  /** The prod ref this row is FOR — the key a `table_mapping` override must use. */
+  source: string;
+  /** The plain prod_->dev_ target `postRehydrate` would use if this row is left unchanged. */
+  default_target: string;
+  /** Best-effort: existing dev tables in the same schema, for a suggestion datalist. Always an
+   * array (never absent) — empty means "no suggestions", never an error. */
+  dev_suggestions: string[];
+}
+
+export interface RehydratePreview {
+  /** The source Space's prod title — the default the editable dev-title field is pre-filled with. */
+  title: string | null;
+  tables: RehydratePreviewTable[];
+}
+
+/** G6: preview a prod->dev rehydrate BEFORE committing — read-only, persists nothing. */
+export function getRehydratePreview(sourceProdSpaceId: string): Promise<RehydratePreview> {
+  return getJSON(`/api/rehydrate/preview?space_id=${encodeURIComponent(sourceProdSpaceId)}`);
 }
 
 // --- F3: self-service access requests ---------------------------------------

@@ -31,14 +31,60 @@ def rebind(serialized: str, from_env: str, to_env: str, domain: str) -> str:
 # The allowlist asserts the CATALOG of EVERY such ref equals the target
 # <to_env>_<domain> — case-insensitive and backtick-aware. (A denylist on
 # "<env>_<domain>." alone missed uppercase, backticked, and unrelated foreign
-# catalogs like `main`/`samples` — see the S4 review.)
-_REF3 = re.compile(r"`?([A-Za-z][\w]*)`?\.`?[A-Za-z_]\w*`?\.`?[A-Za-z_]\w*`?")
+# catalogs like `main`/`samples` — see the S4 review.) Schema/table are now ALSO captured (groups
+# 2/3, not just 1) so `find_refs` can report the full ref — this doesn't change what the pattern
+# MATCHES, only what it captures, so `find_violations` (group(1)-only) is unaffected.
+_REF3 = re.compile(r"`?([A-Za-z][\w]*)`?\.`?([A-Za-z_]\w*)`?\.`?([A-Za-z_]\w*)`?")
 
 
-def find_violations(serialized: str, to_env: str, domain: str) -> list[str]:
-    """Catalogs of any 3-part ref that aren't the target <to_env>_<domain> (true allowlist)."""
-    target = f"{to_env}_{domain}".lower()
-    return sorted({m.group(1) for m in _REF3.finditer(serialized) if m.group(1).lower() != target})
+def find_violations(serialized: str, to_env: str, domain: str, *,
+                     extra_allowed_catalogs: "set[str] | None" = None) -> list[str]:
+    """Catalogs of any 3-part ref that aren't the target <to_env>_<domain> NOR one of
+    `extra_allowed_catalogs` (true allowlist). The extra set exists for rehydrate's table de-para
+    (G6): a per-table override may retarget a ref to a catalog other than the plain
+    <to_env>_<domain> default, so the allowlist widens to include those CHOSEN catalogs — while
+    still catching anything else unlisted, e.g. a stray <from_env>_<domain> that survived a rebind."""
+    allowed = {f"{to_env}_{domain}".lower()} | {c.lower() for c in (extra_allowed_catalogs or ())}
+    return sorted({m.group(1) for m in _REF3.finditer(serialized) if m.group(1).lower() not in allowed})
+
+
+def find_refs(serialized: str) -> list[str]:
+    """Every DISTINCT 3-part catalog.schema.table ref anywhere in the serialized_space (including a
+    ref buried inside example/benchmark SQL text — the same grammar `find_violations` already
+    parses), backtick-stripped, in FIRST-APPEARANCE order. Feeds the rehydrate-preview table de-para
+    (G6): each ref returned here gets a plain `rebind`-ed default target the UI shows before letting
+    the user override it."""
+    seen: dict[str, None] = {}
+    for m in _REF3.finditer(serialized):
+        seen.setdefault(f"{m.group(1)}.{m.group(2)}.{m.group(3)}", None)
+    return list(seen)
+
+
+def _ref_pattern(ref: str) -> "re.Pattern[str]":
+    """A regex matching `ref` (catalog.schema.table) exactly as `_REF3` would have matched it — each
+    part OPTIONALLY backtick-quoted — so `apply_table_mapping` replaces a ref regardless of whether
+    it appears plain or backtick-quoted (e.g. inside example/benchmark SQL text)."""
+    catalog, schema, table = ref.split(".")
+    return re.compile(rf"`?{re.escape(catalog)}`?\.`?{re.escape(schema)}`?\.`?{re.escape(table)}`?")
+
+
+def apply_table_mapping(serialized: str, mapping: dict[str, str], *, from_env: str, to_env: str,
+                         domain: str) -> str:
+    """Apply a table de-para (G6/rehydrate) on top of an ALREADY `rebind`-ed serialized_space: each
+    `mapping` key is the ORIGINAL SOURCE ref (e.g. a prod_ ref, matching the rehydrate-preview's
+    `source` field) — this derives that ref's plain `rebind`-ed DEFAULT target and replaces THAT
+    (not the source ref itself, which no longer appears in `serialized` post-rebind) with the user's
+    chosen target. Replacement is TEXT SUBSTITUTION (the same technique `rebind` itself uses), so an
+    occurrence buried inside example/benchmark SQL is caught too, not just a
+    `data_sources.tables[].identifier`. Backtick-aware on the MATCH side (`_ref_pattern`); the
+    replacement is written plain/unquoted — safe for the identifiers this accelerator's domains use
+    (see `promotion_store._IDENT`), and simpler than preserving a per-part backtick style a future
+    refinement could add if a customer's schema ever needs it."""
+    out = serialized
+    for source_ref, target_ref in mapping.items():
+        default_target = rebind(source_ref, from_env, to_env, domain)
+        out = _ref_pattern(default_target).sub(lambda _m, t=target_ref: t, out)
+    return out
 
 
 def render_file(in_path: str, out_path: str, from_env: str, to_env: str, domain: str) -> str:

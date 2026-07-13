@@ -200,6 +200,15 @@ def _engine_call(label: str, fn: Callable):
     except access_request_store.InvalidTransition as e:
         logger.info("invalid access-request transition in %s (%s)", label, e)
         raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        # A deterministic, caller-input refusal (e.g. rehydrate's reverse-allowlist leak or a G6
+        # table_mapping override pointing back at the prod catalog) is the CALLER's problem to fix,
+        # not an engine fault — every `raise ValueError` in the engine layer (rehydrate.py,
+        # access_spec.py, the *_store.py CRUD modules) is exactly this kind of input validation, so a
+        # 400 here is right across the board, never the generic 502 the broad except below would map
+        # an uncaught ValueError to.
+        logger.info("input rejected in %s (%s)", label, e)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception:  # noqa: BLE001
         logger.exception("engine call failed: %s", label)
         raise HTTPException(status_code=502, detail=f"engine error: {label}")
@@ -598,6 +607,34 @@ class RehydrateRequest(BaseModel):
     # attached to that Promotion's trail so "who rehydrated this deployed Space, and when" shows up
     # next to its promotion history, same place a Steward already looks.
     promotion_id: str | None = None
+    # G6: source prod ref -> desired dev ref overrides, keyed exactly like /rehydrate/preview's
+    # `source` field — only entries the caller actually changed away from the preview's
+    # `default_target` need be sent (an identity mapping is a no-op either way, see
+    # `pre_render.apply_table_mapping`). None/empty means "use the plain defaults", unchanged.
+    table_mapping: dict[str, str] | None = None
+
+
+@api.get("/rehydrate/preview")
+def rehydrate_preview(
+    space_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G6: a READ-ONLY preview of a prod->dev rehydrate, called BEFORE `/rehydrate` — the source
+    Space's title + every 3-part table ref it references, each with its plain prod_->dev_ default
+    target (+ best-effort dev-side suggestions), so the UI can render an editable dev title + a
+    table de-para for the caller to review/override BEFORE committing. Persists nothing. Gated the
+    SAME way as `/rehydrate` on the ONE blast site a read touches (the source prod Space) — there is
+    no second (overwrite-target) guard here, since a preview never writes to dev."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        identity = authz.verify_identity(token, host=Config().host)
+        return rehydrate_mod.preview_rehydrate(space_id, identity=identity)
+
+    return _engine_call("rehydrate_preview", _run)
 
 
 def _find_promotion_id_for_resource(store, resource_id: str) -> str | None:
@@ -639,6 +676,12 @@ def rehydrate(
     "rehydrated" row; no match is no longer an error, it falls through with `promotion_id=None`
     and gets a standalone `rehydrate_events` row instead. An EXPLICITLY given `promotion_id` that
     doesn't exist is still a 404 (a dangling client reference, not "no promotion available").
+
+    G6: `table_mapping` (source prod ref -> desired dev ref) is a deterministic REFUSAL, not an
+    engine fault, when it's malformed or points back at the prod catalog (`rehydrate_space` raises
+    `ValueError` for both, same as the pre-existing reverse-allowlist-leak refusal) — `_engine_call`
+    maps any `ValueError` to an actionable 400, never the generic 502 its broad exception handler
+    would otherwise give an uncaught one.
     """
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
@@ -663,7 +706,7 @@ def rehydrate(
         result = rehydrate_mod.rehydrate_space(
             source_prod_space_id=body.source_prod_space_id, identity=identity, mode=body.mode,
             dev_space_id=body.dev_space_id, title=body.title,
-            store=store, promotion_id=promotion_id)
+            store=store, promotion_id=promotion_id, table_mapping=body.table_mapping or None)
         return {"space_id": result.space_id, "mode": result.mode, "title": result.title}
 
     return _engine_call("rehydrate_space", _run)

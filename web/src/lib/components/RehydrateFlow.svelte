@@ -9,7 +9,14 @@
   // Space, …) is each caller's own concern, not this component's.
   import Button from './Button.svelte';
   import Picker from './Picker.svelte';
-  import { ApiError, isAuthError, postRehydrate, getResources, type RehydrateResult } from '../api';
+  import {
+    ApiError,
+    isAuthError,
+    postRehydrate,
+    getRehydratePreview,
+    getResources,
+    type RehydrateResult,
+  } from '../api';
   import { filterOptions, type PickerOption } from '../picker';
   import { genieSpaceUrl } from '../links';
 
@@ -31,7 +38,7 @@
   let { sourceProdSpaceId, sourceTitle = null, promotionId = null, devHost = null, onDone, onExit }:
     Props = $props();
 
-  type Step = 'choosing' | 'confirming' | 'running' | 'done' | 'error';
+  type Step = 'choosing' | 'loading_preview' | 'confirming' | 'running' | 'done' | 'error';
   let step = $state<Step>('choosing');
   let mode = $state<'create' | 'overwrite'>('create');
   // G1: the dev Space to overwrite is PICKED from the caller's own dev spaces (`/api/spaces`, the
@@ -39,6 +46,19 @@
   let devSpaceOption = $state<PickerOption | null>(null);
   let result = $state<RehydrateResult | null>(null);
   let error = $state<string | null>(null);
+  let previewError = $state<string | null>(null);
+
+  // G6: the editable dev title + per-table de-para, loaded from the preview once the caller
+  // commits to a mode/target on 'choosing' — shown alongside the plain textual confirmation on
+  // 'confirming', BEFORE the caller actually posts the rehydrate.
+  let devTitle = $state('');
+  interface MappingRow {
+    source: string;
+    target: string;
+    defaultTarget: string;
+    suggestions: string[];
+  }
+  let mappingRows = $state<MappingRow[]>([]);
 
   // Fetched once per component lifetime (the dev space list doesn't change mid-flow) and filtered
   // CLIENT-side on every keystroke via `filterOptions` — small identity-filtered list, no need to
@@ -52,9 +72,28 @@
     return filterOptions(devSpacesCache, q);
   }
 
-  function reviewChoice(): void {
+  async function reviewChoice(): Promise<void> {
     if (mode === 'overwrite' && !devSpaceOption) return; // Button is disabled too; belt & suspenders
-    step = 'confirming';
+    step = 'loading_preview';
+    previewError = null;
+    try {
+      const preview = await getRehydratePreview(sourceProdSpaceId);
+      devTitle = preview.title ?? sourceTitle ?? '';
+      mappingRows = preview.tables.map((t) => ({
+        source: t.source,
+        target: t.default_target,
+        defaultTarget: t.default_target,
+        suggestions: t.dev_suggestions,
+      }));
+      step = 'confirming';
+    } catch (e) {
+      previewError = e instanceof Error ? e.message : String(e);
+      step = 'choosing'; // stay put — "Continuar" retries the preview load
+    }
+  }
+
+  function resetRow(row: MappingRow): void {
+    row.target = row.defaultTarget;
   }
 
   function back(): void {
@@ -65,12 +104,18 @@
     step = 'running';
     error = null;
     try {
+      const tableMapping: Record<string, string> = {};
+      for (const row of mappingRows) {
+        const target = row.target.trim();
+        if (target && target !== row.defaultTarget) tableMapping[row.source] = target;
+      }
       result = await postRehydrate({
         sourceProdSpaceId,
         mode,
         devSpaceId: mode === 'overwrite' ? devSpaceOption?.id : undefined,
-        title: sourceTitle ? `${sourceTitle} (dev)` : undefined,
+        title: devTitle.trim() || undefined,
         promotionId: promotionId ?? undefined,
+        tableMapping,
       });
       step = 'done';
       onDone?.();
@@ -115,6 +160,11 @@
         />
       </div>
     {/if}
+    {#if previewError}
+      <p class="msg msg--fail" role="alert">
+        Não foi possível carregar a pré-visualização: {previewError}
+      </p>
+    {/if}
     <div class="rehydrate__actions">
       {#if onExit}<Button variant="ghost" onclick={onExit}>Cancelar</Button>{/if}
       <Button
@@ -126,6 +176,8 @@
       </Button>
     </div>
   </fieldset>
+{:else if step === 'loading_preview'}
+  <p class="text-sm muted" role="status" aria-busy="true">Carregando pré-visualização…</p>
 {:else if step === 'confirming'}
   <div class="rehydrate__panel" role="alertdialog" aria-label="Confirmar rehidratação">
     <p class="text-sm">
@@ -138,6 +190,57 @@
         <code>prod_</code> → <code>dev_</code>. Confirmar?
       {/if}
     </p>
+
+    <label class="rehydrate__field">
+      <span class="rehydrate__field-label">Nome do space no dev</span>
+      <input type="text" class="rehydrate__input" bind:value={devTitle} placeholder="Nome do Space no dev" />
+    </label>
+
+    {#if mappingRows.length > 0}
+      <div class="rehydrate__mapping">
+        <p class="text-xs muted rehydrate__mapping-hint">
+          De-para de tabelas — ajuste se o dev usa nomes diferentes.
+        </p>
+        <div class="rehydrate__table-wrap">
+          <table class="rehydrate__table">
+            <thead>
+              <tr>
+                <th>Tabela em produção</th>
+                <th>Tabela no dev</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each mappingRows as row, i (row.source)}
+                <tr>
+                  <td><code>{row.source}</code></td>
+                  <td>
+                    <input
+                      type="text"
+                      class="rehydrate__input"
+                      list="rehydrate-suggestions-{i}"
+                      aria-label="Tabela no dev para {row.source}"
+                      bind:value={row.target}
+                    />
+                    {#if row.suggestions.length > 0}
+                      <datalist id="rehydrate-suggestions-{i}">
+                        {#each row.suggestions as s (s)}<option value={s}></option>{/each}
+                      </datalist>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if row.target.trim() !== row.defaultTarget}
+                      <Button variant="ghost" onclick={() => resetRow(row)}>Restaurar padrão</Button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {/if}
+
     <div class="rehydrate__actions">
       <Button variant="ghost" onclick={back}>Voltar</Button>
       <Button variant="accent" onclick={confirm}>Confirmar rehidratação</Button>
@@ -189,6 +292,51 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
+  }
+  .rehydrate__field-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--muted-foreground);
+  }
+  .rehydrate__input {
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font: inherit;
+    background: var(--surface);
+    color: inherit;
+    width: 100%;
+  }
+  .rehydrate__input:focus {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+  .rehydrate__mapping {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .rehydrate__mapping-hint {
+    margin: 0;
+  }
+  .rehydrate__table-wrap {
+    overflow-x: auto;
+  }
+  .rehydrate__table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  .rehydrate__table th,
+  .rehydrate__table td {
+    padding: 0.4rem 0.5rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .rehydrate__table code {
+    font-size: 0.8rem;
+    word-break: break-all;
   }
   .rehydrate__actions {
     display: flex;

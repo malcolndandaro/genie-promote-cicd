@@ -419,3 +419,206 @@ def test_standalone_event_records_via_real_in_memory_backend():
     assert events[0].actor_email == "ana@x"
     assert events[0].mode == "create"
     assert events[0].dev_space_id == "new-id"
+
+
+# --- G6: table de-para (table_mapping) -----------------------------------------------------------
+
+
+def _dev_tables_transport(tables_by_schema: dict, *, genie=None):
+    """A fake dev transport exposing `.tables.list(catalog, schema)` (yields `NS(name=...)`) — for
+    `preview_rehydrate`'s best-effort dev-suggestions. `genie` (if given) is attached too, so the
+    same fake can double as a create/overwrite dev transport."""
+    def list_tables(catalog, schema, **kw):
+        for name in tables_by_schema.get((catalog, schema), []):
+            yield NS(name=name)
+
+    ns = NS(tables=NS(list=list_tables))
+    if genie is not None:
+        ns.genie = genie
+    return ns
+
+
+def test_table_mapping_overrides_the_default_target():
+    prod = _prod_transport("prod-space", ["ana@x"])
+    created = {}
+    dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: (
+        created.update(serialized_space=ss), NS(space_id="new-id"))[-1]))
+
+    mapping = {"prod_recebiveis.diamond.fato_recebiveis": "dev_recebiveis.diamond.custom_name"}
+    rehydrate.rehydrate_space(source_prod_space_id="prod-space", identity=ANA, mode="create",
+                              prod_client=prod, dev_client=dev, table_mapping=mapping)
+
+    body = json.loads(created["serialized_space"])
+    assert body["data_sources"]["tables"][0]["identifier"] == "dev_recebiveis.diamond.custom_name"
+    # the benchmark SQL occurrence of the SAME ref was rewritten too, not just the identifier
+    assert "dev_recebiveis.diamond.custom_name" in body["benchmarks"]["questions"][0]["answer"][0]["content"][0]
+
+
+def test_table_mapping_identity_override_is_a_no_op():
+    # Mapping a ref to its OWN plain default target must round-trip exactly like no mapping at all.
+    prod = _prod_transport("prod-space", ["ana@x"])
+    created = {}
+    dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: (
+        created.update(serialized_space=ss), NS(space_id="new-id"))[-1]))
+
+    mapping = {"prod_recebiveis.diamond.fato_recebiveis": "dev_recebiveis.diamond.fato_recebiveis"}
+    rehydrate.rehydrate_space(source_prod_space_id="prod-space", identity=ANA, mode="create",
+                              prod_client=prod, dev_client=dev, table_mapping=mapping)
+    body = json.loads(created["serialized_space"])
+    assert body["data_sources"]["tables"][0]["identifier"] == "dev_recebiveis.diamond.fato_recebiveis"
+
+
+def test_table_mapping_rejects_a_target_pointing_back_at_prod():
+    prod = _prod_transport("prod-space", ["ana@x"])
+    dev_touched = {"value": False}
+
+    class _PoisonedDev:
+        def __getattr__(self, name):
+            dev_touched["value"] = True
+            raise AssertionError(f"dev transport must not be touched: {name}")
+
+    mapping = {"prod_recebiveis.diamond.fato_recebiveis": "prod_recebiveis.diamond.fato_recebiveis"}
+    try:
+        rehydrate.rehydrate_space(source_prod_space_id="prod-space", identity=ANA, mode="create",
+                                  prod_client=prod, dev_client=_PoisonedDev(), table_mapping=mapping)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "catálogo de produção" in str(e)
+    # the refusal happens BEFORE the dev transport is ever resolved/touched — same "deny before
+    # writing" discipline as the reverse-allowlist check and the overwrite-target guard.
+    assert dev_touched["value"] is False
+
+
+def test_table_mapping_rejects_a_malformed_target():
+    prod = _prod_transport("prod-space", ["ana@x"])
+    mapping = {"prod_recebiveis.diamond.fato_recebiveis": "not-a-three-part-ref"}
+    try:
+        rehydrate.rehydrate_space(source_prod_space_id="prod-space", identity=ANA, mode="create",
+                                  prod_client=prod, dev_client=NS(), table_mapping=mapping)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "catalog.schema.table" in str(e)
+
+
+def test_apply_table_mapping_widened_allowlist_still_catches_an_unrelated_leak():
+    # Exercises `_apply_table_mapping` DIRECTLY (bypassing `rehydrate_space`'s EARLIER base
+    # reverse-allowlist check, which would otherwise catch this same stray leak before ever reaching
+    # the mapping step — a payload with a pre-existing foreign-catalog leak never gets this far
+    # through the full rehydrate_space path) — proves the widened-allowlist re-check inside
+    # `_apply_table_mapping` is itself correct: a mapping retargets ONE ref to a non-default (but
+    # still non-prod) catalog; a SEPARATE, stray foreign-catalog reference elsewhere is still caught.
+    rebound = {
+        "data_sources": {"tables": [
+            {"identifier": "dev_recebiveis.diamond.fato_recebiveis"},
+            {"identifier": "dev_recebiveis.diamond.dim_cedente"},
+        ]},
+        "instructions": {"example_question_sqls": [
+            {"sql": ["SELECT * FROM sbx_recebiveis.diamond.t"]}
+        ]},
+    }
+    mapping = {"prod_recebiveis.diamond.dim_cedente": "dev_sandbox.diamond.dim_cedente"}
+    try:
+        rehydrate._apply_table_mapping(rebound, mapping, domain="recebiveis")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "sbx_recebiveis" in str(e)
+        assert "dev_sandbox" not in str(e)  # the CHOSEN catalog must not itself be flagged
+
+
+def test_audit_detail_carries_new_title_and_table_mapping():
+    prod = _prod_transport("prod-space", ["ana@x"])
+    dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: NS(space_id="new-id")))
+    store = _FakeStore()
+    mapping = {"prod_recebiveis.diamond.fato_recebiveis": "dev_recebiveis.diamond.custom_name"}
+
+    rehydrate.rehydrate_space(source_prod_space_id="prod-space", identity=ANA, mode="create",
+                              prod_client=prod, dev_client=dev, title="Recebíveis (dev)",
+                              store=store, promotion_id="promo-1", table_mapping=mapping)
+
+    _, _, kw = store.events[0]
+    assert kw["detail"]["new_title"] == "Recebíveis (dev)"
+    assert kw["detail"]["table_mapping"] == mapping
+
+
+def test_audit_detail_defaults_new_title_none_and_table_mapping_empty():
+    # A plain rehydrate with no overrides at all must still carry BOTH keys (nullable/empty, not
+    # missing) so an audit reviewer can tell "no override" apart from "field not even recorded".
+    prod = _prod_transport("prod-space", ["ana@x"])
+    dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: NS(space_id="new-id")))
+    store = _FakeStore()
+
+    rehydrate.rehydrate_space(source_prod_space_id="prod-space", identity=ANA, mode="create",
+                              prod_client=prod, dev_client=dev, store=store, promotion_id="promo-1")
+
+    _, _, kw = store.events[0]
+    assert kw["detail"]["new_title"] is None
+    assert kw["detail"]["table_mapping"] == {}
+
+
+# --- G6: preview_rehydrate (read-only, before the caller commits) --------------------------------
+
+
+def test_preview_rehydrate_returns_title_and_default_targets():
+    prod = _prod_transport("prod-space", ["ana@x"])
+    prod.genie.get_space = lambda sid, include_serialized_space=False: NS(
+        title="Recebíveis", serialized_space=json.dumps(PROD_SERIALIZED, ensure_ascii=False))
+
+    preview = rehydrate.preview_rehydrate("prod-space", identity=ANA, prod_client=prod,
+                                          dev_client=_dev_tables_transport({}))
+    assert preview["title"] == "Recebíveis"
+    assert preview["tables"] == [{
+        "source": "prod_recebiveis.diamond.fato_recebiveis",
+        "default_target": "dev_recebiveis.diamond.fato_recebiveis",
+        "dev_suggestions": [],
+    }]
+
+
+def test_preview_rehydrate_denies_before_export():
+    prod = _prod_transport("prod-space", ["ana@x"])
+    try:
+        rehydrate.preview_rehydrate("prod-space", identity=MALLORY, prod_client=prod,
+                                    dev_client=NS())
+        assert False, "expected AccessDenied"
+    except authz.AccessDenied:
+        pass
+
+
+def test_preview_rehydrate_dev_suggestions_best_effort_lists_existing_tables():
+    prod = _prod_transport("prod-space", ["ana@x"])
+    prod.genie.get_space = lambda sid, include_serialized_space=False: NS(
+        title="Recebíveis", serialized_space=json.dumps(PROD_SERIALIZED, ensure_ascii=False))
+    dev = _dev_tables_transport({("dev_recebiveis", "diamond"): ["fato_recebiveis", "fato_recebiveis_v2"]})
+
+    preview = rehydrate.preview_rehydrate("prod-space", identity=ANA, prod_client=prod, dev_client=dev)
+    assert preview["tables"][0]["dev_suggestions"] == [
+        "dev_recebiveis.diamond.fato_recebiveis", "dev_recebiveis.diamond.fato_recebiveis_v2",
+    ]
+
+
+def test_preview_rehydrate_dev_suggestions_degrade_to_empty_on_error():
+    # ANY failure listing dev tables (unreachable SP, schema not yet created, missing grant) must
+    # degrade to an empty suggestion list — never raise and never block the preview itself.
+    prod = _prod_transport("prod-space", ["ana@x"])
+    prod.genie.get_space = lambda sid, include_serialized_space=False: NS(
+        title="Recebíveis", serialized_space=json.dumps(PROD_SERIALIZED, ensure_ascii=False))
+
+    class _BoomTables:
+        def list(self, catalog, schema, **kw):
+            raise RuntimeError("dev schema not found")
+
+    preview = rehydrate.preview_rehydrate("prod-space", identity=ANA, prod_client=prod,
+                                          dev_client=NS(tables=_BoomTables()))
+    assert preview["tables"][0]["dev_suggestions"] == []
+
+
+def test_preview_rehydrate_dev_suggestions_degrade_when_no_dev_client_and_not_bootstrapped(monkeypatch):
+    # No dev_client injected -> falls through to app_logic._client(scope="dev-sp"), which raises when
+    # APP_DEV_HOST isn't configured (same SP2 gap as rehydrate_space) — the preview must still
+    # succeed, just with no suggestions, since a suggestion is never a hard dependency.
+    prod = _prod_transport("prod-space", ["ana@x"])
+    prod.genie.get_space = lambda sid, include_serialized_space=False: NS(
+        title="Recebíveis", serialized_space=json.dumps(PROD_SERIALIZED, ensure_ascii=False))
+    monkeypatch.setattr(app_logic, "APP_DEV_HOST", None)
+
+    preview = rehydrate.preview_rehydrate("prod-space", identity=ANA, prod_client=prod)
+    assert preview["tables"][0]["dev_suggestions"] == []

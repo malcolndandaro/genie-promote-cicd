@@ -16,6 +16,20 @@ test.beforeEach(async ({ page }) => {
       },
     }),
   );
+  // G6: the de-para preview every "Continuar" click now loads before 'confirming' — a single,
+  // one-table default here; tests that care about the de-para specifics override this route.
+  await page.route('**/api/rehydrate/preview**', (route) =>
+    route.fulfill({
+      json: {
+        title: 'Recebíveis',
+        tables: [{
+          source: 'prod_recebiveis.diamond.fato_recebiveis',
+          default_target: 'dev_recebiveis.diamond.fato_recebiveis',
+          dev_suggestions: [],
+        }],
+      },
+    }),
+  );
 });
 
 // --- 1. the standalone screen ---------------------------------------------------------------
@@ -100,6 +114,104 @@ test.describe('standalone "Trazer de volta para o dev" screen', () => {
 
     await expect(page.getByText('Você não tem acesso a este espaço.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();
+  });
+});
+
+// --- G6: editable dev title + table de-para (both entry points share RehydrateFlow) ------------
+
+test.describe('G6: editable dev title + table de-para', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/prod-spaces**', (route) =>
+      route.fulfill({ json: { spaces: [{ space_id: 'sp-receb', title: 'Recebíveis' }] } }),
+    );
+    // Override the top-level default: one table WITH a dev suggestion, so the de-para is exercised.
+    await page.route('**/api/rehydrate/preview**', (route) =>
+      route.fulfill({
+        json: {
+          title: 'Recebíveis',
+          tables: [{
+            source: 'prod_recebiveis.diamond.fato_recebiveis',
+            default_target: 'dev_recebiveis.diamond.fato_recebiveis',
+            dev_suggestions: ['dev_recebiveis.diamond.fato_recebiveis_v2'],
+          }],
+        },
+      }),
+    );
+  });
+
+  async function pickSpaceAndContinue(page: import('@playwright/test').Page): Promise<void> {
+    await page.goto('/#/rehidratar');
+    await page.getByRole('combobox', { name: 'Genie Space em produção' }).click();
+    await page.getByRole('option', { name: /Recebíveis/ }).click();
+    await page.getByRole('button', { name: 'Continuar' }).click();
+  }
+
+  test('the dev title is pre-filled with the prod title and is editable', async ({ page }) => {
+    await pickSpaceAndContinue(page);
+
+    const titleInput = page.getByLabel('Nome do space no dev');
+    await expect(titleInput).toHaveValue('Recebíveis');
+    await titleInput.fill('Recebíveis (minha versão)');
+
+    let posted: Record<string, unknown> | undefined;
+    await page.route('**/api/rehydrate', (route) => {
+      posted = route.request().postDataJSON();
+      return route.fulfill({ json: { space_id: 'dev-new-1', mode: 'create', title: 'Recebíveis (minha versão)' } });
+    });
+    await page.getByRole('button', { name: 'Confirmar rehidratação' }).click();
+
+    await expect(page.getByText('Space criado no dev:')).toBeVisible();
+    expect(posted?.title).toBe('Recebíveis (minha versão)');
+  });
+
+  test('shows the de-para pre-filled with the default target and sends only the OVERRIDDEN row', async ({ page }) => {
+    await pickSpaceAndContinue(page);
+
+    await expect(page.getByText('De-para de tabelas')).toBeVisible();
+    await expect(page.getByText('prod_recebiveis.diamond.fato_recebiveis')).toBeVisible();
+    const targetInput = page.getByLabel('Tabela no dev para prod_recebiveis.diamond.fato_recebiveis');
+    await expect(targetInput).toHaveValue('dev_recebiveis.diamond.fato_recebiveis');
+    // "Restaurar padrão" is hidden while the row still matches the default.
+    await expect(page.getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
+
+    await targetInput.fill('dev_recebiveis.diamond.fato_recebiveis_v2');
+    await expect(page.getByRole('button', { name: 'Restaurar padrão' })).toBeVisible();
+
+    let posted: Record<string, unknown> | undefined;
+    await page.route('**/api/rehydrate', (route) => {
+      posted = route.request().postDataJSON();
+      return route.fulfill({ json: { space_id: 'dev-new-1', mode: 'create', title: 'Recebíveis' } });
+    });
+    await page.getByRole('button', { name: 'Confirmar rehidratação' }).click();
+
+    await expect(page.getByText('Space criado no dev:')).toBeVisible();
+    expect(posted?.table_mapping).toEqual({
+      'prod_recebiveis.diamond.fato_recebiveis': 'dev_recebiveis.diamond.fato_recebiveis_v2',
+    });
+  });
+
+  test('"Restaurar padrão" resets an edited row back to the default target', async ({ page }) => {
+    await pickSpaceAndContinue(page);
+
+    const targetInput = page.getByLabel('Tabela no dev para prod_recebiveis.diamond.fato_recebiveis');
+    await targetInput.fill('dev_recebiveis.diamond.custom');
+    await page.getByRole('button', { name: 'Restaurar padrão' }).click();
+
+    await expect(targetInput).toHaveValue('dev_recebiveis.diamond.fato_recebiveis');
+    await expect(page.getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
+  });
+
+  test('a preview load failure surfaces inline on "choosing" and lets the caller retry', async ({ page }) => {
+    await page.route('**/api/rehydrate/preview**', (route) =>
+      route.fulfill({ status: 502, json: { detail: 'engine error: rehydrate_preview' } }),
+    );
+    await page.goto('/#/rehidratar');
+    await page.getByRole('combobox', { name: 'Genie Space em produção' }).click();
+    await page.getByRole('option', { name: /Recebíveis/ }).click();
+    await page.getByRole('button', { name: 'Continuar' }).click();
+
+    await expect(page.getByText('Não foi possível carregar a pré-visualização')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Continuar' })).toBeVisible(); // still on 'choosing'
   });
 });
 
