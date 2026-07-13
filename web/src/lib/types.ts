@@ -38,6 +38,11 @@ export interface Principal {
   id: string;
   display: string;
   email: string | null;
+  /** G9: false for a workspace-LOCAL group (built-in `users`/`admins`, or any workspace-scoped
+   * custom group) — UC grants reject those outright. Always true for a user (always account-level).
+   * Drives the UC-principals picker's exclusion; the Space-permissions picker ignores it (workspace
+   * ACLs accept local groups fine). */
+  uc_grantable: boolean;
 }
 
 /** One reviewer finding (deterministic rule or LLM). */

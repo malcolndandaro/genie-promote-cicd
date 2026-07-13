@@ -79,6 +79,29 @@ def test_from_dict_none_is_the_empty_spec():
     assert access_spec.AccessSpec.from_dict(None) == access_spec.AccessSpec()
 
 
+def test_declared_groups_is_deduped_union_of_group_principals_only():
+    """G9: `declared_groups()` is the class UC-grantability needs to be verified for — every
+    declared GROUP across both systems, deduped, but NEVER an individual user (always
+    account-level)."""
+    spec = access_spec.AccessSpec(
+        space_permissions=(
+            access_spec.SpacePermission(access_spec.Principal("business_users", is_group=True)),
+            access_spec.SpacePermission(access_spec.Principal("ana@x.com")),  # a user, not a group
+        ),
+        uc_principals=(
+            access_spec.Principal("business_users", is_group=True),  # same group, other system
+            access_spec.Principal("data_analysts", is_group=True),
+            access_spec.Principal("etl_service_principal"),  # a user, not a group
+        ),
+    )
+    assert spec.declared_groups() == ("business_users", "data_analysts")
+
+
+def test_declared_groups_empty_when_only_users_declared():
+    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),))
+    assert spec.declared_groups() == ()
+
+
 def test_group_name_for_is_deterministic_and_safe():
     assert access_spec.group_name_for("receivables") == "grp_genie_receivables"
     # same slug -> same group name every time (idempotent enforcement depends on this)

@@ -118,19 +118,41 @@ def _fake_scim_client(users=(), groups=()):
 def test_list_principals_maps_users_and_groups():
     fake = _fake_scim_client(
         users=[NS(id="uid-1", user_name="ana@x.com", display_name="Ana Silva")],
-        groups=[NS(id="gid-1", display_name="grp_genie_receivables")],
+        groups=[NS(id="gid-1", display_name="grp_genie_receivables")],  # no .meta -> name-fallback
     )
     out = app_logic.list_principals(client=fake)
     assert out == [
-        {"type": "user", "id": "uid-1", "display": "Ana Silva", "email": "ana@x.com"},
-        {"type": "group", "id": "gid-1", "display": "grp_genie_receivables", "email": None},
+        {"type": "user", "id": "uid-1", "display": "Ana Silva", "email": "ana@x.com", "uc_grantable": True},
+        {"type": "group", "id": "gid-1", "display": "grp_genie_receivables", "email": None, "uc_grantable": True},
     ]
 
 
 def test_list_principals_falls_back_to_user_name_without_display_name():
     fake = _fake_scim_client(users=[NS(id="uid-2", user_name="bob@x.com", display_name=None)])
     out = app_logic.list_principals(client=fake)
-    assert out == [{"type": "user", "id": "uid-2", "display": "bob@x.com", "email": "bob@x.com"}]
+    assert out == [{"type": "user", "id": "uid-2", "display": "bob@x.com", "email": "bob@x.com",
+                   "uc_grantable": True}]
+
+
+# --- G9: `uc_grantable` — a workspace-LOCAL group must never be offered to the UC-principals picker
+
+
+def test_list_principals_flags_workspace_local_group_as_not_uc_grantable():
+    fake = _fake_scim_client(groups=[NS(id="g1", display_name="users", meta=NS(resource_type="WorkspaceGroup"))])
+    out = app_logic.list_principals(client=fake)
+    assert out == [{"type": "group", "id": "g1", "display": "users", "email": None, "uc_grantable": False}]
+
+
+def test_list_principals_flags_account_group_as_uc_grantable():
+    fake = _fake_scim_client(groups=[NS(id="g2", display_name="data_analysts", meta=NS(resource_type="Group"))])
+    out = app_logic.list_principals(client=fake)
+    assert out[0]["uc_grantable"] is True
+
+
+def test_list_principals_group_without_meta_falls_back_to_builtin_name_exclusion():
+    fake = _fake_scim_client(groups=[NS(id="g3", display_name="admins")])  # no .meta attribute at all
+    out = app_logic.list_principals(client=fake)
+    assert out[0]["uc_grantable"] is False
 
 
 def test_list_principals_blank_query_lists_everyone_unfiltered():
@@ -639,6 +661,28 @@ def test_request_promotion_omits_access_sidecar_when_not_declared(monkeypatch):
     assert "src/genie/sp1.access.json" not in gh.promo["extra_files"]
 
 
+def test_request_promotion_clears_a_stale_access_sidecar_when_re_requested_empty(monkeypatch):
+    """G9 (found live, PR #25): a re-request on the SAME branch/PR that no longer declares an
+    AccessSpec must ask GitHubApp to DELETE any `.access.json` a PRIOR round already committed
+    there — `extra_files` only ever upserts, so without `remove_files` a stale sidecar would survive
+    forever and CI would keep reading it."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    assert "src/genie/sp1.access.json" in gh.promo["remove_files"]
+
+
+def test_request_promotion_never_removes_the_access_sidecar_when_still_declared(monkeypatch):
+    """The flip side: a request that DOES declare an AccessSpec must never ask for its own sidecar
+    to be removed (the committed file and the removal list are mutually exclusive)."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                access_spec_=_spec_with_access(), github=gh)
+    assert "src/genie/sp1.access.json" not in gh.promo["remove_files"]
+    assert "src/genie/sp1.access.json" in gh.promo["extra_files"]
+
+
 # --- G7: the declared prod Space name + table de-para (app-direct declaration, CI enforcement) ---
 
 
@@ -681,6 +725,25 @@ def test_request_promotion_omits_mapping_sidecar_when_not_declared(monkeypatch):
     assert "De-para de tabelas" not in gh.comment["body"]
 
 
+def test_request_promotion_clears_a_stale_mapping_sidecar_when_re_requested_empty(monkeypatch):
+    """G9: mirrors the access-sidecar case — a re-request that no longer declares a table_mapping
+    must ask for the PRIOR round's `.mapping.json` to be removed, not just left uncommitted-to."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    assert "src/genie/sp1.mapping.json" in gh.promo["remove_files"]
+
+
+def test_request_promotion_never_removes_the_mapping_sidecar_when_still_declared(monkeypatch):
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    mapping = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                table_mapping=mapping, github=gh)
+    assert "src/genie/sp1.mapping.json" not in gh.promo["remove_files"]
+    assert "src/genie/sp1.mapping.json" in gh.promo["extra_files"]
+
+
 def test_request_promotion_never_applies_the_mapping_itself(monkeypatch):
     """Enforcement must be GOVERNED (CI-run render.sh), never app-direct: request_promotion must
     never rebind/rewrite the committed artifact itself — it only ever writes the declared mapping
@@ -713,20 +776,9 @@ def test_request_promotion_never_calls_a_live_grant_or_permission_api(monkeypatc
     assert out["pr"]["number"] == 7  # completed without ever invoking the fake grant/permission APIs
 
 
-def test_review_space_grant01_preview_checks_all_declared_principals(monkeypatch):
-    """The in-app GRANT-01 PREVIEW (only runs with a reachable grant_profile) checks every
-    principal the AccessSpec declares, union'd with the base consumer_group — never a replacement."""
-    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
-        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
-    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
-
-    captured = {}
-
-    def fake_check_grants(space, principals, getter):
-        captured["principals"] = list(principals) if not isinstance(principals, str) else [principals]
-        return []
-
-    monkeypatch.setattr(app_logic.grant_check, "check_grants", fake_check_grants)
+def _stub_review_space_llm_leg(monkeypatch):
+    """Everything review_space needs downstream of the GRANT-01 preview — shared by every
+    grant-preview test below so each one only wires up the grants-specific parts."""
     monkeypatch.setattr(app_logic.review_core, "build_space_context",
                         lambda space: {"n_benchmark": 5})
     monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
@@ -734,11 +786,103 @@ def test_review_space_grant01_preview_checks_all_declared_principals(monkeypatch
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate",
                         lambda *a, **k: {"status": "advisory", "summary": "ok"})
 
+
+def test_review_space_grant01_preview_separates_baseline_from_declared_principals(monkeypatch):
+    """G9: the in-app GRANT-01 PREVIEW (only runs with a reachable grant_profile) checks the base
+    consumer_group and the AccessSpec's declared principals SEPARATELY — no longer union'd into one
+    flat list, since a missing grant means something different for each class."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
+        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())  # NS() has no .groups -> best-effort None
+
+    captured = {}
+
+    def fake_check_grants(space, consumer_group, getter, declared_principals=None, non_grantable_principals=None):
+        captured["consumer_group"] = consumer_group
+        captured["declared_principals"] = list(declared_principals or [])
+        captured["non_grantable_principals"] = list(non_grantable_principals or [])
+        return []
+
+    monkeypatch.setattr(app_logic.grant_check, "check_grants", fake_check_grants)
+    _stub_review_space_llm_leg(monkeypatch)
+
     spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),
                                                  access_spec.Principal("data_analysts", is_group=True)))
     result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
-    assert set(captured["principals"]) == {"account users", "ana@x.com", "data_analysts"}
+    assert captured["consumer_group"] == "account users"  # baseline, never unioned with declared
+    assert set(captured["declared_principals"]) == {"ana@x.com", "data_analysts"}
+    assert captured["non_grantable_principals"] == []  # unresolvable (fake has no .groups) -> best-effort empty
     assert result["access_spec"] == spec.to_dict()
+
+
+def test_review_space_grant01_preview_declared_miss_is_advisory_not_blocker(monkeypatch):
+    """A declared principal missing SELECT surfaces as a non-blocking SUGGESTION in the app's own
+    review result (mirrors CI) — it must NOT flip the gate to failure."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
+        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
+
+    def fake_client(*a, **k):
+        return NS(grants=NS(get_effective=lambda securable_type, full_name: NS(privilege_assignments=[
+            NS(principal="account users", privileges=[NS(privilege="SELECT")]),
+        ])))
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+    _stub_review_space_llm_leg(monkeypatch)
+
+    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),))
+    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
+    grant_findings = [f for f in result["findings"] if f["rule_id"] == "GRANT-01"]
+    assert len(grant_findings) == 1
+    assert grant_findings[0]["severity"] == "SUGGESTION"
+    assert "apply_access" in grant_findings[0]["message"]
+    assert result["gate"]["conclusion"] != "failure"  # advisory-only -> does not block
+
+
+def test_review_space_grant01_preview_baseline_miss_still_blocks(monkeypatch):
+    """Baseline (unchanged): a missing BASELINE grant still fails the gate even with an AccessSpec
+    declared — the pipeline never grants the baseline group."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
+        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
+
+    def fake_client(*a, **k):
+        return NS(grants=NS(get_effective=lambda securable_type, full_name: NS(privilege_assignments=[])))
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+    _stub_review_space_llm_leg(monkeypatch)
+
+    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),))
+    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
+    grant_findings = [f for f in result["findings"] if f["rule_id"] == "GRANT-01"]
+    severities = {f["principal"]: f["severity"] for f in grant_findings}
+    assert severities["account users"] == "BLOCKER"
+    assert severities["ana@x.com"] == "SUGGESTION"
+    assert result["gate"]["conclusion"] == "failure"  # the BLOCKER alone fails the gate
+
+
+def test_review_space_grant01_preview_flags_non_grantable_declared_group(monkeypatch):
+    """Additional scope: a declared GROUP that isn't UC-grantable (workspace-local) gets the
+    'não pode receber grant UC' advisory instead of the 'será concedido no deploy' promise."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
+        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
+
+    def fake_client(*a, **k):
+        return NS(
+            grants=NS(get_effective=lambda securable_type, full_name: NS(privilege_assignments=[
+                NS(principal="account users", privileges=[NS(privilege="SELECT")]),
+            ])),
+            groups=NS(list=lambda filter: [NS(display_name="users", meta=NS(resource_type="WorkspaceGroup"))]),
+        )
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+    _stub_review_space_llm_leg(monkeypatch)
+
+    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("users", is_group=True),))
+    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
+    grant_findings = [f for f in result["findings"] if f["rule_id"] == "GRANT-01"]
+    assert len(grant_findings) == 1
+    assert grant_findings[0]["severity"] == "SUGGESTION"
+    assert "grupo local do workspace" in grant_findings[0]["message"]
+    assert "apply_access" not in grant_findings[0]["message"]
 
 
 def test_review_space_pii_interplay_flags_declared_access_to_masked_column(monkeypatch):

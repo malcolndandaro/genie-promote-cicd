@@ -106,8 +106,12 @@ def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[d
         f"  - {q[:200]} :: {s[:1000]}"
         for q, s in zip(context.get("benchmark_questions", []), context.get("benchmark_sqls", []))
     ) or "  (nenhuma)"
+    # G9: a grant finding's severity is already DECIDED deterministically (BLOCKER for the baseline
+    # consumer group, SUGGESTION for a declared AccessSpec principal apply_access grants at deploy)
+    # — shown here so the LLM's narrative doesn't call an advisory one a blocker; finalize_findings
+    # OWNS the rule_id regardless, so the LLM's own GRANT-01 judgment never overrides this anyway.
     grant_block = (
-        "\n".join(f"  - {g.get('message')}" for g in (grant_findings or []))
+        "\n".join(f"  - [{g.get('severity')}] {g.get('message')}" for g in (grant_findings or []))
         or "  (verificação de grants não reportou problemas)"
     )
 
@@ -119,7 +123,7 @@ def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[d
         f"SQL de exemplo (Example queries):\n{sql_block}\n\n"
         f"perguntas de benchmark ({context.get('n_benchmark', 0)}):\n{bench_block}\n\n"
         f"joins: {', '.join(context.get('joins', [])) or '(nenhum)'}\n\n"
-        "ACHADOS DETERMINÍSTICOS DE GRANTS (considere como BLOCKER GRANT-01 se houver):\n"
+        "ACHADOS DETERMINÍSTICOS DE GRANTS (severidade já decidida — não a altere na sua resposta):\n"
         f"{grant_block}\n\n"
         "Devolva o JSON de achados."
     )

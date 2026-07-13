@@ -13,6 +13,14 @@ BOTH the Space-permissions and UC-grants halves — is checked, not just the sin
 CONSUMER_GROUP. A missing sidecar falls back to the original single-group behavior (no AccessSpec
 declared yet == the pre-F2 pipeline, still gated on the base consumer group).
 
+G9 (stakeholder decision, 2026-07-13): the base CONSUMER_GROUP and the sidecar's declared
+principals are no longer checked as one flat list — `apply_access.py` (post-merge) grants every
+DECLARED principal at deploy, so a missing SELECT for one of THEM is a non-blocking warning here
+(exit 0), never a reason to block the PR; a missing SELECT for the baseline group still exits 1
+unchanged (the pipeline never grants the baseline). A declared GROUP that isn't UC-grantable at all
+(workspace-local, e.g. built-in `users`) gets a warning saying so instead of a promise the pipeline
+can't keep (`grant_check.is_uc_grantable_group`).
+
 Usage:
     python3 scripts/check_grants.py [rendered_space.json] [consumer_group] [access_sidecar.json]
 Local test against a profile:
@@ -34,16 +42,51 @@ from databricks.sdk.service.catalog import SecurableType
 DEFAULT_PATH = "build/genie/receivables.serialized_space.json"
 
 
-def _declared_principals(sidecar_path: str, consumer_group: str) -> list[str]:
-    """All principals GRANT-01 must verify: the base consumer group PLUS every principal declared
-    in the AccessSpec sidecar (if one was committed for this promotion). Union, not replace — the
-    base group check is never weakened by an AccessSpec being present."""
-    principals = [consumer_group]
+def _load_access_spec(sidecar_path: "str | None") -> access_spec.AccessSpec:
+    """The AccessSpec declared for this promotion (F2 sidecar), or the empty spec if none was
+    committed — a missing sidecar means the pre-F2 pipeline: only the base consumer group is
+    checked (G9 keeps that fallback; it just no longer unions declared principals INTO the base
+    group's list — see `main`)."""
     if sidecar_path and os.path.exists(sidecar_path):
         with open(sidecar_path, encoding="utf-8") as fh:
-            spec = access_spec.AccessSpec.from_dict(json.load(fh))
-        principals += list(spec.all_principals())
-    return principals
+            return access_spec.AccessSpec.from_dict(json.load(fh))
+    return access_spec.AccessSpec()
+
+
+def _group_resource_type(w: WorkspaceClient, display_name: str) -> "str | None":
+    """Live SCIM lookup of a group's `meta.resourceType` (`"Group"` = account, `"WorkspaceGroup"` =
+    workspace-local) — `None` if the group can't be found at all. Thin wrapper around the SDK; the
+    grantability DECISION itself is the pure `grant_check.is_uc_grantable_group`."""
+    found = list(w.groups.list(filter=f'displayName eq "{display_name}"'))
+    if not found:
+        return None
+    return getattr(getattr(found[0], "meta", None), "resource_type", None)
+
+
+def _non_grantable_declared(w: WorkspaceClient, spec: access_spec.AccessSpec) -> list[str]:
+    """Which of the spec's declared GROUP principals apply_access could never actually grant
+    (workspace-local groups — UC grants reject those). Individual users are never checked here;
+    they're always account-level."""
+    return [name for name in spec.declared_groups()
+            if not grant_check.is_uc_grantable_group(_group_resource_type(w, name), name)]
+
+
+def _gh_escape(s: str) -> str:
+    """Escape text for a GitHub Actions workflow-command payload (`::error::`/`::warning::` lines a
+    step prints to stdout — GitHub auto-converts them into check-run annotations, which is how the
+    app's G8 check-details panel is meant to surface these findings instead of GitHub's own generic
+    noise). Per the documented workflow-command escaping, `%` must go first."""
+    return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _emit_annotation(level: str, message: str) -> None:
+    """Print a GRANT-01 finding as a REAL GitHub annotation (found live: bare `print()`s never
+    became annotations, so the app's check-details fallback picked up GitHub's own generic noise —
+    a Node.js deprecation warning + "Process completed with exit code 1." — instead of the actual PT
+    finding). `level` is `"error"` for a BLOCKER (baseline) finding, `"warning"` for an advisory
+    (declared-principal) one — GitHub reports these back as `annotation_level` `failure`/`warning`
+    respectively (see `github_app._summarize_annotations`, which prefers the `failure` ones)."""
+    print(f"::{level} title=GRANT-01::{_gh_escape(message)}")
 
 
 def _effective_grants(w: WorkspaceClient, full_name: str) -> list[dict]:
@@ -68,17 +111,39 @@ def main() -> int:
     with open(path, encoding="utf-8") as fh:
         space = json.load(fh)
 
-    principals = _declared_principals(sidecar_path, consumer_group)
+    spec = _load_access_spec(sidecar_path)
+    declared = list(spec.all_principals())
     w = WorkspaceClient()  # CI: prod SP via env; local: DATABRICKS_CONFIG_PROFILE
-    findings = grant_check.check_grants(space, principals, lambda fq: _effective_grants(w, fq))
+    non_grantable = _non_grantable_declared(w, spec) if declared else []
+    findings = grant_check.check_grants(
+        space, consumer_group, lambda fq: _effective_grants(w, fq),
+        declared_principals=declared, non_grantable_principals=non_grantable)
 
-    if findings:
-        print(f"🔴 GRANT-01 — promoção bloqueada ({len(findings)} achado(s)) "
-              f"para os principais declarados {principals}:")
-        for f in findings:
+    blockers = [f for f in findings if f.get("severity") == "BLOCKER"]
+    advisories = [f for f in findings if f.get("severity") != "BLOCKER"]
+    # G9: emit a REAL annotation per finding (alongside the human-readable prints below) — a bare
+    # print() never becomes a GitHub check-run annotation, so without this the app's check-details
+    # fallback had nothing of ours to show.
+    for f in blockers:
+        _emit_annotation("error", f"{f.get('table')} / {f.get('principal', consumer_group)}: {f.get('message')}")
+    for f in advisories:
+        _emit_annotation("warning", f"{f.get('table')} / {f.get('principal')}: {f.get('message')}")
+    for f in advisories:
+        print(f"🟡 GRANT-01 (advisory, não bloqueia) — {f.get('table')} / {f.get('principal')}: "
+              f"{f.get('message')}")
+    if blockers:
+        print(f"🔴 GRANT-01 — promoção bloqueada ({len(blockers)} achado(s) BLOCKER) "
+              f"para o grupo baseline '{consumer_group}':")
+        for f in blockers:
             print(f"  - {f.get('table')} / {f.get('principal', consumer_group)}: {f.get('message')}")
         return 1
-    print(f"✅ GRANT-01 — todos os principais declarados {principals} têm SELECT em todas as tabelas do espaço.")
+    if advisories:
+        print(f"✅ GRANT-01 — sem BLOCKER; {len(advisories)} achado(s) advisory para os principais "
+              f"declarados {declared} (concedidos pelo apply_access no deploy, ou já sinalizados acima "
+              f"como não-graváveis).")
+        return 0
+    print(f"✅ GRANT-01 — todos os principais têm SELECT (baseline '{consumer_group}'"
+          + (f" + declarados {declared}" if declared else "") + ") em todas as tabelas do espaço.")
     return 0
 
 

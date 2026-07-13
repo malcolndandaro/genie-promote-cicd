@@ -134,6 +134,42 @@ test('a preview load failure degrades gracefully — the name still defaults and
   expect(posted).not.toHaveProperty('table_mapping'); // no override to send — degrades to plain rebind
 });
 
+test('re-requesting the SAME space after a completed promotion resets the name/mapping form', async ({ page }) => {
+  // G9 (found live, PR #25 — same class of bug as the AccessSpec case): re-selecting the SAME
+  // space after a completed promotion (the grid re-enables once reviewed) must NOT carry the
+  // PRIOR round's edited name/table-mapping into the next request.
+  const posted: Record<string, unknown>[] = [];
+  await page.route('**/api/promote', (route) => {
+    posted.push(route.request().postDataJSON());
+    return route.fulfill({ json: { review: cleanReview, pr: PR } });
+  });
+
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+
+  const nameInput = page.getByLabel('Nome do space em produção');
+  await nameInput.fill('Recebíveis PROD');
+  const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
+  await targetInput.fill('prod_recebiveis.diamond.fato_recebiveis_v2');
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  expect(posted).toHaveLength(1);
+  expect(posted[0]).toMatchObject({ resource_title: 'Recebíveis PROD' });
+  expect(posted[0]?.table_mapping).toBeTruthy();
+
+  // Re-select the SAME space without editing anything — the form must come back pre-filled with
+  // the PLAIN dev title/default mapping (fresh preview), not the prior round's edit.
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Recebíveis');
+  await expect(page.getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+
+  expect(posted).toHaveLength(2);
+  expect(posted[1]).toMatchObject({ resource_title: 'Recebíveis' });
+  expect(posted[1]).not.toHaveProperty('table_mapping'); // the stale override did NOT ride along
+});
+
 test('cancelling the confirmation panel discards any declared name/mapping', async ({ page }) => {
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();

@@ -108,3 +108,92 @@ def test_single_string_consumer_group_still_works_backcompat():
         "prod_recebiveis.diamond.dim_arranjo": [{"principal": GROUP, "privileges": ["SELECT"]}],
     }
     assert grant_check.check_grants(SPACE, GROUP, lambda fq: grants[fq]) == []
+
+
+# --- G9: apply_access-aware split — baseline stays BLOCKER, declared becomes advisory ---------
+
+def test_is_uc_grantable_group_account_type_is_grantable():
+    assert grant_check.is_uc_grantable_group("Group", "data_analysts") is True
+
+
+def test_is_uc_grantable_group_workspace_local_type_is_not_grantable():
+    assert grant_check.is_uc_grantable_group("WorkspaceGroup", "any_custom_local_group") is False
+
+
+def test_is_uc_grantable_group_unverifiable_falls_back_to_builtin_name_exclusion():
+    """No SCIM meta at all (lookup miss) — only the well-known built-ins are excluded by name; an
+    unverifiable CUSTOM group name is never blindly trusted OR blindly rejected on name alone."""
+    assert grant_check.is_uc_grantable_group(None, "users") is False
+    assert grant_check.is_uc_grantable_group(None, "admins") is False
+    assert grant_check.is_uc_grantable_group(None, "data_analysts") is True
+
+
+def test_declared_principal_missing_select_is_advisory_not_blocker():
+    """G9: a DECLARED (AccessSpec) principal missing SELECT is a non-blocking SUGGESTION — the
+    pipeline's own apply_access grants it at deploy, so blocking pre-merge on it is contradictory."""
+    grants = {
+        "prod_recebiveis.diamond.fato_recebiveis": [{"principal": GROUP, "privileges": ["SELECT"]}],
+        "prod_recebiveis.diamond.dim_arranjo": [{"principal": GROUP, "privileges": ["SELECT"]}],
+    }
+    out = grant_check.check_grants(SPACE, GROUP, lambda fq: grants[fq], declared_principals=["ana@x.com"])
+    assert len(out) == 2  # one per table
+    assert all(f["severity"] == "SUGGESTION" and f["rule_id"] == "GRANT-01" for f in out)
+    assert all(f["principal"] == "ana@x.com" for f in out)
+    assert all("apply_access" in f["message"] and "deploy" in f["message"] for f in out)
+
+
+def test_baseline_missing_select_stays_blocker_when_declared_also_missing():
+    """Misto: a baseline-miss AND a declared-miss together — the baseline one still blocks
+    (BLOCKER), the declared one is merely advisory (SUGGESTION); the output distinguishes both."""
+    grants = {
+        "prod_recebiveis.diamond.fato_recebiveis": [],
+        "prod_recebiveis.diamond.dim_arranjo": [],
+    }
+    out = grant_check.check_grants(SPACE, GROUP, lambda fq: grants[fq], declared_principals=["ana@x.com"])
+    by_principal = {(f["principal"], f["severity"]) for f in out}
+    assert (GROUP, "BLOCKER") in by_principal
+    assert ("ana@x.com", "SUGGESTION") in by_principal
+    assert any(f["severity"] == "BLOCKER" for f in out)  # a caller's decide_gate would still fail
+
+
+def test_declared_principal_already_in_baseline_is_not_double_reported():
+    """A principal declared again that's already the baseline group is checked ONLY as baseline
+    (BLOCKER), never ALSO as a separate advisory finding for the same (table, principal)."""
+    grants = {
+        "prod_recebiveis.diamond.fato_recebiveis": [],
+        "prod_recebiveis.diamond.dim_arranjo": [],
+    }
+    out = grant_check.check_grants(SPACE, GROUP, lambda fq: grants[fq], declared_principals=[GROUP])
+    assert len(out) == 2  # not 4 — GROUP is never checked twice
+    assert all(f["severity"] == "BLOCKER" for f in out)
+
+
+def test_non_grantable_declared_principal_gets_the_not_grantable_advisory():
+    """A declared principal apply_access could never actually grant (a workspace-local group) gets
+    a message saying so — not a promise ('será concedido no deploy') the pipeline can't keep."""
+    grants = {
+        "prod_recebiveis.diamond.fato_recebiveis": [{"principal": GROUP, "privileges": ["SELECT"]}],
+        "prod_recebiveis.diamond.dim_arranjo": [{"principal": GROUP, "privileges": ["SELECT"]}],
+    }
+    out = grant_check.check_grants(
+        SPACE, GROUP, lambda fq: grants[fq],
+        declared_principals=["users"], non_grantable_principals=["users"])
+    assert len(out) == 2
+    assert all(f["severity"] == "SUGGESTION" and f["principal"] == "users" for f in out)
+    assert all("grupo local do workspace" in f["message"] for f in out)
+    assert all("apply_access" not in f["message"] for f in out)  # never the "will be granted" promise
+
+
+def test_declared_principal_that_can_select_produces_no_finding():
+    grants = {
+        "prod_recebiveis.diamond.fato_recebiveis": [
+            {"principal": GROUP, "privileges": ["SELECT"]},
+            {"principal": "ana@x.com", "privileges": ["SELECT"]},
+        ],
+        "prod_recebiveis.diamond.dim_arranjo": [
+            {"principal": GROUP, "privileges": ["SELECT"]},
+            {"principal": "ana@x.com", "privileges": ["SELECT"]},
+        ],
+    }
+    out = grant_check.check_grants(SPACE, GROUP, lambda fq: grants[fq], declared_principals=["ana@x.com"])
+    assert out == []

@@ -92,10 +92,12 @@
 
   <!-- G3: the confirmation step — bound to the CHOSEN space (title visible), optional access
        declaration, then "Confirmar promoção". Shown only until the promotion is actually requested.
-       Keyed by resource id so a re-selection (e.g. from Home, without going through "cancel" first)
-       remounts the panel — the access declaration never carries over from a DIFFERENT space. -->
+       Keyed by `selectionSeq` (NOT `resource?.id` — found live, PR #25: re-selecting the SAME space
+       must ALSO remount the panel, or its declaration forms keep their prior rows/title and the
+       stale AccessSpec/table-mapping/title silently rides the next request) so EVERY select(), same-
+       space included, remounts PromotionMappingForm/AccessSpecForm fresh. -->
   {#if confirming}
-    {#key promotion.resource?.id}
+    {#key promotion.selectionSeq}
       <PromotionConfirm {promotion} onCancel={() => promotion.select(null)} />
     {/key}
   {/if}

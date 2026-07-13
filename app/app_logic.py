@@ -277,6 +277,14 @@ def list_principals(query: str = "", *, profile: str | None = None, client: Work
     for local/dev callers whose token has full scopes; the deployed endpoint gates the CALLER on
     their OBO token but passes no token here. A bare ``profile``/injected ``client`` is the existing
     local/offline/test convention.
+
+    G9 (Additional scope, found live 2026-07-13): every GROUP carries a ``uc_grantable`` flag — UC
+    grants reject workspace-LOCAL groups (the built-in ``users``/``admins``, or any workspace-scoped
+    custom group), so the UC-principals half of ``AccessSpecForm`` must not offer one
+    (``grant_check.is_uc_grantable_group``, keyed off the group's SCIM ``meta.resourceType``: account
+    groups report ``"Group"``, workspace-local groups report ``"WorkspaceGroup"``). The Space
+    -permissions half keeps listing every group unfiltered — workspace ACLs accept them fine. Every
+    USER is always ``True`` (an individual is always account-level).
     """
     w = client or _client(profile, user_token=user_token)
     q = query.strip()
@@ -287,7 +295,7 @@ def list_principals(query: str = "", *, profile: str | None = None, client: Work
         count = 0
         for u in w.users.list(filter=user_filter):
             principals.append({"type": "user", "id": u.id, "display": u.display_name or u.user_name or u.id,
-                               "email": u.user_name})
+                               "email": u.user_name, "uc_grantable": True})
             count += 1
             if count >= limit:
                 break
@@ -296,7 +304,10 @@ def list_principals(query: str = "", *, profile: str | None = None, client: Work
         group_filter = f'displayName co "{q}"' if q else None
         count = 0
         for g in w.groups.list(filter=group_filter):
-            principals.append({"type": "group", "id": g.id, "display": g.display_name or g.id, "email": None})
+            resource_type = getattr(getattr(g, "meta", None), "resource_type", None)
+            display = g.display_name or g.id
+            principals.append({"type": "group", "id": g.id, "display": display, "email": None,
+                               "uc_grantable": grant_check.is_uc_grantable_group(resource_type, display)})
             count += 1
             if count >= limit:
                 break
@@ -441,6 +452,24 @@ def _pii_access_findings(space: dict, spec: "access_spec.AccessSpec") -> list[di
     }]
 
 
+def _non_grantable_declared_groups(gw: WorkspaceClient, spec: "access_spec.AccessSpec") -> list[str]:
+    """G9: which of the AccessSpec's declared GROUP principals apply_access could never actually
+    grant (workspace-local groups — UC grants reject those; `grant_check.is_uc_grantable_group`).
+    Individual users are never checked — always account-level. Best-effort per group: a lookup
+    failure falls back to the pure predicate's own unverifiable-group heuristic rather than
+    aborting the whole (already best-effort) GRANT-01 preview."""
+    out = []
+    for name in spec.declared_groups():
+        try:
+            found = list(gw.groups.list(filter=f'displayName eq "{name}"'))
+            resource_type = getattr(getattr(found[0], "meta", None), "resource_type", None) if found else None
+        except Exception:  # noqa: BLE001
+            resource_type = None
+        if not grant_check.is_uc_grantable_group(resource_type, name):
+            out.append(name)
+    return out
+
+
 def review_space(space_id: str, profile: str | None = None, to_env: str = "prod", domain: str = DOMAIN,
                  consumer_group: str | None = None, grant_profile: str | None = None,
                  user_token: str | None = None,
@@ -495,14 +524,17 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
          "suggestion": "Remover/pré-renderizar a referência de outro ambiente."}
         for v in violations
     ]
-    # GRANT-01 preview: union of the base consumer_group + every principal the AccessSpec declares
-    # (F2) — declaring an AccessSpec never NARROWS the check, it only ever adds more principals.
-    all_principals = list(dict.fromkeys([consumer_group, *spec.all_principals()]))
+    # GRANT-01 preview (G9): consumer_group stays the BASELINE class (missing SELECT -> BLOCKER,
+    # unchanged); every principal the AccessSpec declares (F2) is checked SEPARATELY as the
+    # DECLARED class (missing SELECT -> non-blocking SUGGESTION — apply_access grants these at
+    # deploy, so blocking pre-merge on it would be contradictory).
     if grant_profile:  # only preview when a reachable prod target is configured (else CI owns it)
         try:
             gw = _client(grant_profile)  # built here so a bad/unreachable prod profile can't break the review
+            non_grantable = _non_grantable_declared_groups(gw, spec)
             deterministic += grant_check.check_grants(
-                prod_space, all_principals, lambda fq: _effective_grants(grant_profile, fq, client=gw))
+                prod_space, consumer_group, lambda fq: _effective_grants(grant_profile, fq, client=gw),
+                declared_principals=spec.all_principals(), non_grantable_principals=non_grantable)
         except Exception:  # noqa: BLE001 — grant check is best-effort; never break the review
             pass
     deterministic += _pii_access_findings(prod_space, spec)
@@ -630,6 +662,11 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     # the prod space keeps a friendly title). Committed next to the artifact; no shared manifest, so
     # concurrent per-space PRs never conflict.
     extra = {f"{GH_GENIE_SRC_DIR}/{slug}.title": prod_title + "\n"}
+    # G9 (found live, PR #25): a re-request on this SAME branch/PR that no longer declares an
+    # AccessSpec/table_mapping must CLEAR any sidecar a PRIOR round already committed there — extra
+    # only ever UPSERTS, so without this a stale `.access.json`/`.mapping.json` would survive
+    # forever once committed, and CI (check_grants.py/render.sh) would keep reading it.
+    remove: list[str] = []
     spec = access_spec_ or access_spec.AccessSpec()
     if not spec.is_empty():
         # The AccessSpec sidecar (F2): committed alongside the artifact so CI's render.sh copies it
@@ -637,12 +674,16 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
         # apply_access.py (governed enforcement) applies the per-Space group + grants + Space
         # permissions — NEVER applied here (no app-direct prod mutation).
         extra[access_path_for(slug)] = json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n"
+    else:
+        remove.append(access_path_for(slug))
     if table_mapping:
         # The table de-para sidecar (G7): committed alongside the artifact so CI's render.sh applies
         # it (AFTER the dev_->prod_ rebind, BEFORE the strict allowlist check) — NEVER applied here.
         extra[mapping_path_for(slug)] = json.dumps(table_mapping, ensure_ascii=False, indent=2) + "\n"
+    else:
+        remove.append(mapping_path_for(slug))
     pr = gh.open_or_update_promotion(
-        branch=branch, path=path, content=content, extra_files=extra,
+        branch=branch, path=path, content=content, extra_files=extra, remove_files=remove,
         title=f"Promover Genie Space para produção ({safe_id})",
         body=(f"Promoção solicitada por **{who}** via o app (bot abriu o PR em seu nome). "
               f"Espaço `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo; `pr-checks` "

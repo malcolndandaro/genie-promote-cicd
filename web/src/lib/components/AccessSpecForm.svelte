@@ -43,6 +43,16 @@
     return results.map(toOption);
   }
 
+  /** G9: the UC-grants picker must never offer a principal UC grants would reject — a workspace-
+   * LOCAL group (`uc_grantable === false`; verified live: "Could not find principal with name
+   * users"). Filtered out here rather than disabled-with-hint (simplest fix for a picker that has
+   * no per-option disabled state); the Space-permissions picker above keeps `searchPrincipals`
+   * unfiltered — workspace ACLs accept local groups fine. */
+  async function searchUcPrincipals(q: string): Promise<PrincipalOption[]> {
+    const results = await getPrincipals(q);
+    return results.filter((p) => p.uc_grantable).map(toOption);
+  }
+
   /** The wire value `apply_access.py` resolves against the SDK: a user's email (`userName`), or a
    * group's `displayName` — never the picker's internal `id`. */
   function wireValue(p: Principal): string {
@@ -127,13 +137,17 @@
 
       <fieldset class="access-form__group">
         <legend>Acesso aos dados (UC SELECT)</legend>
+        <p class="muted text-sm">
+          Apenas usuários e grupos de CONTA aparecem aqui — grupos locais do workspace (ex.:
+          "users") não podem receber grant UC.
+        </p>
         {#each ucRows as row, i (row.id)}
           <div class="access-form__row">
             <div class="access-form__picker">
               <Picker
                 label="Usuário ou grupo"
-                placeholder="Buscar usuário ou grupo…"
-                search={searchPrincipals}
+                placeholder="Buscar usuário ou grupo de conta…"
+                search={searchUcPrincipals}
                 bind:value={row.principal}
               />
             </div>

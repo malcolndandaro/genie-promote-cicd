@@ -75,6 +75,24 @@ def test_prompt_includes_grant_findings():
     assert "dim_arranjo" in user
 
 
+def test_prompt_shows_grant_finding_severity_so_the_llm_never_narrates_an_advisory_as_a_blocker():
+    """G9: a GRANT-01 finding's severity is already decided deterministically (BLOCKER for the
+    baseline group, SUGGESTION for a declared AccessSpec principal) — the prompt must show that
+    severity per finding, not a blanket 'treat as BLOCKER' instruction that would mislead the LLM's
+    narrative for a merely-advisory finding."""
+    ctx = rc.build_space_context(SPACE)
+    _, user = rc.build_review_prompt(
+        ctx, handbook_rules.RULES,
+        grant_findings=[
+            {"severity": "BLOCKER", "message": "grupo baseline sem SELECT"},
+            {"severity": "SUGGESTION", "message": "ana@x.com sem SELECT — será concedido no deploy"},
+        ],
+    )
+    assert "[BLOCKER] grupo baseline sem SELECT" in user
+    assert "[SUGGESTION] ana@x.com sem SELECT" in user
+    assert "considere como BLOCKER" not in user
+
+
 def test_parse_review_tolerant_fenced():
     raw = '```json\n{"summary":"s","findings":[{"severity":"BLOCKER","rule_id":"ENV-01",' \
           '"citation":"c","message":"m","suggestion":null}]}\n```'
