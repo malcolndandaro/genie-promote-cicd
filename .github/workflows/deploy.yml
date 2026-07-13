@@ -70,7 +70,7 @@ jobs:
             title="$(cat "build/genie/${slug}.title" 2>/dev/null || true)"
             python3 scripts/apply_access.py "$f" "build/genie/${slug}.access.json" "$title"
           done
-      - name: Make deployed spaces visible to the app (CAN_READ -> app SP, idempotent)
+      - name: Make deployed spaces usable by the app (CAN_MANAGE -> app SP, idempotent)
         # The prod-hosted app lists/exports prod Spaces as its own SP; without a per-Space ACL the
         # Space is invisible to the app's pickers (Acesso / Trazer de volta) — found live. Runs for
         # EVERY deployed space (unlike apply_access, which only runs when an AccessSpec sidecar

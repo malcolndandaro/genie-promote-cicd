@@ -3,7 +3,11 @@
 WHY (found live, 2026-07-13): the prod-hosted app lists/exports prod Spaces as ITS OWN SP
 (`list_prod_spaces`, the rehydrate export) — Genie has no workspace-level listing for
 non-admins, so a Space the app SP holds no ACL on simply doesn't exist for the app: the
-Acesso/Rehidratar pickers render "Nenhum resultado". Granting per-Space by hand does not
+Acesso/Rehidratar pickers render "Nenhum resultado". Level: CAN_MANAGE — the A2 guard
+reads the Space ACL via the app SP (permissions.get is manage-level) and rehydrate exports the
+serialized_space; CAN_READ proved insufficient live (guard fail-closed 403). Same trust model as
+the dev SP's per-Space CAN_MANAGE (provision_dev_sp.sh); the per-user guard stays the real
+authorization. Granting per-Space by hand does not
 scale (the stakeholder's exact complaint), so the PIPELINE does it: this runs in deploy.yml
 right after `apply_access.py`, AS the prod CI SP, for EVERY deployed space — the same
 governed identity/step that created the Space makes it visible to the app. Config-driven
@@ -48,10 +52,10 @@ def main() -> int:
         request_object_id=space_id,
         access_control_list=[iam.AccessControlRequest(
             service_principal_name=app_sp,
-            permission_level=iam.PermissionLevel.CAN_READ,
+            permission_level=iam.PermissionLevel.CAN_MANAGE,
         )],
     )
-    print(f"grant_app_sp_read: CAN_READ -> app SP ({app_sp}) on space '{title}' (id={space_id})")
+    print(f"grant_app_sp_read: CAN_MANAGE -> app SP ({app_sp}) on space '{title}' (id={space_id})")
     return 0
 
 
