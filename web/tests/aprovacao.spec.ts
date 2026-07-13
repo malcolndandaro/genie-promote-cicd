@@ -57,6 +57,8 @@ async function requestAsAuthor(page: Page, review: unknown, viewer = 'malcoln@da
   await page.route('**/api/promote', (r) => r.fulfill({ json: { review, pr: PR, promotion_id: 'p1' } }));
   await page.goto('/');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  // G3: choosing the space from Home lands on the confirmation panel in "Meus espaços" — confirm it.
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
   await expect(page.getByRole('heading', { name: 'Aprovação do Steward' })).toBeVisible();
 }
 

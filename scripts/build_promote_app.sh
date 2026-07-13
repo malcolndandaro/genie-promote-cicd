@@ -44,7 +44,10 @@ except Exception:
 
 APP_DEV_HOST="${BUNDLE_DEV_HOST:-$(_bundle_var dev_host https://your-dev-workspace.cloud.databricks.com)}"
 APP_DEV_SP_SECRET_SCOPE="${BUNDLE_DEV_SP_SECRET_SCOPE:-$(_bundle_var dev_sp_secret_scope genie_promote)}"
-echo "resolved APP_DEV_HOST=$APP_DEV_HOST APP_DEV_SP_SECRET_SCOPE=$APP_DEV_SP_SECRET_SCOPE"
+# A3/G5 (found live): rehydrate binds the recreated dev Space to a dev SQL warehouse — without this
+# env the engine raises at run time ("engine error: rehydrate_space"). Same config-driven pattern.
+APP_DEV_WAREHOUSE_ID="${BUNDLE_DEV_WAREHOUSE_ID:-$(_bundle_var dev_warehouse_id your-dev-warehouse-id)}"
+echo "resolved APP_DEV_HOST=$APP_DEV_HOST APP_DEV_SP_SECRET_SCOPE=$APP_DEV_SP_SECRET_SCOPE APP_DEV_WAREHOUSE_ID=$APP_DEV_WAREHOUSE_ID"
 
 # 1. Build the Svelte SPA -> web/dist
 if [ ! -d web/node_modules ]; then
@@ -116,6 +119,8 @@ env:
     value: "__APP_DEV_HOST__"
   - name: APP_DEV_SP_SECRET_SCOPE
     value: "__APP_DEV_SP_SECRET_SCOPE__"
+  - name: APP_DEV_WAREHOUSE_ID
+    value: "__APP_DEV_WAREHOUSE_ID__"
 YAML
 # Swap the two placeholders for the resolved bundle-variable values (see the `_bundle_var` helper
 # above) — done with `sed` rather than shell interpolation inside the heredoc so the heredoc's own
@@ -124,6 +129,7 @@ YAML
 sed -i.bak \
   -e "s|__APP_DEV_HOST__|${APP_DEV_HOST}|" \
   -e "s|__APP_DEV_SP_SECRET_SCOPE__|${APP_DEV_SP_SECRET_SCOPE}|" \
+  -e "s|__APP_DEV_WAREHOUSE_ID__|${APP_DEV_WAREHOUSE_ID}|" \
   "$OUT/app.yaml"
 rm -f "$OUT/app.yaml.bak"  # BSD sed (macOS) requires -i's backup suffix arg; GNU sed treats it the same
 # The built SPA the FastAPI app serves (engine_api/main.py -> <app-root>/static).

@@ -134,6 +134,27 @@ def test_finalize_no_eval01_at_two_benchmarks():
     assert not any(f["rule_id"] == "EVAL-01" for f in out)
 
 
+def test_finalize_eval01_severity_defaults_to_blocker():
+    # Backward compatibility: a caller that doesn't pass eval01_severity (every pre-G2 call site)
+    # sees the exact same BLOCKER severity as before this parameter existed.
+    out = rc.finalize_findings([], [], n_benchmark=0)
+    ev = next(f for f in out if f["rule_id"] == "EVAL-01")
+    assert ev["severity"] == "BLOCKER"
+
+
+def test_finalize_eval01_severity_is_configurable():
+    # G2: an admin override (via rules_config.eval01_config) can downgrade the backstop's severity.
+    out = rc.finalize_findings([], [], n_benchmark=0, eval01_severity="SUGGESTION")
+    ev = next(f for f in out if f["rule_id"] == "EVAL-01")
+    assert ev["severity"] == "SUGGESTION"
+
+
+def test_finalize_min_benchmark_is_configurable():
+    # G2: an admin-raised threshold (e.g. min_benchmarks=5) fires the backstop even at 3 benchmarks.
+    out = rc.finalize_findings([], [], n_benchmark=3, min_benchmark=5)
+    assert any(f["rule_id"] == "EVAL-01" for f in out)
+
+
 def test_finalize_dedups_llm_against_deterministic_owner():
     det = [{"severity": "BLOCKER", "rule_id": "GRANT-01", "citation": "c", "message": "det"}]
     llm = [{"severity": "SUGGESTION", "rule_id": "GRANT-01", "citation": "c", "message": "llm-soft"},

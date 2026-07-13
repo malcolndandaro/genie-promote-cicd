@@ -82,6 +82,92 @@ def test_export_serialized_empty_when_missing():
     assert app_logic.export_serialized("sid", "p", client=fake) == {}
 
 
+# --- G1: list_principals (SCIM users/groups directory for the prefilled pickers) ---------------
+
+
+class _FakeScimUsers:
+    """`list(filter=...)` -> iterable of NS(id, user_name, display_name). `filter=None` (blank
+    query) returns everyone; otherwise a naive substring match on the quoted query stands in for the
+    real SCIM `co` clause — enough to prove the query is actually threaded through."""
+
+    def __init__(self, users):
+        self._users = users
+
+    def list(self, filter=None):  # noqa: A002 - mirrors the SDK kwarg
+        if filter is None:
+            return list(self._users)
+        q = filter.split('"')[1].lower()
+        return [u for u in self._users if q in u.user_name.lower() or q in (u.display_name or "").lower()]
+
+
+class _FakeScimGroups:
+    def __init__(self, groups):
+        self._groups = groups
+
+    def list(self, filter=None):  # noqa: A002
+        if filter is None:
+            return list(self._groups)
+        q = filter.split('"')[1].lower()
+        return [g for g in self._groups if q in g.display_name.lower()]
+
+
+def _fake_scim_client(users=(), groups=()):
+    return NS(users=_FakeScimUsers(list(users)), groups=_FakeScimGroups(list(groups)))
+
+
+def test_list_principals_maps_users_and_groups():
+    fake = _fake_scim_client(
+        users=[NS(id="uid-1", user_name="ana@x.com", display_name="Ana Silva")],
+        groups=[NS(id="gid-1", display_name="grp_genie_receivables")],
+    )
+    out = app_logic.list_principals(client=fake)
+    assert out == [
+        {"type": "user", "id": "uid-1", "display": "Ana Silva", "email": "ana@x.com"},
+        {"type": "group", "id": "gid-1", "display": "grp_genie_receivables", "email": None},
+    ]
+
+
+def test_list_principals_falls_back_to_user_name_without_display_name():
+    fake = _fake_scim_client(users=[NS(id="uid-2", user_name="bob@x.com", display_name=None)])
+    out = app_logic.list_principals(client=fake)
+    assert out == [{"type": "user", "id": "uid-2", "display": "bob@x.com", "email": "bob@x.com"}]
+
+
+def test_list_principals_blank_query_lists_everyone_unfiltered():
+    fake = _fake_scim_client(
+        users=[NS(id="u1", user_name="ana@x.com", display_name="Ana"),
+               NS(id="u2", user_name="bob@x.com", display_name="Bob")],
+    )
+    out = app_logic.list_principals("", client=fake)
+    assert [p["id"] for p in out] == ["u1", "u2"]
+
+
+def test_list_principals_query_filters_server_side():
+    fake = _fake_scim_client(
+        users=[NS(id="u1", user_name="ana@x.com", display_name="Ana"),
+               NS(id="u2", user_name="bob@x.com", display_name="Bob")],
+        groups=[NS(id="g1", display_name="grp_ana_readers"), NS(id="g2", display_name="grp_other")],
+    )
+    out = app_logic.list_principals("ana", client=fake)
+    assert {p["id"] for p in out} == {"u1", "g1"}  # "Bob"/"grp_other" don't match "ana"
+
+
+def test_list_principals_kind_narrows_to_one_type():
+    fake = _fake_scim_client(
+        users=[NS(id="u1", user_name="ana@x.com", display_name="Ana")],
+        groups=[NS(id="g1", display_name="grp_x")],
+    )
+    assert [p["type"] for p in app_logic.list_principals(kind="user", client=fake)] == ["user"]
+    assert [p["type"] for p in app_logic.list_principals(kind="group", client=fake)] == ["group"]
+
+
+def test_list_principals_respects_limit_per_kind():
+    fake = _fake_scim_client(users=[NS(id=f"u{i}", user_name=f"u{i}@x.com", display_name=None)
+                                    for i in range(5)])
+    out = app_logic.list_principals(limit=2, client=fake)
+    assert len(out) == 2
+
+
 # --- A2: cross-workspace read-path rewiring (list_spaces/export_serialized -> dev-sp + guard) ---
 
 
@@ -195,6 +281,85 @@ def test_export_serialized_local_profile_path_skips_guard(monkeypatch):
     monkeypatch.setattr(app_logic, "_client", lambda *a, **k: fake)
     out = app_logic.export_serialized("sid", "some-profile")
     assert out == {"x": 1}
+    assert called["assert_can_access"] is False
+
+
+# --- G7: preview_promotion (read-only, before the caller commits) ------------------------------
+
+
+def _fake_dev_space_transport(space_id, allowed, serialized, title=None):
+    """A fake dev-sp WorkspaceClient exposing ONE Space via `genie.get_space` (mirrors
+    `_fake_dev_transport` above, but for a single-space read instead of `list_spaces`)."""
+    def get_perms(request_object_type, request_object_id):
+        ok = allowed if request_object_id == space_id else []
+        return NS(access_control_list=[
+            NS(user_name=u, group_name=None, service_principal_name=None,
+               all_permissions=[NS(permission_level="CAN_MANAGE")])
+            for u in ok
+        ])
+
+    return NS(
+        genie=NS(get_space=lambda sid, include_serialized_space=False:
+                NS(serialized_space=json.dumps(serialized, ensure_ascii=False), title=title)),
+        permissions=NS(get=get_perms),
+    )
+
+
+_DEV_SERIALIZED = {"data_sources": {"tables": [{"identifier": "dev_recebiveis.diamond.fato_recebiveis"}]}}
+
+
+def test_preview_promotion_returns_title_and_default_targets(monkeypatch):
+    dev = _fake_dev_space_transport("dev-space", ["ana@x"], _DEV_SERIALIZED, title="Recebíveis")
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: dev)
+    monkeypatch.setattr(authz, "verify_identity",
+                        lambda token, **k: authz.VerifiedIdentity(user_name="ana@x", group_names=frozenset()))
+    out = app_logic.preview_promotion("dev-space", user_token="tok-ana")
+    assert out["title"] == "Recebíveis"
+    assert out["tables"] == [{"source": "dev_recebiveis.diamond.fato_recebiveis",
+                              "default_target": "prod_recebiveis.diamond.fato_recebiveis"}]
+
+
+def test_preview_promotion_denies_a_requester_who_does_not_own_the_space(monkeypatch):
+    # Mirrors A2's export_serialized guard: preview_promotion touches ONE blast site (dev) and
+    # denies FIRST, before ever reading the Space.
+    dev = _fake_dev_space_transport("dev-space", ["ana@x"], _DEV_SERIALIZED)
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: dev)
+    monkeypatch.setattr(authz, "verify_identity",
+                        lambda token, **k: authz.VerifiedIdentity(user_name="mallory@x", group_names=frozenset()))
+    try:
+        app_logic.preview_promotion("dev-space", user_token="tok-mallory")
+        assert False, "expected AccessDenied"
+    except authz.AccessDenied:
+        pass
+
+
+def test_preview_promotion_uses_dev_sp_scope_not_obo(monkeypatch):
+    # OBO cannot span workspaces once prod-hosted (ADR-0006) — the preview must request the
+    # dev-reader/writer SP transport (scope="dev-sp"), never build an OBO client for dev.
+    seen_scopes = []
+
+    def fake_client(*a, **k):
+        seen_scopes.append(k.get("scope"))
+        return _fake_dev_space_transport("dev-space", ["ana@x"], _DEV_SERIALIZED)
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+    monkeypatch.setattr(authz, "verify_identity",
+                        lambda token, **k: authz.VerifiedIdentity(user_name="ana@x", group_names=frozenset()))
+    app_logic.preview_promotion("dev-space", user_token="tok-ana")
+    assert seen_scopes == ["dev-sp"]
+
+
+def test_preview_promotion_injected_client_skips_the_guard(monkeypatch):
+    # Tests/local overrides bypass the guard, same convention as export_serialized/list_spaces.
+    called = {"assert_can_access": False}
+
+    def spy(*a, **k):
+        called["assert_can_access"] = True
+
+    monkeypatch.setattr(authz, "assert_can_access", spy)
+    dev = _fake_dev_space_transport("dev-space", [], _DEV_SERIALIZED, title="X")
+    out = app_logic.preview_promotion("dev-space", user_token="ignored", dev_client=dev)
+    assert out["title"] == "X"
     assert called["assert_can_access"] is False
 
 
@@ -472,6 +637,63 @@ def test_request_promotion_omits_access_sidecar_when_not_declared(monkeypatch):
     gh = _FakeGitHubApp()
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
     assert "src/genie/sp1.access.json" not in gh.promo["extra_files"]
+
+
+# --- G7: the declared prod Space name + table de-para (app-direct declaration, CI enforcement) ---
+
+
+def test_request_promotion_custom_prod_title_flows_to_the_title_sidecar_and_comment(monkeypatch):
+    """The prod Space name is now a Requester DECLARATION (may differ from the dev title) — it
+    flows into the EXISTING `.title` sidecar exactly the same way the pre-G7 auto-copied dev title
+    did (same convention, only the value's origin changed)."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                resource_title="Recebíveis PROD", github=gh)
+    assert gh.promo["extra_files"]["src/genie/sp1.title"].strip() == "Recebíveis PROD"
+    # surfaced in the comment too, for Steward/reviewer transparency
+    assert "**Nome do space em produção:** `Recebíveis PROD`" in gh.comment["body"]
+
+
+def test_request_promotion_commits_mapping_sidecar_when_declared(monkeypatch):
+    """A non-empty table_mapping is committed as a NEW per-space sidecar (mirrors `.access.json`) —
+    the DECLARATION is app-direct (this call); the actual rebind is CI's job (render.sh)."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    mapping = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                table_mapping=mapping, github=gh)
+    sidecar_path = "src/genie/sp1.mapping.json"
+    assert sidecar_path in gh.promo["extra_files"]
+    assert json.loads(gh.promo["extra_files"][sidecar_path]) == mapping
+    # reflected in the PR comment too, so the Steward sees it without digging into the diff
+    assert "dim_cedente_v2" in gh.comment["body"]
+    assert "De-para de tabelas" in gh.comment["body"]
+
+
+def test_request_promotion_omits_mapping_sidecar_when_not_declared(monkeypatch):
+    """No table_mapping declared (the default case) -> no sidecar file, no noisy empty commit —
+    mirrors test_request_promotion_omits_access_sidecar_when_not_declared."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    assert "src/genie/sp1.mapping.json" not in gh.promo["extra_files"]
+    assert "De-para de tabelas" not in gh.comment["body"]
+
+
+def test_request_promotion_never_applies_the_mapping_itself(monkeypatch):
+    """Enforcement must be GOVERNED (CI-run render.sh), never app-direct: request_promotion must
+    never rebind/rewrite the committed artifact itself — it only ever writes the declared mapping
+    to a git sidecar (mirrors test_request_promotion_never_calls_a_live_grant_or_permission_api)."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+    mapping = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
+    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
+                                table_mapping=mapping, github=gh)
+    # the committed serialized_space artifact is the DEV-shaped export as-is — untouched by the
+    # mapping (which lives ONLY in the separate sidecar, applied later by CI).
+    committed = json.loads(gh.promo["content"])
+    assert committed == _FULL_REVIEW["dev_serialized"]
 
 
 def test_request_promotion_never_calls_a_live_grant_or_permission_api(monkeypatch):

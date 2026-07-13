@@ -217,11 +217,12 @@ def decide_gate(findings: list[dict]) -> dict:
 def finalize_findings(
     llm_findings: list[dict], deterministic_findings: list[dict] | None, n_benchmark: int,
     min_benchmark: int = 2,  # prod requires >= 2 benchmark Q→SQL (lets a 2-question space promote)
+    eval01_severity: str = "BLOCKER",  # G2: admin-configurable via rules_config.eval01_config
 ) -> list[dict]:
     det = list(deterministic_findings or [])
     if n_benchmark < min_benchmark and not any(f.get("rule_id") == "EVAL-01" for f in det):
         det.append({
-            "severity": "BLOCKER", "rule_id": "EVAL-01",
+            "severity": eval01_severity, "rule_id": "EVAL-01",
             "citation": "Genie Promotion Handbook › Quality › EVAL-01",
             "message": f"Apenas {n_benchmark} pergunta(s) de benchmark; produção exige >= {min_benchmark}.",
             "suggestion": ("Adicionar perguntas de benchmark na aba \"Benchmarks\" do Genie (pergunta "

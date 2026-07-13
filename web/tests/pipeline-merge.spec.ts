@@ -44,6 +44,7 @@ async function promote(page: import('@playwright/test').Page, status: unknown) {
   await page.route(`**/api/promote/${PR.number}/status`, (route) => route.fulfill({ json: status }));
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
 }
 
 // The Pipeline renders a visually-hidden status word per step inside its listitem

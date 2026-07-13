@@ -219,6 +219,44 @@ def test_access_spec_survives_a_re_review_snapshot_without_being_overwritten(sto
     assert store.get_promotion(p.id).access_spec == _ACCESS_SPEC
 
 
+# --- G7: the declared table de-para persists WITH the Promotion (mirrors access_spec above) -----
+
+_TABLE_MAPPING = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
+
+
+def test_promotion_persists_and_round_trips_the_declared_table_mapping(store):
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        table_mapping=_TABLE_MAPPING)
+    assert p.table_mapping == _TABLE_MAPPING
+    got = store.get_promotion(p.id)
+    assert got.table_mapping == _TABLE_MAPPING  # survives the round trip through the backend
+
+
+def test_promotion_table_mapping_defaults_to_none_when_not_declared(store):
+    """A promotion with no declared table de-para (the plain dev_->prod_ default) persists cleanly
+    with None — G7 is additive, not a breaking schema change for existing promotions."""
+    p = _mk(store)
+    assert p.table_mapping is None
+    assert store.get_promotion(p.id).table_mapping is None
+
+
+def test_table_mapping_survives_a_re_review_snapshot_without_being_overwritten(store):
+    """Mirrors test_access_spec_survives_a_re_review_snapshot_without_being_overwritten: a re-review
+    snapshot must not clobber the Promotion's already-declared table de-para."""
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        table_mapping=_TABLE_MAPPING)
+    store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="blocked",
+                          findings=[], eval=None, timeline=[])
+    store.touch(p.id)
+    assert store.get_promotion(p.id).table_mapping == _TABLE_MAPPING
+
+
 def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(store):
     # F4 review should-fix: the cross-Promotion audit is ONE joined query, newest-first, bounded.
     p1 = _mk(store, pr_number=201, resource_id="space-A")
@@ -237,3 +275,53 @@ def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(st
     # limit truncates the OLDEST, never the newest
     top1 = store.list_recent_audit_events(limit=1)
     assert len(top1) == 1 and top1[0]["event_type"] == "pr_opened"
+
+
+# --- rehydrate_events: standalone audit, NO FK to a Promotion ----------------------------------
+
+
+def test_append_rehydrate_event_round_trips_with_no_promotion(store):
+    # The whole point (F1 follow-up): this row exists precisely BECAUSE there's no Promotion to
+    # attach to — inserting one must not require (or accept) a promotion_id at all.
+    e = store.append_rehydrate_event(
+        resource_id="prod-1", resource_title="Recebíveis", actor_email="ana@x", mode="create",
+        dev_space_id="dev-1", detail={"acting_identity": "ana@x"})
+    assert e.resource_id == "prod-1"
+    assert e.resource_title == "Recebíveis"
+    assert e.actor_email == "ana@x"
+    assert e.mode == "create"
+    assert e.dev_space_id == "dev-1"
+    assert e.detail == {"acting_identity": "ana@x"}
+
+    rows = store.list_rehydrate_events()
+    assert len(rows) == 1 and rows[0].id == e.id
+
+
+def test_append_rehydrate_event_requires_actor_email(store):
+    with pytest.raises(ValueError):
+        store.append_rehydrate_event(resource_id="prod-1", resource_title=None, actor_email="",
+                                     mode="create", dev_space_id="dev-1")
+
+
+def test_append_rehydrate_event_rejects_unknown_mode(store):
+    with pytest.raises(ValueError):
+        store.append_rehydrate_event(resource_id="prod-1", resource_title=None,
+                                     actor_email="ana@x", mode="delete", dev_space_id="dev-1")
+
+
+def test_list_rehydrate_events_filters_by_resource_and_orders_newest_first(store):
+    store.append_rehydrate_event(resource_id="prod-A", resource_title="A", actor_email="ana@x",
+                                 mode="create", dev_space_id="dev-A1")   # oldest
+    store.append_rehydrate_event(resource_id="prod-B", resource_title="B", actor_email="bob@x",
+                                 mode="create", dev_space_id="dev-B1")
+    store.append_rehydrate_event(resource_id="prod-A", resource_title="A", actor_email="ana@x",
+                                 mode="overwrite", dev_space_id="dev-A1")  # newest
+
+    all_rows = store.list_rehydrate_events()
+    assert [r.mode for r in all_rows] == ["overwrite", "create", "create"]  # newest-first
+
+    a_only = store.list_rehydrate_events(resource_id="prod-A")
+    assert len(a_only) == 2 and all(r.resource_id == "prod-A" for r in a_only)
+
+    top1 = store.list_rehydrate_events(limit=1)
+    assert len(top1) == 1 and top1[0].mode == "overwrite"  # limit truncates the OLDEST

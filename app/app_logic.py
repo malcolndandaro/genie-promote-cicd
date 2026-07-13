@@ -39,6 +39,7 @@ import grant_check  # noqa: E402
 import handbook_rules  # noqa: E402
 import pre_render  # noqa: E402
 import review_core  # noqa: E402
+import rules_config  # noqa: E402  (G2 — admin-configurable rules; safe fallback to handbook_rules.RULES)
 from github_app import GitHubApp  # noqa: E402
 from promotion_comment import PROMOTION_COMMENT_MARKER, render_promotion_comment  # noqa: E402
 
@@ -97,6 +98,13 @@ def access_path_for(slug: str) -> str:
     next to the artifact so CI's render.sh/check_grants.py/apply_access.py find it by convention,
     with no shared manifest (concurrent per-space PRs never conflict)."""
     return f"{GH_GENIE_SRC_DIR}/{slug}.access.json"
+
+
+def mapping_path_for(slug: str) -> str:
+    """G7: the per-space table de-para sidecar path — mirrors `.title`/`.access.json`: committed
+    next to the artifact so CI's render.sh finds it by convention (`pre_render.py apply-mapping`,
+    applied AFTER the dev_->prod_ rebind, BEFORE the strict allowlist check)."""
+    return f"{GH_GENIE_SRC_DIR}/{slug}.mapping.json"
 
 # The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
 REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group",
@@ -252,6 +260,50 @@ def list_prod_spaces(profile: str | None = None, *, client: WorkspaceClient | No
     return [{"space_id": s.space_id, "title": s.title or "(sem título)"} for s in (resp.spaces or [])]
 
 
+def list_principals(query: str = "", *, profile: str | None = None, client: WorkspaceClient | None = None,
+                    user_token: str | None = None, kind: str = "all", limit: int = 25) -> list[dict]:
+    """G1: users + groups of the workspace directory (SCIM ``w.users.list``/``w.groups.list``) —
+    the ONE source every principal picker in the app (F2 access declarations, F3 access requests, F5
+    role assignment) draws from, so a business user never has to type a raw email/username. Free
+    text is a SEARCH QUERY only, filtered server-side via a SCIM ``co`` (contains) clause on
+    userName/displayName; a blank query returns the first ``limit`` of each kind, so a picker opens
+    already prefilled before the user types anything.
+
+    Directory listing is a same-workspace-prod read (the app's own workspace, post-ADR-0006) and,
+    unlike Genie Space listing, is not itself an access boundary — there's no dev-sp cross-workspace
+    hop or ``assert_can_access`` guard here. The read runs as the APP SP by default: the
+    Apps-forwarded OBO token is DOWNSCOPED to the app's ``user_api_scopes`` (today only
+    ``dashboards.genie``), so SCIM calls 403 on it — verified live. ``user_token`` remains accepted
+    for local/dev callers whose token has full scopes; the deployed endpoint gates the CALLER on
+    their OBO token but passes no token here. A bare ``profile``/injected ``client`` is the existing
+    local/offline/test convention.
+    """
+    w = client or _client(profile, user_token=user_token)
+    q = query.strip()
+    principals: list[dict] = []
+
+    if kind in ("all", "user"):
+        user_filter = f'userName co "{q}" or displayName co "{q}"' if q else None
+        count = 0
+        for u in w.users.list(filter=user_filter):
+            principals.append({"type": "user", "id": u.id, "display": u.display_name or u.user_name or u.id,
+                               "email": u.user_name})
+            count += 1
+            if count >= limit:
+                break
+
+    if kind in ("all", "group"):
+        group_filter = f'displayName co "{q}"' if q else None
+        count = 0
+        for g in w.groups.list(filter=group_filter):
+            principals.append({"type": "group", "id": g.id, "display": g.display_name or g.id, "email": None})
+            count += 1
+            if count >= limit:
+                break
+
+    return principals
+
+
 def export_serialized(space_id: str, profile: str | None = None, client: WorkspaceClient | None = None,
                       *, user_token: str | None = None) -> dict:
     """Export a Space's ``serialized_space``. Cross-workspace rewiring (A2): with a ``user_token``
@@ -276,6 +328,37 @@ def export_serialized(space_id: str, profile: str | None = None, client: Workspa
     space = w.genie.get_space(space_id, include_serialized_space=True)
     ss = space.serialized_space
     return json.loads(ss) if isinstance(ss, str) else (ss or {})
+
+
+def preview_promotion(space_id: str, *, user_token: str, domain: str = DOMAIN,
+                      dev_client: WorkspaceClient | None = None) -> dict:
+    """G7: a READ-ONLY preview of a promotion's table de-para, called BEFORE ``request_promotion``
+    so the confirm step can render an editable prod Space name + a table de-para for the caller to
+    review/override BEFORE committing to a mapping at all. Persists nothing.
+
+    Mirrors ``rehydrate.preview_rehydrate``'s shape but in the OPPOSITE direction: it exports the
+    DEV Space (never prod, and never via ``preview_rehydrate`` — that one reads PROD as the app SP)
+    through the SAME dev-sp transport + verified-identity ``assert_can_access`` guard
+    ``export_serialized`` already uses for the review's own export (the ONE blast site a preview
+    touches), and rebinds dev_->prod_ (the promotion direction) rather than prod_->dev_.
+
+    Returns ``{title, tables: [{source, default_target}]}`` — every DISTINCT 3-part ref the dev
+    Space references (via ``pre_render.find_refs``, including refs buried inside example/benchmark
+    SQL), each with the plain dev_->prod_ default target ``request_promotion``'s CI render would
+    use if the caller overrides nothing."""
+    if dev_client is not None:
+        dev = dev_client
+    else:
+        identity = authz.verify_identity(user_token, host=Config().host)
+        dev = _client(scope="dev-sp")
+        authz.assert_can_access(identity, space_id, transport=dev)  # raises AccessDenied -> deny first
+    space = dev.genie.get_space(space_id, include_serialized_space=True)
+    ss = space.serialized_space
+    raw = ss if isinstance(ss, str) else json.dumps(ss or {}, ensure_ascii=False)
+
+    tables = [{"source": ref, "default_target": pre_render.rebind(ref, "dev", "prod", domain)}
+             for ref in pre_render.find_refs(raw)]
+    return {"title": getattr(space, "title", None), "tables": tables}
 
 
 def _claude(system: str, user: str, profile: str, client: WorkspaceClient | None = None) -> str:
@@ -361,10 +444,17 @@ def _pii_access_findings(space: dict, spec: "access_spec.AccessSpec") -> list[di
 def review_space(space_id: str, profile: str | None = None, to_env: str = "prod", domain: str = DOMAIN,
                  consumer_group: str | None = None, grant_profile: str | None = None,
                  user_token: str | None = None,
-                 access_spec_: "access_spec.AccessSpec | None" = None) -> dict:
+                 access_spec_: "access_spec.AccessSpec | None" = None,
+                 rule_overrides: list[dict] | None = None) -> dict:
     """The hero flow: export -> pre-render -> allowlist (ENV-01) + grant check (GRANT-01)
     -> agent review (EVAL-01 deterministic) -> eval gate. Deterministic findings own their
     rule_id (no double-count). Returns findings/gate/eval/allowlist_violations/timeline/prod_serialized.
+
+    ``rule_overrides`` (G2, optional) is the raw admin-configured override rows from
+    `app/rules_store.py` (`RulesStore.list_all_dicts()`), or `None` when no store is bound —
+    `rules_config.effective_rules`/`eval01_config` degrade to `handbook_rules.RULES`'s hardcoded
+    defaults in that case, so a caller with no store behaves EXACTLY as before this rule ever
+    existed.
 
     The in-app GRANT-01 preview only runs when an explicit, reachable prod target is
     configured (grant_profile arg or APP_PROD_PROFILE locally) — the prod catalog is
@@ -417,13 +507,19 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
             pass
     deterministic += _pii_access_findings(prod_space, spec)
 
+    # G2: the EFFECTIVE rule set (hardcoded RULES + admin overrides/custom rules) grounds the
+    # prompt; EVAL-01's threshold/severity backstop is resolved the same way (finalize_findings
+    # owns that check deterministically — see rules_config's docstring for why).
+    effective = rules_config.effective_rules(rule_overrides)
+    min_bench, eval01_severity = rules_config.eval01_config(rule_overrides)
     ctx = review_core.build_space_context(prod_space)
-    system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, deterministic)
+    system, user = review_core.build_review_prompt(ctx, effective, deterministic)
     # LLM reviewer = shared operation -> app SP / local profile (a serving scope isn't part of
     # OBO; the reviewer agent doesn't read the user's data, and it never runs against dev).
     sp = _client(profile)
     review = review_core.parse_review(_claude(system, user, profile, client=sp))
-    findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"])
+    findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"],
+                                             min_benchmark=min_bench, eval01_severity=eval01_severity)
     gate = review_core.decide_gate(findings)
     try:
         # eval_gate still uses the `databricks` CLI — absent on the Apps container, and
@@ -482,9 +578,11 @@ def github_app_factory(profile: str | None = None) -> GitHubApp:
 def request_promotion(space_id: str, profile: str | None = None, *, user_token: str | None = None,
                       requester_email: str | None = None, resource_title: str | None = None,
                       domain: str = DOMAIN, github: GitHubApp | None = None,
-                      access_spec_: "access_spec.AccessSpec | None" = None) -> dict:
-    """GH2 (+ F2): open (or update) a real promotion PR for a space and post the attributed review
-    comment.
+                      access_spec_: "access_spec.AccessSpec | None" = None,
+                      rule_overrides: list[dict] | None = None,
+                      table_mapping: "dict[str, str] | None" = None) -> dict:
+    """GH2 (+ F2 + G7): open (or update) a real promotion PR for a space and post the attributed
+    review comment.
 
     Flow: review the space (OBO export + app-SP reviewer; reused for the PR comment) → export the
     DEV-shaped serialized_space (OBO) → as the BOT, ensure the promotion branch, write the artifact
@@ -498,11 +596,21 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     mirrors GRANT-01's split between the app's PREVIEW check and CI's authoritative one). Named
     with a trailing underscore to avoid shadowing the ``access_spec`` module import.
 
+    ``table_mapping`` (G7, optional) is the Requester's declared table de-para (source DEV ref ->
+    desired prod ref overrides, keyed exactly like ``preview_promotion``'s ``source`` field) — ALSO
+    only a DECLARATION here (committed to the new ``.mapping.json`` sidecar, see
+    ``mapping_path_for``); the ACTUAL rebind is done by CI (``scripts/render.sh``'s
+    ``apply-mapping``, run AFTER the plain dev_->prod_ rebind), and the prod allowlist stays
+    UNWIDENED there — a mapped target outside ``prod_<domain>`` fails pr-checks (ENV-01), exactly
+    like an un-mapped leak would. This is the ONE difference from rehydrate's G6 de-para, which
+    widens its OWN allowlist for the caller's chosen catalogs — promotion never does, since CI (not
+    this app) is what applies the mapping and must keep enforcing the strict target allowlist.
+
     Returns {review (UI fields), pr:{number,url}}. The PR opens regardless of findings — it's the
     fix/approval loop; pr-checks + the Steward gate (GH4) enforce the outcome.
     """
     full = review_space(space_id, profile=profile, user_token=user_token, domain=domain,
-                        access_spec_=access_spec_)
+                        access_spec_=access_spec_, rule_overrides=rule_overrides)
     review = {k: full[k] for k in REVIEW_FIELDS}
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the
@@ -514,10 +622,14 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     safe_id = "".join(c for c in space_id if c.isalnum() or c in "-_")  # title can't carry markup
     slug = space_slug(space_id)            # per-space: this space's own branch + committed file
     branch, path = branch_for(slug), src_path_for(slug)
+    # G7: the prod Space name is now a Requester DECLARATION (pre-filled with the dev title by the
+    # UI, editable) rather than a silent copy — the `.title` sidecar/render.sh/apply_access.py
+    # convention it flows through is UNCHANGED, only the value's origin.
+    prod_title = resource_title or safe_id
     # A per-space title sidecar so render.sh can name the generated prod genie_spaces resource (and so
     # the prod space keeps a friendly title). Committed next to the artifact; no shared manifest, so
     # concurrent per-space PRs never conflict.
-    extra = {f"{GH_GENIE_SRC_DIR}/{slug}.title": (resource_title or safe_id) + "\n"}
+    extra = {f"{GH_GENIE_SRC_DIR}/{slug}.title": prod_title + "\n"}
     spec = access_spec_ or access_spec.AccessSpec()
     if not spec.is_empty():
         # The AccessSpec sidecar (F2): committed alongside the artifact so CI's render.sh copies it
@@ -525,6 +637,10 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
         # apply_access.py (governed enforcement) applies the per-Space group + grants + Space
         # permissions — NEVER applied here (no app-direct prod mutation).
         extra[access_path_for(slug)] = json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n"
+    if table_mapping:
+        # The table de-para sidecar (G7): committed alongside the artifact so CI's render.sh applies
+        # it (AFTER the dev_->prod_ rebind, BEFORE the strict allowlist check) — NEVER applied here.
+        extra[mapping_path_for(slug)] = json.dumps(table_mapping, ensure_ascii=False, indent=2) + "\n"
     pr = gh.open_or_update_promotion(
         branch=branch, path=path, content=content, extra_files=extra,
         title=f"Promover Genie Space para produção ({safe_id})",
@@ -533,7 +649,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
               f"é o gate automático e o Steward libera o deploy de produção (segregação de funções)."),
     )
     gh.upsert_comment(pr["number"], PROMOTION_COMMENT_MARKER,
-                      render_promotion_comment(review, requester_email))
+                      render_promotion_comment(review, requester_email,
+                                               resource_title=prod_title, table_mapping=table_mapping))
     return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch}
 
 

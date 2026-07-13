@@ -6,13 +6,16 @@
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
+  import Picker from '../lib/components/Picker.svelte';
   import {
     postAccessRequest,
     getAccessRequests,
     decideAccessRequest,
+    getProdSpaces,
     ApiError,
     isAuthError,
   } from '../lib/api';
+  import type { PickerOption } from '../lib/picker';
   import type { AccessRequest, AccessRequestState, Whoami } from '../lib/types';
 
   interface Props {
@@ -21,8 +24,10 @@
   let { who }: Props = $props();
 
   // --- request form -----------------------------------------------------------
-  let spaceId = $state('');
-  let spaceTitle = $state('');
+  // G1: the requested Space is PICKED, from the PROD listing (`/api/prod-spaces`) — deliberately
+  // NOT the caller's own `getResources()` dev list, since the entire point of this form is asking
+  // for access to a prod Space the caller may not be able to see/open themselves yet.
+  let space = $state<PickerOption | null>(null);
   let note = $state('');
   let wantSpacePermission = $state(true);
   let spacePermissionLevel = $state<'CAN_RUN' | 'CAN_VIEW'>('CAN_RUN');
@@ -31,21 +36,25 @@
   let submitError = $state<string | null>(null);
   let submitted = $state(false);
 
+  async function searchProdSpaces(q: string): Promise<PickerOption[]> {
+    const spaces = await getProdSpaces(q);
+    return spaces.map((s) => ({ id: s.id, label: s.title, sublabel: s.id }));
+  }
+
   async function submit(): Promise<void> {
-    if (!spaceId.trim() || (!wantSpacePermission && !wantUcSelect) || submitting) return;
+    if (!space || (!wantSpacePermission && !wantUcSelect) || submitting) return;
     submitting = true;
     submitError = null;
     try {
       await postAccessRequest({
-        spaceId: spaceId.trim(),
-        spaceTitle: spaceTitle.trim() || undefined,
+        spaceId: space.id,
+        spaceTitle: space.label,
         note: note.trim() || undefined,
         wantSpacePermission,
         spacePermissionLevel,
         wantUcSelect,
       });
-      spaceId = '';
-      spaceTitle = '';
+      space = null;
       note = '';
       submitted = true;
       mineP = getAccessRequests('mine'); // refresh the status list with the new request
@@ -121,14 +130,12 @@
     subtitle="Peça acesso a um Genie Space que você não pode usar. A concessão é revisada por um Steward/Admin e aplicada pelo pipeline governado — nunca diretamente pelo app."
   >
     <form class="stack" onsubmit={(e) => { e.preventDefault(); void submit(); }}>
-      <label class="field">
-        <span class="field__label">ID do Genie Space</span>
-        <input class="field__input" bind:value={spaceId} placeholder="ex.: 01f16e83..." required />
-      </label>
-      <label class="field">
-        <span class="field__label">Nome do espaço (opcional)</span>
-        <input class="field__input" bind:value={spaceTitle} placeholder="ex.: Recebíveis" />
-      </label>
+      <Picker
+        label="Genie Space"
+        placeholder="Buscar Genie Space em produção…"
+        search={searchProdSpaces}
+        bind:value={space}
+      />
       <label class="field">
         <span class="field__label">Justificativa (opcional)</span>
         <textarea class="field__input" bind:value={note} rows="2" placeholder="Por que você precisa deste acesso?"
@@ -159,7 +166,7 @@
       {/if}
 
       <div>
-        <Button type="submit" loading={submitting} disabled={!spaceId.trim() || (!wantSpacePermission && !wantUcSelect)}>
+        <Button type="submit" loading={submitting} disabled={!space || (!wantSpacePermission && !wantUcSelect)}>
           Enviar solicitação
         </Button>
       </div>

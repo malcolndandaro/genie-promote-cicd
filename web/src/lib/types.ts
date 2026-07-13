@@ -12,6 +12,9 @@ export interface Whoami {
   /** The source/CI repo the header's GitHub link points to (config-driven; the SPA falls back to a
    * default if absent). */
   repo_url?: string | null;
+  /** The dev workspace host (G5, `APP_DEV_HOST`) — lets the SPA build a deep-link to a Space just
+   * rehydrated back into dev. `null`/absent when unconfigured (local/offline; the link is omitted). */
+  dev_host?: string | null;
 }
 
 /**
@@ -25,6 +28,16 @@ export interface PromotableResource {
   id: string;
   title: string;
   kind: ResourceKind;
+}
+
+/** G1: one workspace-directory principal (SCIM user or group), as returned by `/api/principals` —
+ * the ONLY shape a picker ever hands back to a submitted request; a raw typed email/username never
+ * reaches the backend as a principal value. */
+export interface Principal {
+  type: 'user' | 'group';
+  id: string;
+  display: string;
+  email: string | null;
 }
 
 /** One reviewer finding (deterministic rule or LLM). */
@@ -203,4 +216,41 @@ export interface DriftReport {
   has_drift: boolean;
   has_unknown: boolean;
   findings: DriftFinding[];
+}
+
+/** G2: admin-configurable reviewer rules. `RuleSeverity` mirrors genie_reviewer's SEVERITIES. */
+export type RuleSeverity = 'BLOCKER' | 'SUGGESTION' | 'STYLE';
+
+/** One rule in the EFFECTIVE set the reviewer actually grounds on (hardcoded + overrides merged) —
+ * same shape as a `handbook_rules.RULES` entry, `params` present only when set (e.g. EVAL-01's
+ * `min_benchmarks`). */
+export interface EffectiveRule {
+  rule_id: string;
+  severity_hint: RuleSeverity;
+  citation: string;
+  content: string;
+  params?: Record<string, unknown>;
+}
+
+/** The raw override/custom-rule row (`app/rules_store.py`'s `RuleOverride`) — distinct from
+ * `EffectiveRule`: this is what an admin configured, not the merged result. */
+export interface RuleOverride {
+  rule_id: string;
+  is_custom: boolean;
+  enabled: boolean;
+  severity: RuleSeverity | null;
+  params: Record<string, unknown> | null;
+  content: string | null;
+  citation: string | null;
+  updated_by: string | null;
+  updated_at: string;
+}
+
+/** `GET /admin/rules`'s response: the effective set the reviewer uses right now, the raw override
+ * rows (so the UI can show each hardcoded rule's override state, or none), and the 9 hardcoded
+ * defaults (so a reset's "back to default" values are known without a second call). */
+export interface RulesList {
+  effective: EffectiveRule[];
+  overrides: RuleOverride[];
+  hardcoded: EffectiveRule[];
 }

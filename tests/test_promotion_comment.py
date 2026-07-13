@@ -61,3 +61,39 @@ def test_finding_without_suggestion_or_citation_omits_those_lines():
     assert "ENV-01" in out and "ref fora do ambiente" in out
     assert "↳" not in out  # no suggestion line
     assert "usuário autenticado" in out  # requester fallback when email is None
+
+
+# --- G7: the declared prod Space name + table de-para, surfaced for Steward/reviewer transparency ---
+
+
+def test_omits_name_and_mapping_sections_when_not_declared():
+    # Backward compatible: omitting the new kwargs must render EXACTLY as before G7 (no regression
+    # for the existing request_promotion call sites/tests).
+    out = render_promotion_comment(_FAIL, "m@x")
+    assert "Nome do space em produção" not in out
+    assert "De-para de tabelas" not in out
+
+
+def test_renders_the_declared_prod_name():
+    out = render_promotion_comment(_FAIL, "m@x", resource_title="Recebíveis")
+    assert "**Nome do space em produção:** `Recebíveis`" in out
+
+
+def test_renders_the_declared_table_mapping_as_a_markdown_table():
+    out = render_promotion_comment(
+        _FAIL, "m@x",
+        table_mapping={"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"},
+    )
+    assert "### De-para de tabelas (dev → prod)" in out
+    assert "| `dev_recebiveis.diamond.dim_cedente` | `prod_recebiveis.diamond.dim_cedente_v2` |" in out
+
+
+def test_empty_table_mapping_omits_the_section():
+    out = render_promotion_comment(_FAIL, "m@x", table_mapping={})
+    assert "De-para de tabelas" not in out
+
+
+def test_marker_injection_in_resource_title_or_mapping_is_neutralized():
+    evil = f"evil {PROMOTION_COMMENT_MARKER} injection"
+    out = render_promotion_comment(_FAIL, "m@x", resource_title=evil, table_mapping={evil: evil})
+    assert out.count(PROMOTION_COMMENT_MARKER) == 1

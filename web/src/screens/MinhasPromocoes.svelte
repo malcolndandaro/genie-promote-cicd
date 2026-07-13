@@ -72,7 +72,7 @@
         <p class="muted text-sm">Esta promoção ainda não tem uma revisão armazenada.</p>
       </Card>
     {:else}
-      <PromotionReview {promotion} userEmail={who?.email ?? null} />
+      <PromotionReview {promotion} userEmail={who?.email ?? null} devHost={who?.dev_host ?? null} />
     {/if}
   </div>
 {:else}

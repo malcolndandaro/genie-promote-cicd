@@ -18,6 +18,17 @@ half-broken app. Locally/in tests (no `PGHOST`) it returns None so the app still
 GitHub stays the source of truth (ADR-0005): this store records/recovers/caches + is reconciled
 FROM GitHub (LB4). It never decides a verdict. Governance attribution lives in `audit_events`:
 `actor_github_login` is authoritative; `actor_app_email` is display-only (the OBO email).
+
+`rehydrate_events` (F1 follow-up, stakeholder decision): a prod->dev rehydrate (`app/rehydrate.py`)
+must be auditable for ANY prod Space the caller can access, not only ones that went through this
+app's own promotion flow — the prod store starts EMPTY (ADR-0006) so most prod Spaces have no
+Promotion row at all. Rather than FK an audit row to a Promotion that may not exist, a rehydrate
+with no linkable source Promotion is recorded in this STANDALONE table instead — same reasoning
+`access_request_store.py`/`rules_store.py` already document for their own audit tables, kept here
+(rather than as a sibling module) because `rehydrate.py`/the engine already thread a single
+`PromotionStore` end-to-end and this is one flat append-only table, not a new domain with its own
+pool. When a source Promotion DOES exist, the richer `audit_events`-linked `rehydrated` event (see
+`EVENT_TYPES` above) is used instead — see `rehydrate.py`'s `_audit`.
 """
 from __future__ import annotations
 
@@ -70,6 +81,11 @@ class Promotion:
     # after the sidecar's own PR/branch is long merged/closed. None when no AccessSpec was declared
     # (pre-F2 promotions, or a promotion with no declared access).
     access_spec: Optional[dict] = None
+    # G7: the Requester's declared table de-para (jsonb; source DEV ref -> desired prod ref
+    # overrides) — persisted WITH the Promotion for the SAME reason as access_spec above (survives
+    # independently of the `.mapping.json` sidecar's own PR/branch lifetime). None/empty means the
+    # plain dev_->prod_ rebind, no overrides.
+    table_mapping: Optional[dict] = None
 
 
 @dataclasses.dataclass
@@ -95,6 +111,21 @@ class AuditEvent:
     actor_app_email: Optional[str]      # display-only (OBO email); set only on `requested`
     github_event_at: Optional[datetime]
     detail: Optional[dict]              # jsonb
+
+
+@dataclasses.dataclass
+class RehydrateEvent:
+    """A prod->dev rehydrate with NO linkable source Promotion (see the module docstring) — its own
+    flat, append-only row: no `seq` (nothing to order WITHIN — there's no parent to scope it to)
+    and deliberately NO FK to `promotions(id)`, mirroring `rules_store.rule_audit_events`."""
+    id: str
+    resource_id: str                  # the prod Space id that was rehydrated FROM
+    resource_title: Optional[str]
+    actor_email: str                  # the live-checked ACTING identity — never a header
+    mode: str                         # "create" | "overwrite"
+    dev_space_id: Optional[str]
+    detail: Optional[dict]            # jsonb — same shape as the audit_events "rehydrated" detail
+    created_at: datetime
 
 
 class LakebaseUnavailable(RuntimeError):
@@ -131,6 +162,9 @@ class StoreBackend(Protocol):
     # Cross-Promotion audit (F4): all events joined with resource_id/resource_title, newest-first,
     # bounded — ONE query (no per-Promotion N+1).
     def list_recent_audit_events(self, limit: int) -> list[dict]: ...
+    # Standalone rehydrate audit (F1 follow-up) — NO FK to promotions, see RehydrateEvent.
+    def insert_rehydrate_event(self, row: dict) -> None: ...
+    def list_rehydrate_events(self, resource_id: Optional[str], limit: int) -> list[dict]: ...  # newest first
     def healthcheck(self) -> None: ...
     def close(self) -> None: ...
 
@@ -159,14 +193,15 @@ class PromotionStore:
                          resource_title: Optional[str], requester_email: Optional[str],
                          pr_number: Optional[int], pr_url: Optional[str], branch: Optional[str],
                          current_phase: Optional[str], live_status: Optional[dict],
-                         access_spec: Optional[dict] = None) -> Promotion:
+                         access_spec: Optional[dict] = None,
+                         table_mapping: Optional[dict] = None) -> Promotion:
         now = self._clock()
         p = Promotion(
             id=str(uuid.uuid4()), resource_id=resource_id, resource_kind=resource_kind,
             resource_title=resource_title, requester_email=requester_email, pr_number=pr_number,
             pr_url=pr_url, branch=branch, current_phase=current_phase, live_status=live_status,
             terminal=False, last_reconciled_at=None, created_at=now, updated_at=now,
-            access_spec=access_spec)
+            access_spec=access_spec, table_mapping=table_mapping)
         self._b.insert_promotion(dataclasses.asdict(p))
         return p
 
@@ -247,6 +282,28 @@ class PromotionStore:
         the Promotion, not the event."""
         return self._b.list_recent_audit_events(limit)
 
+    # -- standalone rehydrate audit (no source Promotion; see RehydrateEvent) ----
+    def append_rehydrate_event(self, *, resource_id: str, resource_title: Optional[str],
+                               actor_email: str, mode: str, dev_space_id: Optional[str],
+                               detail: Optional[dict] = None) -> RehydrateEvent:
+        """Record a rehydrate that has NO source Promotion to attach to (F1 follow-up, stakeholder
+        decision: rehydrate must work for any prod Space the caller can access). Deliberately NOT
+        `append_audit_event` — that call FKs to `promotions(id)`, which doesn't exist here."""
+        if not actor_email:
+            raise ValueError("actor_email is required (verified identity, never a header)")
+        if mode not in ("create", "overwrite"):
+            raise ValueError(f"mode must be 'create' or 'overwrite', got {mode!r}")
+        e = RehydrateEvent(
+            id=str(uuid.uuid4()), resource_id=resource_id, resource_title=resource_title,
+            actor_email=actor_email, mode=mode, dev_space_id=dev_space_id, detail=detail,
+            created_at=self._clock())
+        self._b.insert_rehydrate_event(dataclasses.asdict(e))
+        return e
+
+    def list_rehydrate_events(self, resource_id: Optional[str] = None,
+                              limit: int = 200) -> list[RehydrateEvent]:
+        return [_as(RehydrateEvent, r) for r in self._b.list_rehydrate_events(resource_id, limit)]
+
 
 def _as(cls, row: Optional[dict]):
     """Build a dataclass from a backend row dict (only the dataclass's own fields)."""
@@ -268,6 +325,7 @@ class InMemoryBackend:
         self._promotions: dict[str, dict] = {}
         self._snapshots: list[dict] = []
         self._events: list[dict] = []
+        self._rehydrate_events: list[dict] = []
         self.migrated = False
 
     def migrate(self) -> None:
@@ -341,6 +399,16 @@ class InMemoryBackend:
         out.sort(key=lambda e: (e["occurred_at"], e["promotion_id"], e["seq"]), reverse=True)
         return out[: max(0, limit)]
 
+    def insert_rehydrate_event(self, row: dict) -> None:
+        # NO FK check (unlike audit_events) — this table deliberately has no parent to require.
+        self._rehydrate_events.append(dict(row))
+
+    def list_rehydrate_events(self, resource_id: Optional[str], limit: int) -> list[dict]:
+        rows = [dict(r) for r in self._rehydrate_events
+                if resource_id is None or r["resource_id"] == resource_id]
+        rows.sort(key=lambda r: r["created_at"], reverse=True)  # newest first
+        return rows[: max(0, limit)]
+
     def healthcheck(self) -> None:
         return None
 
@@ -368,12 +436,15 @@ MIGRATIONS = (
         last_reconciled_at timestamptz,
         created_at         timestamptz NOT NULL,
         updated_at         timestamptz NOT NULL,
-        access_spec        jsonb
+        access_spec        jsonb,
+        table_mapping      jsonb
     )""",
     # F2 (added after the original CREATE TABLE shipped): idempotent for a promotions table that
     # predates this column — the CREATE TABLE above already includes it for a fresh DB (no-op
     # there); ADD COLUMN IF NOT EXISTS covers a promotions table created before F2.
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS access_spec jsonb",
+    # G7: same idempotent-migration pattern as access_spec above, for the declared table de-para.
+    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS table_mapping jsonb",
     """CREATE TABLE IF NOT EXISTS review_snapshots (
         id              text PRIMARY KEY,
         promotion_id    text NOT NULL REFERENCES promotions(id),
@@ -406,17 +477,32 @@ MIGRATIONS = (
     # legitimately recur, so they're excluded.
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_milestone ON audit_events(promotion_id, event_type) "
     "WHERE event_type NOT IN ('requested', 're_reviewed')",
+    # F1 follow-up: a rehydrate with no linkable source Promotion — deliberately NO FK to
+    # promotions(id) (see RehydrateEvent's docstring) and no seq (nothing to order WITHIN).
+    """CREATE TABLE IF NOT EXISTS rehydrate_events (
+        id             text PRIMARY KEY,
+        resource_id    text NOT NULL,
+        resource_title text,
+        actor_email    text NOT NULL,
+        mode           text NOT NULL,
+        dev_space_id   text,
+        detail         jsonb,
+        created_at     timestamptz NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_rehydrate_events_resource ON rehydrate_events(resource_id)",
 )
 
 # Columns that hold JSON blobs (wrapped as jsonb on write).
-_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec"}
+_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec", "table_mapping"}
 _PROMO_COLS = ("id", "resource_id", "resource_kind", "resource_title", "requester_email",
                "pr_number", "pr_url", "branch", "current_phase", "live_status", "terminal",
-               "last_reconciled_at", "created_at", "updated_at", "access_spec")
+               "last_reconciled_at", "created_at", "updated_at", "access_spec", "table_mapping")
 _SNAP_COLS = ("id", "promotion_id", "created_at", "gate_conclusion", "gate_summary",
               "findings", "eval", "timeline")
 _EVENT_COLS = ("id", "promotion_id", "seq", "occurred_at", "event_type", "actor_github_login",
                "actor_app_email", "github_event_at", "detail")
+_REHYDRATE_COLS = ("id", "resource_id", "resource_title", "actor_email", "mode", "dev_space_id",
+                   "detail", "created_at")
 
 
 import re as _re
@@ -559,6 +645,17 @@ class PgBackend:
             "FROM audit_events ae JOIN promotions p ON ae.promotion_id = p.id "
             "ORDER BY ae.occurred_at DESC, ae.promotion_id DESC, ae.seq DESC "
             "LIMIT %s", (max(0, limit),))
+
+    def insert_rehydrate_event(self, row: dict) -> None:
+        self._insert("rehydrate_events", _REHYDRATE_COLS, row)
+
+    def list_rehydrate_events(self, resource_id: Optional[str], limit: int) -> list[dict]:
+        if resource_id is None:
+            return self._all(
+                "SELECT * FROM rehydrate_events ORDER BY created_at DESC LIMIT %s", (max(0, limit),))
+        return self._all(
+            "SELECT * FROM rehydrate_events WHERE resource_id = %s ORDER BY created_at DESC LIMIT %s",
+            (resource_id, max(0, limit)))
 
     def healthcheck(self) -> None:
         with self._pool.connection() as conn, conn.cursor() as cur:

@@ -8,12 +8,18 @@ ENV="${1:?usage: render.sh <dev|prod>}"
 FROM_ENV="${FROM_ENV:-dev}"
 DOMAIN="${DOMAIN:-recebiveis}"
 
-render_one() {  # <src> <out>
-  local src="$1" out="$2"
+render_one() {  # <src> <out> [<mapping>]
+  local src="$1" out="$2" mapping="${3:-}"
   [ -f "$src" ] || return 0
   mkdir -p "$(dirname "$out")"
   rm -f "$out"   # never deploy a stale build (S4 review)
   python3 scripts/pre_render.py render "$src" --from "$FROM_ENV" --to "$ENV" --domain "$DOMAIN" --out "$out"
+  # G7: the promotion's declared table de-para (if any), applied AFTER the rebind — the allowlist
+  # check below stays UNWIDENED (unlike rehydrate's G6 preview, which widens for the caller's OWN
+  # de-para): a mapped target outside <to_env>_<domain> must FAIL here, that's ENV-01 doing its job.
+  if [ -n "$mapping" ] && [ -f "$mapping" ]; then
+    python3 scripts/pre_render.py apply-mapping "$out" --mapping "$mapping" --from "$FROM_ENV" --to "$ENV" --domain "$DOMAIN"
+  fi
   python3 scripts/pre_render.py check "$out" --to "$ENV" --domain "$DOMAIN"
 }
 
@@ -26,7 +32,7 @@ shopt -s nullglob
 entries=""
 for src in src/genie/*.serialized_space.json; do
   slug="$(basename "$src" .serialized_space.json)"
-  render_one "$src" "build/genie/${slug}.serialized_space.json"
+  render_one "$src" "build/genie/${slug}.serialized_space.json" "src/genie/${slug}.mapping.json"
   # file_path is resolved relative to THIS generated file's dir (build/), so it's ./genie/... not ./build/genie/...
   entries+="        ${slug}:\n"
   entries+="          warehouse_id: \${var.warehouse_id}\n"

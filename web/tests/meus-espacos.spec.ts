@@ -18,7 +18,6 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
 
   // App shell sidebar present.
   await expect(page.getByRole('link', { name: 'Meus espaços' })).toBeVisible();
-  await expect(page.getByRole('link', { name: /Novo Genie Space/ })).toBeVisible();
 
   // The space renders as a card: kind badge + title + a per-space "Solicitar promoção" button
   // (named with the space title so each card's action is distinct).
@@ -27,7 +26,34 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
   await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeEnabled();
 });
 
-test('while one space is promoting, the other space cards are disabled', async ({ page }) => {
+// G3: choosing a card SELECTS the space and opens a confirmation panel bound to it — it does not
+// fire the request. The grid locks (including the chosen card itself) until the panel is
+// confirmed or cancelled, since the actual "Solicitar promoção" action now lives in the panel.
+test('choosing a space locks the grid and opens a confirmation panel bound to it', async ({ page }) => {
+  await page.route('**/api/spaces', (route) =>
+    route.fulfill({
+      json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Cedentes' }] },
+    }),
+  );
+  await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+
+  // The panel is scoped to `.confirm` since the (disabled) card behind it repeats the space title.
+  const panel = page.locator('.confirm');
+  await expect(panel.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeDisabled();
+
+  // Cancelling releases the lock and drops the panel — no request was ever sent.
+  await page.getByRole('button', { name: '← Escolher outro espaço' }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeEnabled();
+});
+
+test('confirming the panel shows a busy state while the promotion is in flight', async ({ page }) => {
   await page.route('**/api/spaces', (route) =>
     route.fulfill({
       json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Cedentes' }] },
@@ -49,26 +75,21 @@ test('while one space is promoting, the other space cards are disabled', async (
   });
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
 
-  // The busy card spins; the OTHER space's card is disabled to prevent a concurrent request.
+  // The confirm button goes busy; the OTHER space's card stays disabled (already was, on selection).
   await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeDisabled();
   release();
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 });
 
-test('navigates to the "Novo Genie Space" screen and shows the placeholder', async ({ page }) => {
-  await page.route('**/api/spaces', oneSpace);
-  await page.goto('/#/espacos');
-  await page.getByRole('link', { name: /Novo Genie Space/ }).click();
-  await expect(page.getByText('Em breve — assistente de criação', { exact: false })).toBeVisible();
-});
-
-test('shows the empty state with a next action when there are no spaces', async ({ page }) => {
+test('shows the empty state pointing to the dev workspace when there are no spaces', async ({ page }) => {
   await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [] } }));
   await page.goto('/#/espacos');
 
   await expect(page.getByText('Nenhum Genie Space encontrado')).toBeVisible();
-  await expect(page.getByRole('button', { name: /Novo Genie Space/ })).toBeVisible();
+  await expect(page.getByText('Genie nativo do workspace de dev', { exact: false })).toBeVisible();
 });
 
 test('shows an error state with retry when /api/spaces fails', async ({ page }) => {

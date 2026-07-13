@@ -17,6 +17,9 @@ import type {
   RoleName,
   RolesList,
   DriftReport,
+  Principal,
+  RulesList,
+  RuleSeverity,
 } from './types';
 import { spaceToResource } from './resources';
 
@@ -63,6 +66,34 @@ export async function getResources(): Promise<PromotableResource[]> {
   return (data.spaces ?? []).map(spaceToResource);
 }
 
+// --- G1: prefilled/searchable pickers — spaces + workspace-directory principals -------------------
+//
+// Every picker in the app resolves to one of these two listings; a free-typed id/email/username is
+// NEVER a legal submitted value (only a search query into one of these). `getResources` above
+// already covers the caller's OWN dev spaces (identity-filtered); the two below cover the two gaps
+// no existing listing filled: every PROD space (for "request access to a space I don't have yet")
+// and the workspace's user/group directory (for every principal field).
+
+/** Every prod-deployed Genie Space (id + title only — no owner/access/phase), for pickers that must
+ * name a space the caller may NOT already have access to (F3's request-access flow). `q` filters
+ * server-side on title. */
+export async function getProdSpaces(q = ''): Promise<PromotableResource[]> {
+  const data = await getJSON<{ spaces?: { space_id: string; title: string }[] }>(
+    `/api/prod-spaces?q=${encodeURIComponent(q)}`
+  );
+  return (data.spaces ?? []).map(spaceToResource);
+}
+
+/** Users + groups of the workspace directory (SCIM), for every principal picker (F2 access
+ * declarations, F3 access requests, F5 role assignment). `q` is a search query, server-filtered;
+ * blank returns a prefilled first page. */
+export async function getPrincipals(q = '', kind: 'all' | 'user' | 'group' = 'all'): Promise<Principal[]> {
+  const data = await getJSON<{ principals?: Principal[] }>(
+    `/api/principals?q=${encodeURIComponent(q)}&kind=${kind}`
+  );
+  return data.principals ?? [];
+}
+
 /** The opened/updated promotion PR (GH2). */
 export interface PullRequestRef {
   number: number;
@@ -85,19 +116,28 @@ export interface PromoteResult {
  * `accessSpec` (F2, optional) is the Requester's declared access — DECLARATION only (this call);
  * the server writes it to a git sidecar the governed CI pipeline enforces, it never mutates a live
  * grant/permission from this request.
+ *
+ * `prodTitle` (G7, optional) overrides `resource.title` as the prod Space name declaration — the
+ * confirm step pre-fills it WITH the dev title but lets the caller edit it before requesting;
+ * omitted/blank falls back to the dev title exactly as before G7. `tableMapping` (G7, optional) is
+ * the Requester's declared table de-para (source dev ref -> desired prod ref overrides) — ALSO
+ * only a declaration; CI applies it, never this request.
  */
 export async function postPromote(
   resource: PromotableResource,
-  accessSpec?: AccessSpec
+  accessSpec?: AccessSpec,
+  prodTitle?: string,
+  tableMapping?: Record<string, string>
 ): Promise<PromoteResult> {
   const r = await fetch('/api/promote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
       space_id: resource.id,
-      resource_title: resource.title,
+      resource_title: prodTitle?.trim() || resource.title,
       resource_kind: resource.kind,
       ...(accessSpec ? { access_spec: accessSpec } : {}),
+      ...(tableMapping && Object.keys(tableMapping).length > 0 ? { table_mapping: tableMapping } : {}),
     }),
   });
   if (!r.ok) throw await toError(r);
@@ -119,6 +159,10 @@ export interface PromotionSummary {
   terminal: boolean;
   created_at: string;
   updated_at: string;
+  /** G7: the declared table de-para (source dev ref -> prod ref overrides) persisted WITH the
+   * Promotion, independent of the `.mapping.json` sidecar's own PR/branch lifetime — so reopening
+   * shows exactly what was declared. Empty/null means no overrides (plain dev_->prod_ defaults). */
+  table_mapping: Record<string, string> | null;
 }
 
 /** One append-only audit event (LB4). `actor_github_login` is the AUTHORITATIVE governance identity;
@@ -151,6 +195,25 @@ export async function getPromotions(scope: 'mine' | 'all' = 'mine'): Promise<Pro
 /** A single promotion + its stored review + PR ref + audit — renders WITHOUT re-running the reviewer. */
 export function getPromotionDetail(id: string): Promise<PromotionDetail> {
   return getJSON<PromotionDetail>(`/api/promotions/${id}`);
+}
+
+/** G7: one row of the promotion-preview table de-para. */
+export interface PromotePreviewTable {
+  /** The DEV ref this row is FOR — the key a `tableMapping` override to `postPromote` must use. */
+  source: string;
+  /** The plain dev_->prod_ target the CI render would use if this row is left unchanged. */
+  default_target: string;
+}
+
+export interface PromotePreview {
+  /** The dev Space's title — the default the editable prod-name field is pre-filled with. */
+  title: string | null;
+  tables: PromotePreviewTable[];
+}
+
+/** G7: preview a promotion's table de-para BEFORE requesting it — read-only, persists nothing. */
+export function getPromotePreview(spaceId: string): Promise<PromotePreview> {
+  return getJSON(`/api/promote/preview?space_id=${encodeURIComponent(spaceId)}`);
 }
 
 /** The append-only audit trail for a promotion (LB4) — refreshed as the status poll reconciles. */
@@ -207,6 +270,10 @@ export async function postRehydrate(opts: {
   devSpaceId?: string;
   title?: string;
   promotionId?: string;
+  /** G6: source prod ref -> desired dev ref — only entries actually OVERRIDDEN away from the
+   * preview's `default_target` (an identity mapping is a harmless no-op, but there's no reason to
+   * send it). Omit/empty means "use the plain defaults", same as before G6. */
+  tableMapping?: Record<string, string>;
 }): Promise<RehydrateResult> {
   const r = await fetch('/api/rehydrate', {
     method: 'POST',
@@ -217,10 +284,34 @@ export async function postRehydrate(opts: {
       dev_space_id: opts.devSpaceId ?? null,
       title: opts.title ?? null,
       promotion_id: opts.promotionId ?? null,
+      table_mapping:
+        opts.tableMapping && Object.keys(opts.tableMapping).length > 0 ? opts.tableMapping : null,
     }),
   });
   if (!r.ok) throw await toError(r);
   return (await r.json()) as RehydrateResult;
+}
+
+/** G6: one row of the rehydrate-preview table de-para. */
+export interface RehydratePreviewTable {
+  /** The prod ref this row is FOR — the key a `table_mapping` override must use. */
+  source: string;
+  /** The plain prod_->dev_ target `postRehydrate` would use if this row is left unchanged. */
+  default_target: string;
+  /** Best-effort: existing dev tables in the same schema, for a suggestion datalist. Always an
+   * array (never absent) — empty means "no suggestions", never an error. */
+  dev_suggestions: string[];
+}
+
+export interface RehydratePreview {
+  /** The source Space's prod title — the default the editable dev-title field is pre-filled with. */
+  title: string | null;
+  tables: RehydratePreviewTable[];
+}
+
+/** G6: preview a prod->dev rehydrate BEFORE committing — read-only, persists nothing. */
+export function getRehydratePreview(sourceProdSpaceId: string): Promise<RehydratePreview> {
+  return getJSON(`/api/rehydrate/preview?space_id=${encodeURIComponent(sourceProdSpaceId)}`);
 }
 
 // --- F3: self-service access requests ---------------------------------------
@@ -337,4 +428,41 @@ export function getAdminDrift(): Promise<DriftReport> {
  * the assigned Steward (visible to the promotion's owner or an admin, same as the promotion itself). */
 export function getPromotionDrift(promotionId: string): Promise<DriftReport> {
   return getJSON(`/api/promotions/${promotionId}/drift`);
+}
+
+// --- G2: admin-configurable reviewer rules (server-gated to admins) -----------------------------
+
+/** The effective rule set (hardcoded + overrides merged) + the raw override rows + the 9 hardcoded
+ * defaults. Takes effect on the NEXT review — no redeploy. */
+export function getRules(): Promise<RulesList> {
+  return getJSON('/api/admin/rules');
+}
+
+/** Disable/re-enable a hardcoded rule, override its severity/params, or create/update a custom
+ * rule. `isCustom: false` (default) must name one of the 9 hardcoded rule_ids; `isCustom: true`
+ * must NOT collide with one and requires severity + content + citation. */
+export function upsertRule(opts: {
+  ruleId: string;
+  isCustom?: boolean;
+  enabled?: boolean;
+  severity?: RuleSeverity;
+  params?: Record<string, unknown>;
+  content?: string;
+  citation?: string;
+}): Promise<{ rule: RulesList['overrides'][number] }> {
+  return postJSON('/api/admin/rules', {
+    rule_id: opts.ruleId,
+    is_custom: opts.isCustom ?? false,
+    enabled: opts.enabled ?? true,
+    severity: opts.severity ?? null,
+    params: opts.params ?? null,
+    content: opts.content ?? null,
+    citation: opts.citation ?? null,
+  });
+}
+
+/** Reset a hardcoded rule back to its default, or delete a custom rule entirely. Idempotent — a
+ * no-op if there was nothing to reset. */
+export function resetRule(ruleId: string): Promise<{ ok: boolean }> {
+  return postJSON('/api/admin/rules/reset', { rule_id: ruleId });
 }

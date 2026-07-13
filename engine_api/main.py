@@ -57,8 +57,11 @@ import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
 import roles_store  # noqa: E402  (F5 — configurable roles store, store-over-env precedence)
+import rules_store  # noqa: E402  (G2 — admin-configurable reviewer rules, safe hardcoded fallback)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 import github_drift  # noqa: E402  (F5 — READ-ONLY GitHub gate drift detection)
+import handbook_rules  # noqa: E402  (G2 — the hardcoded rule_ids a plain override must reference)
+import rules_config  # noqa: E402  (G2 — the pure hardcoded+overrides merge, for GET /admin/rules)
 
 logger = logging.getLogger("engine_api")
 
@@ -85,6 +88,12 @@ async def _lifespan(app: FastAPI):
     app.state.roles_store = roles_store.build_store_from_env()
     logger.info("Roles store: %s",
                 "initialized (migrations applied)" if app.state.roles_store else "absent (no PGHOST — local/test)")
+    # G2: the admin-configurable rules store — same hard-dependency contract. `review()` reads it
+    # with `handbook_rules.RULES` as the safe fallback (see `rules_config.py`), so a fresh install
+    # with an empty/absent store reviews EXACTLY as before this slice shipped.
+    app.state.rules_store = rules_store.build_store_from_env()
+    logger.info("Rules store: %s",
+                "initialized (migrations applied)" if app.state.rules_store else "absent (no PGHOST — local/test)")
     reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
@@ -101,6 +110,8 @@ async def _lifespan(app: FastAPI):
             app.state.access_store.close()
         if app.state.roles_store is not None:
             app.state.roles_store.close()
+        if app.state.rules_store is not None:
+            app.state.rules_store.close()
 
 
 def _start_scheduled_reconciler(store):
@@ -146,6 +157,7 @@ app = FastAPI(title="genie-promote app", lifespan=_lifespan)
 app.state.store = None
 app.state.access_store = None  # F3
 app.state.roles_store = None  # F5
+app.state.rules_store = None  # G2
 api = APIRouter()
 
 
@@ -188,6 +200,15 @@ def _engine_call(label: str, fn: Callable):
     except access_request_store.InvalidTransition as e:
         logger.info("invalid access-request transition in %s (%s)", label, e)
         raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        # A deterministic, caller-input refusal (e.g. rehydrate's reverse-allowlist leak or a G6
+        # table_mapping override pointing back at the prod catalog) is the CALLER's problem to fix,
+        # not an engine fault — every `raise ValueError` in the engine layer (rehydrate.py,
+        # access_spec.py, the *_store.py CRUD modules) is exactly this kind of input validation, so a
+        # 400 here is right across the board, never the generic 502 the broad except below would map
+        # an uncaught ValueError to.
+        logger.info("input rejected in %s (%s)", label, e)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception:  # noqa: BLE001
         logger.exception("engine call failed: %s", label)
         raise HTTPException(status_code=502, detail=f"engine error: {label}")
@@ -325,11 +346,14 @@ def whoami(
     the config-driven admin/steward set — a caller with no valid OBO token verifies to no identity
     and is never admin, regardless of what `x-forwarded-email` claims. `steward` (F5: now
     store-backed, `APP_STEWARD`/`APP_STEWARDS` as the bootstrap fallback — see `_steward_display`)
-    is the distinct approver for the separation-of-duties model (SV4).
+    is the distinct approver for the separation-of-duties model (SV4). `dev_host` (G5) is the dev
+    workspace host (`APP_DEV_HOST`, the same one `rehydrate.py` targets) — exposed purely so the SPA
+    can build a deep-link to a just-rehydrated dev Space; `None` when unconfigured (local/offline).
     """
     verified = _verified_email(x_forwarded_access_token, authorization)
     return {"email": x_forwarded_email, "steward": _steward_display(),
-            "is_admin": _is_admin(verified), "repo_url": _repo_url()}
+            "is_admin": _is_admin(verified), "repo_url": _repo_url(),
+            "dev_host": os.environ.get("APP_DEV_HOST")}
 
 
 @api.get("/spaces")
@@ -342,6 +366,60 @@ def spaces(
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
     return {"spaces": _engine_call("list_spaces", lambda: app_logic.list_spaces(user_token=token))}
+
+
+@api.get("/prod-spaces")
+def prod_spaces(
+    q: str = "",
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G1: the id+title of every prod-deployed Genie Space, for the pickers that need to name a PROD
+    space a caller may NOT already have access to (F3's "request access" flow is the whole reason a
+    space id must be pickable without first proving access to it). Deliberately a thinner read than
+    `/admin/inventory` (F4): title+id only, no owner/access/phase — so it's safe to gate the same as
+    `/spaces` (any authenticated OBO caller) rather than admin-only. `q` filters server-side (a
+    case-insensitive substring on title) — Genie's own API has no server-side search, so this reads
+    the full live list fresh each call and filters here."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        spaces = app_logic.list_prod_spaces()
+        needle = q.strip().lower()
+        if needle:
+            spaces = [s for s in spaces if needle in (s.get("title") or "").lower()]
+        return {"spaces": spaces}
+
+    return _engine_call("list_prod_spaces", _run)
+
+
+@api.get("/principals")
+def principals(
+    q: str = "",
+    kind: str = "all",
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G1: users + groups of the workspace directory, for every principal picker in the app (F2
+    access declarations, F3 access requests, F5 role assignment) — the app must never accept a
+    free-typed email/username as the SUBMITTED value; this is the one endpoint every such picker
+    calls. Gated the same as `/spaces` (any authenticated OBO caller): directory listing isn't
+    itself a security boundary here — the ACTION each picker feeds is separately gated (F2 is a
+    declaration applied only via the governed pipeline; F3/F5 require admin approval server-side).
+
+    TRANSPORT NOTE (found live): the SCIM read runs as the APP SP, not the caller's OBO token —
+    the Apps-forwarded user token is DOWNSCOPED to the app's `user_api_scopes` (today only
+    `dashboards.genie`), so SCIM `users.list` 403s on it ("Sem permissão para este recurso (OBO)").
+    The OBO token still gates WHO may call; the SP is transport only, same split as `/spaces`."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    if kind not in ("all", "user", "group"):
+        raise HTTPException(status_code=400, detail="kind inválido; use 'all', 'user' ou 'group'")
+    return {"principals": _engine_call(
+        "list_principals", lambda: app_logic.list_principals(q, kind=kind))}
 
 
 class SpacePermissionIn(BaseModel):
@@ -394,7 +472,12 @@ def review(
 
     def _run() -> dict:
         spec = body.access_spec.to_engine() if body.access_spec else None
-        result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec)
+        # G2: the admin-configured rule overrides (None when no store — reviews with the hardcoded
+        # handbook_rules.RULES, unchanged from before this slice).
+        store = _rules_store()
+        overrides = store.list_all_dicts() if store is not None else None
+        result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec,
+                                        rule_overrides=overrides)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
         return {k: result[k] for k in _REVIEW_FIELDS}
@@ -413,6 +496,12 @@ class PromoteRequest(BaseModel):
     # request — persisted with the Promotion + committed to the PR as a sidecar (declaration is
     # app-direct; enforcement is governed, see app_logic.request_promotion).
     access_spec: AccessSpecIn | None = None
+    # G7: the Requester's declared table de-para (source DEV ref -> desired prod ref overrides),
+    # keyed exactly like `/promote/preview`'s `source` field — only entries actually changed away
+    # from the preview's `default_target` need be sent (an identity mapping is a harmless no-op).
+    # None/empty means "use the plain dev_->prod_ defaults", unchanged from before G7. ALSO only a
+    # declaration (committed to a git sidecar); CI applies it, never this endpoint.
+    table_mapping: dict[str, str] | None = None
 
 
 def _persist_promotion(store, result: dict, body: PromoteRequest, requester_email: str | None) -> str:
@@ -435,7 +524,11 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
                 # F2: persist the declared AccessSpec WITH the Promotion (echoed back by
                 # request_promotion's review payload) so it survives independently of the PR/branch
                 # and renders in the recovery/history view without re-parsing the sidecar from git.
-                access_spec=review.get("access_spec") or None)
+                access_spec=review.get("access_spec") or None,
+                # G7: persist the declared table de-para the SAME way — straight from the request
+                # body (unlike access_spec, `table_mapping` isn't part of the reviewer's own
+                # payload; it never rides the review, only the promotion request).
+                table_mapping=body.table_mapping or None)
             promotion_id, event = promotion.id, "requested"
         except DuplicatePRNumber:
             # Concurrent request created it between our find_by_pr and create (TOCTOU). Recover by
@@ -478,16 +571,42 @@ def promote(
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
     spec = body.access_spec.to_engine() if body.access_spec else None
+    rules_store_ = _rules_store()
+    overrides = rules_store_.list_all_dicts() if rules_store_ is not None else None
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
-            resource_title=body.resource_title, access_spec_=spec),
+            resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides,
+            table_mapping=body.table_mapping),
     )
     store = getattr(app.state, "store", None)
     if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips
         result["promotion_id"] = _persist_promotion(store, result, body, x_forwarded_email)
     return result
+
+
+@api.get("/promote/preview")
+def promote_preview(
+    space_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G7: a READ-ONLY preview of a promotion's table de-para, called BEFORE `/promote` — the DEV
+    Space's title + every 3-part table ref it references, each with its plain dev_->prod_ default
+    target, so the confirm step can render an editable prod Space name + a table de-para for the
+    caller to review/override BEFORE requesting the promotion. Persists nothing. Gated the SAME way
+    as the review's own export — the dev-sp transport + `authz.assert_can_access` guard (the ONE
+    blast site a preview touches: dev). Distinct from `/rehydrate/preview`, which reads PROD as the
+    app SP (the opposite direction) — never reused here."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        return app_logic.preview_promotion(space_id, user_token=token)
+
+    return _engine_call("promote_preview", _run)
 
 
 @api.get("/promote/{number}/status")
@@ -522,6 +641,52 @@ class RehydrateRequest(BaseModel):
     # attached to that Promotion's trail so "who rehydrated this deployed Space, and when" shows up
     # next to its promotion history, same place a Steward already looks.
     promotion_id: str | None = None
+    # G6: source prod ref -> desired dev ref overrides, keyed exactly like /rehydrate/preview's
+    # `source` field — only entries the caller actually changed away from the preview's
+    # `default_target` need be sent (an identity mapping is a no-op either way, see
+    # `pre_render.apply_table_mapping`). None/empty means "use the plain defaults", unchanged.
+    table_mapping: dict[str, str] | None = None
+
+
+@api.get("/rehydrate/preview")
+def rehydrate_preview(
+    space_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G6: a READ-ONLY preview of a prod->dev rehydrate, called BEFORE `/rehydrate` — the source
+    Space's title + every 3-part table ref it references, each with its plain prod_->dev_ default
+    target (+ best-effort dev-side suggestions), so the UI can render an editable dev title + a
+    table de-para for the caller to review/override BEFORE committing. Persists nothing. Gated the
+    SAME way as `/rehydrate` on the ONE blast site a read touches (the source prod Space) — there is
+    no second (overwrite-target) guard here, since a preview never writes to dev."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        identity = authz.verify_identity(token, host=Config().host)
+        return rehydrate_mod.preview_rehydrate(space_id, identity=identity)
+
+    return _engine_call("rehydrate_preview", _run)
+
+
+def _find_promotion_id_for_resource(store, resource_id: str) -> str | None:
+    """G5: resolve which Promotion produced a live prod Space, by resource_id — mirrors
+    `admin_inventory`'s id-match join (F4) but scoped to one id, no title fallback (rehydrate always
+    has an EXACT space id to export, unlike the inventory's softer display-only join). Lets the
+    standalone "Exportar para Dev" screen call `/rehydrate` with just the prod Space it picked from
+    `getProdSpaces` (title+id only, no promotion_id) — RehydrateAction (started FROM a promotion's
+    OWN detail) already knows its promotion_id and never needs this. Several Promotions can share a
+    resource_id (re-promotions accumulate history); the most recently updated one wins. Returns None
+    when no Promotion has ever targeted this resource — the caller no longer fails closed on that
+    (stakeholder decision: rehydrate must work for any prod Space the caller can access); the
+    endpoint falls through with `promotion_id=None`, and `rehydrate_space` records a standalone
+    `rehydrate_events` row instead of a Promotion-linked one."""
+    candidates = [p for p in store.list_promotions(None) if p.resource_id == resource_id]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.updated_at).id
 
 
 @api.post("/rehydrate")
@@ -530,12 +695,27 @@ def rehydrate(
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """A3/F1: export a PROMOTED prod Space and (re-)create it in dev, rebound `prod_`->`dev_` — no
-    git PR. Guarded at BOTH blast sites by `authz.assert_can_access` on the caller's platform-
-    VERIFIED identity: the source prod Space (always) and, in `overwrite` mode, the target dev
-    Space (so a caller can't clobber a dev Space they can't reach even though the standing
-    dev-reader/writer SP could). A denial is a plain 403; an unreachable/unprovisioned dev SP
-    (SP2) is a distinct 503 with an actionable re-bootstrap message — never confused with a 403.
+    """A3/F1: export a prod Space the caller can access and (re-)create it in dev, rebound
+    `prod_`->`dev_` — no git PR. The source need NOT have been promoted through this app (the prod
+    store starts empty per ADR-0006, so most prod Spaces have no Promotion row at all). Guarded at
+    BOTH blast sites by `authz.assert_can_access` on the caller's platform-VERIFIED identity: the
+    source prod Space (always) and, in `overwrite` mode, the target dev Space (so a caller can't
+    clobber a dev Space they can't reach even though the standing dev-reader/writer SP could). A
+    denial is a plain 403; an unreachable/unprovisioned dev SP (SP2) is a distinct 503 with an
+    actionable re-bootstrap message — never confused with a 403.
+
+    Non-repudiation (A3 acceptance + A3 review, revised): every rehydrate stays auditable when a
+    durable store is present (prod), but via ONE of TWO paths (`rehydrate_space`/`_audit`) — a
+    linkable source Promotion (preferred, when one exists) gets the richer `audit_events`
+    "rehydrated" row; no match is no longer an error, it falls through with `promotion_id=None`
+    and gets a standalone `rehydrate_events` row instead. An EXPLICITLY given `promotion_id` that
+    doesn't exist is still a 404 (a dangling client reference, not "no promotion available").
+
+    G6: `table_mapping` (source prod ref -> desired dev ref) is a deterministic REFUSAL, not an
+    engine fault, when it's malformed or points back at the prod catalog (`rehydrate_space` raises
+    `ValueError` for both, same as the pre-existing reverse-allowlist-leak refusal) — `_engine_call`
+    maps any `ValueError` to an actionable 400, never the generic 502 its broad exception handler
+    would otherwise give an uncaught one.
     """
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
@@ -544,18 +724,15 @@ def rehydrate(
         raise HTTPException(status_code=400, detail="mode deve ser 'create' ou 'overwrite'")
     if body.mode == "overwrite" and not body.dev_space_id:
         raise HTTPException(status_code=400, detail="overwrite requer dev_space_id")
-    # Non-repudiation (A3 acceptance + A3 review): a rehydrate mutates a real dev Space, so when a
-    # durable store is present (prod) it MUST be auditable — require a linkable source Promotion.
-    # (Validated here, BEFORE _engine_call, so these stay 400/404 — an HTTPException raised inside
-    # _run would be caught by _engine_call's broad handler and re-mapped to 502.) The audit row FKs
-    # to promotions(id), so the promotion must also exist. Store=None (local/offline) keeps the
-    # prior no-audit ergonomics; the gap was only reachable in prod, where the store is required.
     store = getattr(app.state, "store", None)
+    promotion_id = body.promotion_id
     if store is not None:
-        if not body.promotion_id:
-            raise HTTPException(status_code=400,
-                                detail="rehydrate requer promotion_id (a promoção de origem) para a trilha de auditoria")
-        if store.get_promotion(body.promotion_id) is None:
+        # G5: the standalone screen has no promotion_id to hand back (it picked a prod Space from
+        # the plain getProdSpaces listing) — resolve it server-side; a linked trail is still
+        # preferred when one exists, but finding none is no longer fatal (see the docstring above).
+        if not promotion_id:
+            promotion_id = _find_promotion_id_for_resource(store, body.source_prod_space_id)
+        if promotion_id and store.get_promotion(promotion_id) is None:
             raise HTTPException(status_code=404, detail="promoção de origem não encontrada")
 
     def _run() -> dict:
@@ -563,7 +740,7 @@ def rehydrate(
         result = rehydrate_mod.rehydrate_space(
             source_prod_space_id=body.source_prod_space_id, identity=identity, mode=body.mode,
             dev_space_id=body.dev_space_id, title=body.title,
-            store=store, promotion_id=body.promotion_id)
+            store=store, promotion_id=promotion_id, table_mapping=body.table_mapping or None)
         return {"space_id": result.space_id, "mode": result.mode, "title": result.title}
 
     return _engine_call("rehydrate_space", _run)
@@ -772,7 +949,10 @@ def _promotion_summary(p) -> dict:
             "created_at": p.created_at, "updated_at": p.updated_at,
             # F2: the declared AccessSpec persisted with the Promotion (independent of the review
             # snapshot, and of the sidecar's own PR/branch lifetime) — the Steward reviews this.
-            "access_spec": p.access_spec}
+            "access_spec": p.access_spec,
+            # G7: the declared table de-para, persisted the same way — reopening a promotion shows
+            # exactly what was declared, without re-parsing the `.mapping.json` sidecar from git.
+            "table_mapping": p.table_mapping}
 
 
 def _audit_event(e) -> dict:
@@ -1113,6 +1293,107 @@ def promotion_drift(
     verified = _verified_email(x_forwarded_access_token, authorization)
     _visible_promotion_or_403(store, promotion_id, verified)
     return _engine_call("promotion_drift", _run_drift_check)
+
+
+# --- G2: admin-configurable reviewer rules (Lakebase-backed, safe hardcoded fallback) -------------
+#
+# Admin-gated the SAME way as F4/F5 (`_require_admin` on the VERIFIED identity). `review()`/
+# `promote()` above already read `_rules_store()` and thread the override rows into the engine
+# (`app_logic.review_space`/`request_promotion` -> `rules_config.effective_rules`/`eval01_config`);
+# these three endpoints are the CRUD the Settings screen's "Regras" section calls.
+
+
+def _rules_store():
+    return getattr(app.state, "rules_store", None)
+
+
+def _require_rules_store():
+    store = _rules_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+def _override_summary(o) -> dict:
+    return {"rule_id": o.rule_id, "is_custom": o.is_custom, "enabled": o.enabled,
+            "severity": o.severity, "params": o.params, "content": o.content,
+            "citation": o.citation, "updated_by": o.updated_by, "updated_at": o.updated_at}
+
+
+@api.get("/admin/rules")
+def list_rules(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The EFFECTIVE rule set (hardcoded `handbook_rules.RULES` merged with any admin overrides —
+    the exact set `review()` grounds the LLM on) alongside the raw override rows, so the Settings
+    screen can render "9 hardcoded + N custom" with each hardcoded rule's override state (or none)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_rules_store()
+    overrides = store.list_all_dicts()
+    return {"effective": rules_config.effective_rules(overrides),
+            "overrides": [_override_summary(o) for o in store.list_all()],
+            "hardcoded": handbook_rules.RULES}
+
+
+class RuleUpsertIn(BaseModel):
+    rule_id: str
+    is_custom: bool = False
+    enabled: bool = True
+    severity: str | None = None
+    params: dict | None = None
+    content: str | None = None
+    citation: str | None = None
+
+
+@api.post("/admin/rules")
+def upsert_rule(
+    body: RuleUpsertIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Disable/re-enable a hardcoded rule, override its severity/params, or create/update a custom
+    rule — takes effect on the NEXT review, no redeploy. A plain override (`is_custom=False`) must
+    name one of the 9 hardcoded `rule_id`s (checked here, against `handbook_rules.RULES` — the
+    store itself is rule_id-agnostic so it can also hold genuinely new custom ids); a custom rule
+    must NOT collide with a hardcoded id. Audited (`rule_created`/`rule_updated`) under the caller's
+    VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_rules_store()
+    known_ids = {r["rule_id"] for r in handbook_rules.RULES}
+    if body.is_custom and body.rule_id in known_ids:
+        raise HTTPException(status_code=400,
+                            detail=f"rule_id {body.rule_id!r} já é uma regra do handbook — use override, não custom.")
+    if not body.is_custom and body.rule_id not in known_ids:
+        raise HTTPException(status_code=400,
+                            detail=f"rule_id {body.rule_id!r} não é uma regra conhecida do handbook.")
+    try:
+        override = store.upsert(
+            rule_id=body.rule_id, actor_email=verified, is_custom=body.is_custom,
+            enabled=body.enabled, severity=body.severity, params=body.params,
+            content=body.content, citation=body.citation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"rule": _override_summary(override)}
+
+
+class RuleResetIn(BaseModel):
+    rule_id: str
+
+
+@api.post("/admin/rules/reset")
+def reset_rule(
+    body: RuleResetIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Reset a hardcoded rule back to its default (removes the override) or delete a custom rule
+    entirely. Idempotent — a no-op (200, not 404) if there was nothing to reset. Audited
+    (`rule_reset`/`rule_deleted`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_rules_store()
+    store.reset(body.rule_id, actor_email=verified)
+    return {"ok": True}
 
 
 # Mount the API twice: at root (legacy engine-API contract) and under /api (what the SPA calls).

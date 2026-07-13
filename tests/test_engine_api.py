@@ -44,10 +44,11 @@ def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_DEV_HOST", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False,
-                        "repo_url": "https://gh/acme/repo"}
+                        "repo_url": "https://gh/acme/repo", "dev_host": None}
 
 
 def test_whoami_steward_none_when_unset(monkeypatch):
@@ -55,10 +56,11 @@ def test_whoami_steward_none_when_unset(monkeypatch):
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_DEV_HOST", raising=False)
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False,
-                        "repo_url": "https://gh/acme/repo"}
+                        "repo_url": "https://gh/acme/repo", "dev_host": None}
 
 
 def test_whoami_repo_url_defaults_when_unset(monkeypatch):
@@ -66,6 +68,13 @@ def test_whoami_repo_url_defaults_when_unset(monkeypatch):
     monkeypatch.delenv("APP_REPO_URL", raising=False)
     body = client.get("/whoami", headers={"x-forwarded-email": "m@x"}).json()
     assert body["repo_url"] == "https://github.com/malcolndandaro/genie-promote-cicd"
+
+
+def test_whoami_dev_host_reflects_env(monkeypatch):
+    # G5: the standalone rehydrate screen builds a deep-link to the resulting dev Space from this.
+    monkeypatch.setenv("APP_DEV_HOST", "https://dev.cloud.databricks.com")
+    body = client.get("/whoami", headers={"x-forwarded-email": "m@x"}).json()
+    assert body["dev_host"] == "https://dev.cloud.databricks.com"
 
 
 def test_spaces_threads_proxy_header_token(monkeypatch):
@@ -153,6 +162,58 @@ def test_spaces_engine_error_maps_to_502(monkeypatch):
     assert r.status_code == 502
     # generic body — no internal/SDK detail leaked to the client
     assert "simulated SDK auth failure" not in r.text
+
+
+# --- GET /prod-spaces + /principals (G1: prefilled/searchable pickers) ---
+
+
+def test_prod_spaces_requires_a_token():
+    r = client.get("/prod-spaces")
+    assert r.status_code == 401
+
+
+def test_prod_spaces_returns_id_and_title(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda: [{"space_id": "a", "title": "Recebíveis"},
+                                 {"space_id": "b", "title": "Outro Espaço"}])
+    r = client.get("/prod-spaces", headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json() == {"spaces": [{"space_id": "a", "title": "Recebíveis"},
+                                   {"space_id": "b", "title": "Outro Espaço"}]}
+
+
+def test_prod_spaces_filters_by_title_case_insensitively(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda: [{"space_id": "a", "title": "Recebíveis"},
+                                 {"space_id": "b", "title": "Outro Espaço"}])
+    r = client.get("/prod-spaces", params={"q": "receb"}, headers={"x-forwarded-access-token": "tok"})
+    assert r.json() == {"spaces": [{"space_id": "a", "title": "Recebíveis"}]}
+
+
+def test_principals_requires_a_token():
+    r = client.get("/principals")
+    assert r.status_code == 401
+
+
+def test_principals_threads_query_and_kind(monkeypatch):
+    captured = {}
+
+    def fake_list_principals(q="", *, profile=None, client=None, user_token=None, kind="all", limit=25):
+        captured.update(q=q, user_token=user_token, kind=kind)
+        return [{"type": "user", "id": "u1", "display": "Ana", "email": "ana@x.com"}]
+
+    monkeypatch.setattr(engine_api.app_logic, "list_principals", fake_list_principals)
+    r = client.get("/principals", params={"q": "ana", "kind": "user"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json() == {"principals": [{"type": "user", "id": "u1", "display": "Ana", "email": "ana@x.com"}]}
+    assert captured == {"q": "ana", "user_token": None, "kind": "user"}  # SP transport: OBO gates the caller, never forwarded to SCIM
+
+
+def test_principals_rejects_invalid_kind():
+    r = client.get("/principals", params={"kind": "bogus"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
 
 
 # --- POST /review (AK3) ---
@@ -289,7 +350,7 @@ def test_rehydrate_create_returns_new_space_id(monkeypatch):
     _verify_as(monkeypatch, {"tok": "ana@x"})
 
     def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
-                       store=None, promotion_id=None):
+                       store=None, promotion_id=None, table_mapping=None):
         assert identity.user_name == "ana@x"  # the VERIFIED identity, not a header
         assert mode == "create"
         return engine_api.rehydrate_mod.RehydrateResult(
@@ -308,7 +369,7 @@ def test_rehydrate_overwrite_passes_dev_space_id_and_promotion_id(monkeypatch):
     seen = {}
 
     def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
-                       store=None, promotion_id=None):
+                       store=None, promotion_id=None, table_mapping=None):
         seen.update(dev_space_id=dev_space_id, promotion_id=promotion_id, store=store)
         return engine_api.rehydrate_mod.RehydrateResult(
             space_id=dev_space_id, mode=mode, title=title, warehouse_id="wh-1")
@@ -330,19 +391,27 @@ def _mk_promotion(store):
         current_phase="deployed", live_status=None)
 
 
-def test_rehydrate_requires_promotion_id_when_store_present(monkeypatch, store):
-    # A3 review Finding 1: with a durable store (prod), a rehydrate mutates a real dev Space and MUST
-    # be auditable -> reject (before any mutation) when there's no source Promotion to attach the
-    # audit event to. Without this, POST /rehydrate {no promotion_id} created/overwrote a dev Space
-    # with ZERO audit rows (non-repudiation gap).
+def test_rehydrate_proceeds_with_promotion_id_none_when_no_promotion_matches(monkeypatch, store):
+    # Stakeholder decision (revised from the original A3 review gate): the prod store starts EMPTY
+    # (ADR-0006), so most prod Spaces have no source Promotion at all -> rehydrate must still work.
+    # No match -> the endpoint proceeds with promotion_id=None (rehydrate_space then records a
+    # standalone rehydrate_events row instead of a Promotion-linked one — see test_rehydrate.py).
     _verify_as(monkeypatch, {"tok": "ana@x"})
-    called = {"ran": False}
-    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
-                        lambda *a, **k: called.__setitem__("ran", True))
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None, table_mapping=None):
+        seen.update(promotion_id=promotion_id, store=store)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
     r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
                     headers={"x-forwarded-access-token": "tok"})
-    assert r.status_code == 400
-    assert called["ran"] is False  # rejected before the service (no mutation)
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "new-dev-id"
+    assert seen["promotion_id"] is None
+    assert seen["store"] is not None  # the store is still threaded through -> the standalone path can fire
 
 
 def test_rehydrate_rejects_unknown_promotion_id_when_store_present(monkeypatch, store):
@@ -362,7 +431,7 @@ def test_rehydrate_with_valid_promotion_id_runs_when_store_present(monkeypatch, 
     p = _mk_promotion(store)
 
     def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
-                       store=None, promotion_id=None):
+                       store=None, promotion_id=None, table_mapping=None):
         assert store is not None and promotion_id == p.id  # linkage threaded through -> auditable
         return engine_api.rehydrate_mod.RehydrateResult(
             space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
@@ -373,6 +442,50 @@ def test_rehydrate_with_valid_promotion_id_runs_when_store_present(monkeypatch, 
                     headers={"x-forwarded-access-token": "tok"})
     assert r.status_code == 200
     assert r.json()["space_id"] == "new-dev-id"
+
+
+def test_rehydrate_auto_resolves_promotion_id_by_resource_id_when_omitted(monkeypatch, store):
+    # G5: the standalone "Exportar para Dev" screen picks a prod Space from getProdSpaces (title+id
+    # only) and never sends promotion_id — the endpoint must resolve it from source_prod_space_id
+    # itself so that flow stays auditable without the client knowing what a promotion_id is.
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    p = store.create_promotion(
+        resource_id="prod-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@x", pr_number=9, pr_url="https://gh/pr/9", branch="promote/x",
+        current_phase="deployed", live_status=None)
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None, table_mapping=None):
+        assert store is not None and promotion_id == p.id  # resolved, not just accepted as None
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "new-dev-id"
+
+
+def test_rehydrate_resolution_does_not_match_a_different_resource(monkeypatch, store):
+    # A Promotion exists, but for a DIFFERENT resource — must not be picked up as a false match.
+    # Resolves to no match, same as the empty-store case above: proceeds with promotion_id=None
+    # rather than guessing (the caller's rehydrate still lands in the standalone audit path).
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    _mk_promotion(store)  # resource_id="dev-src", unrelated to "prod-1" below
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None, table_mapping=None):
+        seen.update(promotion_id=promotion_id)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert seen["promotion_id"] is None  # the unrelated Promotion was correctly NOT picked up
 
 
 def test_rehydrate_access_denied_maps_to_403_not_bootstrap_error(monkeypatch):
@@ -401,6 +514,142 @@ def test_rehydrate_dev_not_bootstrapped_maps_to_503_distinct_from_403(monkeypatc
     assert "provision_dev_sp.sh" in r.json()["detail"]
 
 
+# --- G6: table de-para (source prod ref -> desired dev ref) + editable dev title ------------------
+
+
+def test_rehydrate_threads_table_mapping(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None, table_mapping=None):
+        seen.update(table_mapping=table_mapping)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    mapping = {"prod_recebiveis.diamond.fato_recebiveis": "dev_recebiveis.diamond.custom_name"}
+    r = client.post("/rehydrate", json={
+        "source_prod_space_id": "prod-1", "mode": "create", "table_mapping": mapping,
+    }, headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert seen["table_mapping"] == mapping
+
+
+def test_rehydrate_omits_empty_table_mapping_as_none(monkeypatch):
+    # An empty dict from the client (no rows actually overridden) is threaded as None, not `{}` —
+    # `rehydrate_space`'s own `if table_mapping:` short-circuit already treats both the same, but
+    # this pins the endpoint's own normalization so it can't drift.
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None, table_mapping=None):
+        seen.update(table_mapping=table_mapping)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
+    r = client.post("/rehydrate", json={
+        "source_prod_space_id": "prod-1", "mode": "create", "table_mapping": {},
+    }, headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert seen["table_mapping"] is None
+
+
+def test_rehydrate_table_mapping_refusal_maps_to_400_not_502(monkeypatch):
+    # A G6 de-para pointing back at prod (or otherwise malformed) is a deterministic, caller-input
+    # refusal (`rehydrate_space` raises ValueError) — `_engine_call` must map it to an actionable
+    # 400, not the generic 502 an uncaught engine exception gets.
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+
+    def boom(**kw):
+        raise ValueError("rehydrate refused: o de-para para X aponta de volta para o catálogo de produção")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", boom)
+    r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create",
+                                        "table_mapping": {"prod_recebiveis.a.b": "prod_recebiveis.a.c"}},
+                    headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+    assert "catálogo de produção" in r.json()["detail"]
+
+
+# --- GET /rehydrate/preview (G6): read-only de-para preview before the caller commits -------------
+
+
+def test_rehydrate_preview_requires_a_token():
+    r = client.get("/rehydrate/preview", params={"space_id": "x"})
+    assert r.status_code == 401
+
+
+def test_rehydrate_preview_returns_title_and_tables(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "ana@x"})
+
+    def fake_preview(space_id, *, identity):
+        assert space_id == "prod-1"
+        assert identity.user_name == "ana@x"  # the VERIFIED identity, not a header
+        return {"title": "Recebíveis", "tables": [
+            {"source": "prod_recebiveis.diamond.fato_recebiveis",
+             "default_target": "dev_recebiveis.diamond.fato_recebiveis", "dev_suggestions": []},
+        ]}
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "preview_rehydrate", fake_preview)
+    r = client.get("/rehydrate/preview", params={"space_id": "prod-1"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json()["title"] == "Recebíveis"
+    assert r.json()["tables"][0]["default_target"] == "dev_recebiveis.diamond.fato_recebiveis"
+
+
+def test_rehydrate_preview_access_denied_maps_to_403(monkeypatch):
+    _verify_as(monkeypatch, {"tok": "mallory@x"})
+
+    def boom(space_id, *, identity):
+        raise authz.AccessDenied("mallory@x may not access space prod-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "preview_rehydrate", boom)
+    r = client.get("/rehydrate/preview", params={"space_id": "prod-1"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 403
+
+
+# --- GET /promote/preview (G7): read-only de-para preview before the caller requests a promotion ---
+
+
+def test_promote_preview_requires_a_token():
+    r = client.get("/promote/preview", params={"space_id": "x"})
+    assert r.status_code == 401
+
+
+def test_promote_preview_returns_title_and_tables(monkeypatch):
+    captured = {}
+
+    def fake_preview(space_id, *, user_token):
+        captured.update(space_id=space_id, user_token=user_token)
+        return {"title": "Recebíveis", "tables": [
+            {"source": "dev_recebiveis.diamond.fato_recebiveis",
+             "default_target": "prod_recebiveis.diamond.fato_recebiveis"},
+        ]}
+
+    monkeypatch.setattr(engine_api.app_logic, "preview_promotion", fake_preview)
+    r = client.get("/promote/preview", params={"space_id": "dev-1"},
+                   headers={"x-forwarded-access-token": "tok-p"})
+    assert r.status_code == 200
+    assert captured == {"space_id": "dev-1", "user_token": "tok-p"}  # the token, never a header identity
+    assert r.json()["title"] == "Recebíveis"
+    assert r.json()["tables"][0]["default_target"] == "prod_recebiveis.diamond.fato_recebiveis"
+
+
+def test_promote_preview_access_denied_maps_to_403(monkeypatch):
+    def boom(space_id, *, user_token):
+        raise authz.AccessDenied("mallory@x may not access space dev-1")
+
+    monkeypatch.setattr(engine_api.app_logic, "preview_promotion", boom)
+    r = client.get("/promote/preview", params={"space_id": "dev-1"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 403
+
+
 # --- /api/* mount (SV1): the SPA calls the API under /api; same handlers as the legacy paths ---
 
 
@@ -414,9 +663,11 @@ def test_api_prefix_whoami(monkeypatch):
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_DEV_HOST", raising=False)
     r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
     assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x",
-                                                 "is_admin": False, "repo_url": "https://gh/acme/repo"}
+                                                 "is_admin": False, "repo_url": "https://gh/acme/repo",
+                                                 "dev_host": None}
 
 
 def test_api_prefix_spaces_threads_token(monkeypatch):
@@ -611,6 +862,51 @@ def test_promote_without_access_spec_persists_none(monkeypatch, store):
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     pid = r.json()["promotion_id"]
     assert store.get_promotion(pid).access_spec is None
+
+
+# --- G7: the declared prod name + table de-para thread into request_promotion + persist ----------
+
+_TABLE_MAPPING_WIRE = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
+
+
+def test_promote_threads_prod_title_and_table_mapping_to_the_engine(monkeypatch, store):
+    """G7: `resource_title` (the declared prod name) and `table_mapping` both reach
+    app_logic.request_promotion — the app-direct DECLARATION step; CI is what actually applies the
+    mapping, never this endpoint."""
+    captured = {}
+
+    def fake_request_promotion(space_id, *a, resource_title=None, table_mapping=None, **k):
+        captured.update(resource_title=resource_title, table_mapping=table_mapping)
+        return _fake_promote()(space_id, *a, **k)
+
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake_request_promotion)
+    r = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis PROD",
+                                          "table_mapping": _TABLE_MAPPING_WIRE},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    assert r.status_code == 200
+    assert captured == {"resource_title": "Recebíveis PROD", "table_mapping": _TABLE_MAPPING_WIRE}
+
+
+def test_promote_persists_the_declared_table_mapping(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
+    r = client.post("/api/promote", json={"space_id": "s1", "table_mapping": _TABLE_MAPPING_WIRE},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    pid = r.json()["promotion_id"]
+    p = store.get_promotion(pid)
+    assert p.table_mapping == _TABLE_MAPPING_WIRE
+
+    # the Steward-facing recovery payload (get_promotion) echoes the SAME declaration
+    detail = client.get(f"/api/promotions/{pid}",
+                        headers={"x-forwarded-access-token": "tok"}).json()
+    assert detail["promotion"]["table_mapping"] == _TABLE_MAPPING_WIRE
+
+
+def test_promote_without_table_mapping_persists_none(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
+    r = client.post("/api/promote", json={"space_id": "s1"},
+                    headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    pid = r.json()["promotion_id"]
+    assert store.get_promotion(pid).table_mapping is None
 
 
 def test_promote_rerequest_adds_snapshot_and_re_reviewed_to_same_promotion(monkeypatch, store):

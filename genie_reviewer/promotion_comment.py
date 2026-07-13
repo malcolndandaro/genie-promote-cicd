@@ -29,14 +29,36 @@ def _gate_line(gate: dict) -> str:
     return f"### 🟡 Gate: avisos (não bloqueiam)\n\n{summary}"
 
 
-def render_promotion_comment(review: dict, requester_email: str | None) -> str:
-    """Markdown mirroring the Revisão UI. First line is the marker (for in-place upsert)."""
+def _mapping_lines(table_mapping: dict | None) -> list[str]:
+    """G7: the promotion's declared table de-para, rendered as a markdown table — so the Steward/
+    reviewer see it in the comment itself, not just by digging into the sidecar's own PR diff."""
+    if not table_mapping:
+        return []
+    lines = ["", "### De-para de tabelas (dev → prod)", "",
+             "| Origem (dev) | Destino (prod) |", "| --- | --- |"]
+    for source, target in table_mapping.items():
+        lines.append(f"| `{_safe(source)}` | `{_safe(target)}` |")
+    return lines
+
+
+def render_promotion_comment(review: dict, requester_email: str | None, *,
+                             resource_title: str | None = None,
+                             table_mapping: dict | None = None) -> str:
+    """Markdown mirroring the Revisão UI. First line is the marker (for in-place upsert).
+
+    ``resource_title``/``table_mapping`` (G7, optional) are the Requester's declared prod Space
+    name + table de-para — surfaced here for transparency, in ADDITION to being visible in the
+    sidecars' own PR diff (``.title``/``.mapping.json``)."""
     who = _safe(requester_email) or "usuário autenticado"
     lines: list[str] = [
         PROMOTION_COMMENT_MARKER,
         "## Revisão de promoção (Genie/AI-BI)",
         "",
         f"**Solicitado por:** `{who}` · _Achados gerados por IA — verifique antes de aprovar._",
+    ]
+    if resource_title:
+        lines.append(f"**Nome do space em produção:** `{_safe(resource_title)}`")
+    lines += [
         "",
         "_Leitura dos espaços executa como o usuário (OBO); o revisor (LLM) e a checagem de "
         "grants executam como o service principal do app._",
@@ -50,7 +72,9 @@ def render_promotion_comment(review: dict, requester_email: str | None) -> str:
         word = _STEP_WORD.get(status, status)
         lines.append(f"- {icon} {_safe(step.get('label', step.get('key', '')))} — _{word}_")
 
-    lines += ["", _gate_line(review.get("gate", {})), "", "### Achados do Genie Reviewer", ""]
+    lines += ["", _gate_line(review.get("gate", {}))]
+    lines += _mapping_lines(table_mapping)
+    lines += ["", "### Achados do Genie Reviewer", ""]
     findings = review.get("findings", [])
     if not findings:
         lines.append("Nenhum achado — espaço limpo.")

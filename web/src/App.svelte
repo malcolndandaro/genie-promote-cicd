@@ -5,8 +5,8 @@
   import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
-  import NovoEspaco from './screens/NovoEspaco.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
+  import Rehidratar from './screens/Rehidratar.svelte';
   import Admin from './screens/Admin.svelte';
   import Settings from './screens/Settings.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
@@ -52,7 +52,7 @@
     { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
     { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
     { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
-    { id: 'novo', label: '＋ Novo Genie Space', icon: 'plus-circle' },
+    { id: 'rehidratar', label: 'Trazer de volta para o dev', icon: 'download' },
     ...(who?.is_admin ? [{ id: 'admin' as const, label: 'Administração', icon: 'shield' as const }] : []),
     ...(who?.is_admin
       ? [{ id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const }]
@@ -64,15 +64,16 @@
     espacos: 'Meus espaços',
     promocoes: 'Minhas promoções',
     acesso: 'Acesso',
-    novo: 'Novo Genie Space',
+    rehidratar: 'Trazer de volta para o dev',
     admin: 'Administração',
     configuracoes: 'Configurações',
   };
 
-  // Start a promotion for a space and drop into the in-place review flow on "Meus espaços".
+  // Choose a space (from Home or "Meus espaços") and land on the confirmation step there (G3):
+  // select() only — the panel bound to the chosen space (optional access declaration → "Confirmar
+  // promoção") is what actually fires requestPromotion().
   function promoteSpace(resource: PromotableResource): void {
     promotion.select(resource);
-    promotion.requestPromotion();
     router.navigate('espacos');
   }
 
@@ -92,11 +93,10 @@
     <Home
       onPromote={promoteSpace}
       onOpenPromotion={openPromotion}
-      onGoToNew={() => router.navigate('novo')}
       promoting={promotion.phase === 'reviewing'}
     />
   {:else if router.route.id === 'espacos'}
-    <MeusEspacos {promotion} userEmail={who?.email ?? null} onGoToNew={() => router.navigate('novo')} />
+    <MeusEspacos {promotion} userEmail={who?.email ?? null} devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'promocoes'}
     <MinhasPromocoes
       {who}
@@ -107,11 +107,11 @@
     />
   {:else if router.route.id === 'acesso'}
     <AcessoEspacos {who} />
+  {:else if router.route.id === 'rehidratar'}
+    <Rehidratar devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'admin'}
     <Admin />
   {:else if router.route.id === 'configuracoes'}
     <Settings />
-  {:else}
-    <NovoEspaco />
   {/if}
 </AppShell>

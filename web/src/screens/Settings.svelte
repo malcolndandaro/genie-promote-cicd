@@ -13,15 +13,30 @@
   import Badge from '../lib/components/Badge.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import DriftPanel from '../lib/components/DriftPanel.svelte';
-  import { getRoles, assignRole, revokeRole, getAdminDrift, ApiError, isAuthError } from '../lib/api';
-  import type { RoleName } from '../lib/types';
+  import Picker from '../lib/components/Picker.svelte';
+  import {
+    getRoles,
+    assignRole,
+    revokeRole,
+    getAdminDrift,
+    getPrincipals,
+    getRules,
+    upsertRule,
+    resetRule,
+    ApiError,
+    isAuthError,
+  } from '../lib/api';
+  import type { PickerOption } from '../lib/picker';
+  import type { RoleName, RuleSeverity } from '../lib/types';
 
   let rolesP = $state(getRoles());
   let driftP = $state(getAdminDrift());
+  let rulesP = $state(getRules());
 
   function refresh(): void {
     rolesP = getRoles();
     driftP = getAdminDrift();
+    rulesP = getRules();
   }
 
   function errorText(err: unknown): string {
@@ -40,19 +55,33 @@
   };
 
   // --- assign form -------------------------------------------------------------
-  let email = $state('');
+  // G1: the assigned person is PICKED from the workspace directory (`/api/principals?kind=user`),
+  // never a typed email. `UserOption` carries the real email through unchanged from `Principal`
+  // (Picker itself only reads/writes id/label/sublabel) — see AccessSpecForm's PrincipalOption for
+  // the same pattern. `githubUsername` stays free text: it's an EXTERNAL GitHub identity, not a
+  // Databricks-workspace-listable principal, so there's no directory to pick it from.
+  type UserOption = PickerOption & { email: string };
+
+  async function searchUsers(q: string): Promise<UserOption[]> {
+    const results = await getPrincipals(q, 'user');
+    return results
+      .filter((p): p is typeof p & { email: string } => !!p.email)
+      .map((p) => ({ id: p.id, label: p.display, sublabel: p.email, email: p.email }));
+  }
+
+  let person = $state<UserOption | null>(null);
   let role = $state<RoleName>('steward');
   let githubUsername = $state('');
   let submitting = $state(false);
   let submitError = $state<string | null>(null);
 
   async function submit(): Promise<void> {
-    if (!email.trim() || submitting) return;
+    if (!person || submitting) return;
     submitting = true;
     submitError = null;
     try {
-      await assignRole({ email: email.trim(), role, githubUsername: githubUsername.trim() || undefined });
-      email = '';
+      await assignRole({ email: person.email, role, githubUsername: githubUsername.trim() || undefined });
+      person = null;
       githubUsername = '';
       refresh();
     } catch (e) {
@@ -74,6 +103,91 @@
       revokingId = null;
     }
   }
+
+  // --- G2: rules configuration --------------------------------------------------------------
+  // The Settings screen doesn't own a client-side merge — `getRules()` already returns the
+  // EFFECTIVE set (server-computed by `rules_config.effective_rules`), the raw override rows (so
+  // each hardcoded rule's current override state, or none, is known), and the 9 hardcoded
+  // defaults (so "restaurar padrão" can show what it reverts to without a second round-trip).
+
+  const SEVERITIES: RuleSeverity[] = ['BLOCKER', 'SUGGESTION', 'STYLE'];
+  const SEVERITY_TONE: Record<RuleSeverity, 'destructive' | 'warning' | 'neutral'> = {
+    BLOCKER: 'destructive',
+    SUGGESTION: 'warning',
+    STYLE: 'neutral',
+  };
+
+  let mutatingRuleId = $state<string | null>(null);
+  let ruleError = $state<string | null>(null);
+
+  async function withRuleMutation(ruleId: string, fn: () => Promise<unknown>): Promise<void> {
+    if (mutatingRuleId) return;
+    mutatingRuleId = ruleId;
+    ruleError = null;
+    try {
+      await fn();
+      refresh();
+    } catch (e) {
+      ruleError = e instanceof Error ? e.message : String(e);
+    } finally {
+      mutatingRuleId = null;
+    }
+  }
+
+  function toggleEnabled(ruleId: string, override: { enabled: boolean; severity: RuleSeverity | null; params: Record<string, unknown> | null } | undefined, enabled: boolean): void {
+    void withRuleMutation(ruleId, () =>
+      upsertRule({ ruleId, enabled, severity: override?.severity ?? undefined, params: override?.params ?? undefined }),
+    );
+  }
+
+  function setSeverity(ruleId: string, override: { enabled: boolean; params: Record<string, unknown> | null } | undefined, severity: RuleSeverity): void {
+    void withRuleMutation(ruleId, () =>
+      upsertRule({ ruleId, enabled: override?.enabled ?? true, severity, params: override?.params ?? undefined }),
+    );
+  }
+
+  function setMinBenchmarks(override: { enabled: boolean; severity: RuleSeverity | null } | undefined, value: number): void {
+    if (!Number.isFinite(value) || value < 0) return;
+    void withRuleMutation('EVAL-01', () =>
+      upsertRule({
+        ruleId: 'EVAL-01', enabled: override?.enabled ?? true, severity: override?.severity ?? undefined,
+        params: { min_benchmarks: Math.trunc(value) },
+      }),
+    );
+  }
+
+  function resetOne(ruleId: string): void {
+    void withRuleMutation(ruleId, () => resetRule(ruleId));
+  }
+
+  // --- custom rule form -----------------------------------------------------------------------
+  let customRuleId = $state('');
+  let customSeverity = $state<RuleSeverity>('SUGGESTION');
+  let customContent = $state('');
+  let customCitation = $state('');
+  let submittingCustom = $state(false);
+  let customError = $state<string | null>(null);
+
+  async function submitCustom(): Promise<void> {
+    if (submittingCustom || !customRuleId.trim() || !customContent.trim() || !customCitation.trim()) return;
+    submittingCustom = true;
+    customError = null;
+    try {
+      await upsertRule({
+        ruleId: customRuleId.trim(), isCustom: true, severity: customSeverity,
+        content: customContent.trim(), citation: customCitation.trim(),
+      });
+      customRuleId = '';
+      customContent = '';
+      customCitation = '';
+      customSeverity = 'SUGGESTION';
+      refresh();
+    } catch (e) {
+      customError = e instanceof Error ? e.message : String(e);
+    } finally {
+      submittingCustom = false;
+    }
+  }
 </script>
 
 <div class="stack">
@@ -86,10 +200,9 @@
     {/snippet}
 
     <form class="assign-form" onsubmit={(e) => { e.preventDefault(); void submit(); }}>
-      <label class="field">
-        <span class="field__label">E-mail</span>
-        <input class="field__input" bind:value={email} placeholder="pessoa@empresa.com" required />
-      </label>
+      <div class="assign-form__picker">
+        <Picker label="Pessoa" placeholder="Buscar usuário…" search={searchUsers} bind:value={person} />
+      </div>
       <label class="field">
         <span class="field__label">Papel</span>
         <select class="field__input" bind:value={role}>
@@ -102,7 +215,7 @@
         <span class="field__label">Usuário do GitHub (opcional)</span>
         <input class="field__input" bind:value={githubUsername} placeholder="ex.: PSPedro176" />
       </label>
-      <Button type="submit" loading={submitting} disabled={!email.trim()}>Salvar papel</Button>
+      <Button type="submit" loading={submitting} disabled={!person}>Salvar papel</Button>
     </form>
     {#if submitError}
       <p class="error" role="alert">Não foi possível salvar o papel: {submitError}</p>
@@ -160,6 +273,149 @@
       <p class="error" role="alert">{errorText(err)}</p>
     {/await}
   </Card>
+
+  <Card
+    title="Regras"
+    subtitle="As regras do handbook que o agente revisor usa — habilite/desabilite, ajuste severidade e parâmetros, ou adicione uma regra customizada. Mudanças têm efeito imediato, sem redeploy."
+  >
+    {#snippet actions()}
+      <button type="button" class="refresh" onclick={refresh}>Atualizar</button>
+    {/snippet}
+
+    {#if ruleError}
+      <p class="error" role="alert">Não foi possível salvar a regra: {ruleError}</p>
+    {/if}
+
+    {#await rulesP}
+      <Skeleton height="3rem" />
+      <Skeleton height="3rem" width="80%" />
+    {:then data}
+      {#if data.hardcoded.length === 0}
+        <p class="muted text-sm">Nenhuma regra encontrada.</p>
+      {:else}
+        <ul class="row-list">
+          {#each data.hardcoded as rule (rule.rule_id)}
+            {@const override = data.overrides.find((o) => o.rule_id === rule.rule_id)}
+            {@const enabled = override?.enabled ?? true}
+            {@const severity = override?.severity ?? rule.severity_hint}
+            {@const minBenchmarks = (override?.params?.min_benchmarks as number | undefined)
+              ?? (rule.params?.min_benchmarks as number | undefined) ?? 2}
+            <li class="row rule-row" class:rule-row--disabled={!enabled}>
+              <div class="row__main">
+                <strong>{rule.rule_id}</strong>
+                <span class="muted text-xs">{rule.citation}</span>
+                {#if !enabled}<span class="muted text-xs">desabilitada</span>{/if}
+              </div>
+              <div class="row__meta rule-row__controls">
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    disabled={mutatingRuleId === rule.rule_id}
+                    onchange={(e) => toggleEnabled(rule.rule_id, override, e.currentTarget.checked)}
+                  />
+                  <span class="muted text-xs">Habilitada</span>
+                </label>
+                <label class="field field--inline">
+                  <span class="field__label">Severidade</span>
+                  <select
+                    class="field__input field__input--narrow"
+                    value={severity}
+                    disabled={mutatingRuleId === rule.rule_id}
+                    onchange={(e) => setSeverity(rule.rule_id, override, e.currentTarget.value as RuleSeverity)}
+                  >
+                    {#each SEVERITIES as s (s)}
+                      <option value={s}>{s}</option>
+                    {/each}
+                  </select>
+                </label>
+                {#if rule.rule_id === 'EVAL-01'}
+                  <label class="field field--inline">
+                    <span class="field__label">Mín. benchmarks</span>
+                    <input
+                      type="number"
+                      min="0"
+                      class="field__input field__input--narrow"
+                      value={minBenchmarks}
+                      disabled={mutatingRuleId === rule.rule_id}
+                      onchange={(e) => setMinBenchmarks(override, Number(e.currentTarget.value))}
+                    />
+                  </label>
+                {/if}
+                <Badge tone={SEVERITY_TONE[severity]}>{severity}</Badge>
+                {#if override}
+                  <Button
+                    variant="ghost"
+                    loading={mutatingRuleId === rule.rule_id}
+                    disabled={!!mutatingRuleId}
+                    onclick={() => resetOne(rule.rule_id)}
+                  >
+                    Restaurar padrão
+                  </Button>
+                {/if}
+              </div>
+            </li>
+          {/each}
+          {#each data.overrides.filter((o) => o.is_custom) as o (o.rule_id)}
+            <li class="row rule-row" class:rule-row--disabled={!o.enabled}>
+              <div class="row__main">
+                <strong>{o.rule_id}</strong>
+                <span class="muted text-xs">{o.citation}</span>
+                <span class="muted text-xs">{o.content}</span>
+              </div>
+              <div class="row__meta">
+                <Badge tone={SEVERITY_TONE[o.severity ?? 'SUGGESTION']}>{o.severity}</Badge>
+                <Badge tone="accent">Custom</Badge>
+                <Button
+                  variant="ghost"
+                  loading={mutatingRuleId === o.rule_id}
+                  disabled={!!mutatingRuleId}
+                  onclick={() => resetOne(o.rule_id)}
+                >
+                  Remover
+                </Button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      <form class="assign-form" onsubmit={(e) => { e.preventDefault(); void submitCustom(); }}>
+        <label class="field">
+          <span class="field__label">rule_id</span>
+          <input class="field__input" bind:value={customRuleId} placeholder="ex.: SQL-02" />
+        </label>
+        <label class="field">
+          <span class="field__label">Severidade</span>
+          <select class="field__input" bind:value={customSeverity}>
+            {#each SEVERITIES as s (s)}
+              <option value={s}>{s}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="field field--grow">
+          <span class="field__label">Texto/instrução (PT)</span>
+          <input class="field__input" bind:value={customContent} placeholder="ex.: nunca usar SELECT *" />
+        </label>
+        <label class="field field--grow">
+          <span class="field__label">Citação</span>
+          <input class="field__input" bind:value={customCitation} placeholder="ex.: Padrão interno de SQL" />
+        </label>
+        <Button
+          type="submit"
+          loading={submittingCustom}
+          disabled={!customRuleId.trim() || !customContent.trim() || !customCitation.trim()}
+        >
+          Adicionar regra custom
+        </Button>
+      </form>
+      {#if customError}
+        <p class="error" role="alert">Não foi possível adicionar a regra: {customError}</p>
+      {/if}
+    {:catch err}
+      <p class="error" role="alert">{errorText(err)}</p>
+    {/await}
+  </Card>
 </div>
 
 <style>
@@ -191,6 +447,9 @@
     margin-bottom: var(--space-4);
     padding-bottom: var(--space-4);
     border-bottom: 1px solid var(--border);
+  }
+  .assign-form__picker {
+    flex: 1 1 16rem;
   }
   .field {
     display: flex;
@@ -242,5 +501,35 @@
   .error {
     color: var(--destructive);
     font-size: 0.875rem;
+  }
+  .field--grow {
+    flex: 1 1 14rem;
+  }
+  .field--inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .field--inline .field__label {
+    white-space: nowrap;
+  }
+  .field__input--narrow {
+    width: 6rem;
+    padding: 0.3rem 0.5rem;
+  }
+  .rule-row {
+    align-items: flex-start;
+  }
+  .rule-row--disabled {
+    opacity: 0.6;
+  }
+  .rule-row__controls {
+    row-gap: var(--space-2);
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
   }
 </style>

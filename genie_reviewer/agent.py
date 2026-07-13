@@ -13,6 +13,7 @@ import json
 import handbook_rules
 import mlflow
 import review_core
+import rules_config
 from mlflow.deployments import get_deploy_client
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
@@ -50,7 +51,9 @@ def _call_llm(system: str, user: str) -> str:
 class GenieReviewer(ResponsesAgent):
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         # input = the serialized_space JSON, or {"serialized_space": {...},
-        # "grant_findings": [...]} with the deterministic GRANT-01 check results.
+        # "grant_findings": [...], "rule_overrides": [...]} with the deterministic GRANT-01 check
+        # results + G2's admin rule overrides (optional — absent/None -> handbook_rules.RULES
+        # unchanged, this model's pre-G2 behavior).
         raw_in = _input_text(request)
         try:
             payload = json.loads(raw_in)
@@ -59,21 +62,26 @@ class GenieReviewer(ResponsesAgent):
                 "summary": "Entrada inválida — não é um serialized_space JSON.",
                 "findings": [], "gate": {"conclusion": "neutral", "blocker_count": 0,
                                          "summary": "⚠️ entrada ilegível — revisar manualmente."}})
-        grant_findings = None
+        grant_findings, rule_overrides = None, None
         if isinstance(payload, dict) and "serialized_space" in payload:
-            space, grant_findings = payload["serialized_space"], payload.get("grant_findings")
+            space = payload["serialized_space"]
+            grant_findings = payload.get("grant_findings")
+            rule_overrides = payload.get("rule_overrides")
         else:
             space = payload
         if isinstance(space, str):
             space = json.loads(space)
 
+        effective = rules_config.effective_rules(rule_overrides)
+        min_bench, eval01_severity = rules_config.eval01_config(rule_overrides)
         ctx = review_core.build_space_context(space)
-        system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, grant_findings)
+        system, user = review_core.build_review_prompt(ctx, effective, grant_findings)
         raw = _call_llm(system, user)
         review = review_core.parse_review(raw)
         # Deterministic GRANT-01/EVAL-01 are merged into the gate — they can't be
         # softened or injection-suppressed by the LLM (S5 review fix).
-        findings = review_core.finalize_findings(review["findings"], grant_findings, ctx["n_benchmark"])
+        findings = review_core.finalize_findings(review["findings"], grant_findings, ctx["n_benchmark"],
+                                                  min_benchmark=min_bench, eval01_severity=eval01_severity)
         gate = review_core.decide_gate(findings)
         # A non-empty but unparseable LLM response must not read as a clean pass.
         if raw.strip() and not review["summary"] and not review["findings"] and gate["conclusion"] == "success":
