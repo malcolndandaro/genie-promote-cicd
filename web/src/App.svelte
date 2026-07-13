@@ -66,10 +66,11 @@
     configuracoes: 'Configurações',
   };
 
-  // Start a promotion for a space and drop into the in-place review flow on "Meus espaços".
+  // Choose a space (from Home or "Meus espaços") and land on the confirmation step there (G3):
+  // select() only — the panel bound to the chosen space (optional access declaration → "Confirmar
+  // promoção") is what actually fires requestPromotion().
   function promoteSpace(resource: PromotableResource): void {
     promotion.select(resource);
-    promotion.requestPromotion();
     router.navigate('espacos');
   }
 

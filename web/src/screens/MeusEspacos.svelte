@@ -2,7 +2,7 @@
   import Button from '../lib/components/Button.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import SpaceCard from '../lib/components/SpaceCard.svelte';
-  import AccessSpecForm from '../lib/components/AccessSpecForm.svelte';
+  import PromotionConfirm from '../lib/components/PromotionConfirm.svelte';
   import PromotionReview from '../lib/components/PromotionReview.svelte';
   import { getResources, isAuthError } from '../lib/api';
   import type { Promotion } from '../lib/promotion.svelte';
@@ -23,13 +23,17 @@
     promotion.select(null); // a fresh list invalidates any prior (possibly gone) selection
   };
 
-  // Per-space promotion: selecting a card requests its promotion directly (each space promotes on
-  // its OWN branch/PR — see app_logic.space_slug). select() resets prior verdict state. The review
-  // renders in-place below via <PromotionReview>.
-  function promote(resource: PromotableResource): void {
+  // G3: choosing a card only SELECTS the space (select() resets prior verdict state) — it does NOT
+  // fire the request. The next step is the confirmation panel below, bound to the chosen space,
+  // where the Requester may optionally declare access before actually requesting the promotion
+  // (each space still promotes on its OWN branch/PR — see app_logic.space_slug).
+  function chooseSpace(resource: PromotableResource): void {
     promotion.select(resource);
-    promotion.requestPromotion();
   }
+
+  // A space is picked but not yet requested — the grid locks (only "← Escolher outro espaço" in the
+  // confirmation panel can change the selection) while that step is on screen.
+  const confirming = $derived(!!promotion.resource && promotion.phase === 'idle');
 </script>
 
 <div class="stack">
@@ -38,13 +42,6 @@
       <h2 class="screen-head__title">Meus espaços</h2>
       <p class="muted text-sm">Escolha um espaço e solicite a promoção governada para produção.</p>
     </header>
-
-    <!-- F2: optionally declare who may use the promoted Space + read its data. Rides the next
-         "Solicitar promoção"; shown in the Review for the Steward to approve; applied by the
-         governed pipeline (never app-direct). -->
-    <div class="access-slot">
-      <AccessSpecForm {promotion} />
-    </div>
 
     {#await resourcesP}
       <div class="space-grid">
@@ -66,8 +63,9 @@
             <SpaceCard
               resource={r}
               busy={promotion.phase === 'reviewing' && promotion.resource?.id === r.id}
-              disabled={promotion.phase === 'reviewing' && promotion.resource?.id !== r.id}
-              onPromote={promote}
+              disabled={promotion.phase === 'reviewing' ? promotion.resource?.id !== r.id : confirming}
+              selected={confirming && promotion.resource?.id === r.id}
+              onPromote={chooseSpace}
             />
           {/each}
         </div>
@@ -90,15 +88,22 @@
     {/await}
   </section>
 
+  <!-- G3: the confirmation step — bound to the CHOSEN space (title visible), optional access
+       declaration, then "Confirmar promoção". Shown only until the promotion is actually requested.
+       Keyed by resource id so a re-selection (e.g. from Home, without going through "cancel" first)
+       remounts the panel — the access declaration never carries over from a DIFFERENT space. -->
+  {#if confirming}
+    {#key promotion.resource?.id}
+      <PromotionConfirm {promotion} onCancel={() => promotion.select(null)} />
+    {/key}
+  {/if}
+
   <!-- The active promotion's review/pipeline/approval (in-place below the grid). -->
   <PromotionReview {promotion} {userEmail} />
 </div>
 
 <style>
   .screen-head {
-    margin-bottom: var(--space-4);
-  }
-  .access-slot {
     margin-bottom: var(--space-4);
   }
   .screen-head__title {

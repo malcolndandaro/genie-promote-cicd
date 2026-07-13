@@ -63,14 +63,18 @@ test('empty states when the user has no spaces and no promotions', async ({ page
   await expect(page.getByText('Nenhuma promoção ainda')).toBeVisible();
 });
 
-test('a space card promote pre-selects the review flow on "Meus espaços"', async ({ page }) => {
+test('a space card pre-selects the confirmation step on "Meus espaços" (G3)', async ({ page }) => {
   home(page, []); // no recent promotions, so recover() is a no-op
   await page.route('**/api/promote', (r) => r.fulfill({ json: { review, pr: { number: 99, url: PR.url }, promotion_id: 'new-1' } }));
   await page.goto('/');
 
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  // Lands in the review flow on "Meus espaços", already promoting the chosen space.
+  // Lands on "Meus espaços" with the confirmation panel bound to the chosen space — NOT yet promoted.
   await expect(page).toHaveURL(/#\/espacos$/);
+  await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
+  await expect(page.locator('.confirm').getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 });
 

@@ -13,11 +13,14 @@
     busy?: boolean;
     /** Another promotion is in flight — disable to avoid a concurrent request. */
     disabled?: boolean;
+    /** THIS card is the one currently selected in the confirmation step (G3) — highlighted even
+     * while disabled, so it stays clear which space the panel below is bound to. */
+    selected?: boolean;
   }
-  let { resource, onPromote, busy = false, disabled = false }: Props = $props();
+  let { resource, onPromote, busy = false, disabled = false, selected = false }: Props = $props();
 </script>
 
-<article class="space-card">
+<article class="space-card" class:space-card--selected={selected}>
   <div class="space-card__top">
     <span class="space-card__icon" aria-hidden="true"><Icon name="grid" size={18} /></span>
     <Badge tone="accent">{kindMeta(resource.kind).label}</Badge>
@@ -54,6 +57,10 @@
     border-color: var(--border-strong);
     box-shadow: var(--shadow-md);
     transform: translateY(-2px);
+  }
+  .space-card--selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
   }
   .space-card__top {
     display: flex;

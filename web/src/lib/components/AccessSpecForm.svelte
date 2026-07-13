@@ -7,6 +7,10 @@
   // G1: every principal here is PICKED from the workspace directory (Picker -> `/api/principals`),
   // never typed — `is_group` is derived from the picked principal's own `type`, so the old manual
   // checkbox is gone too (a picked group can no longer be mis-tagged as a user, or vice versa).
+  //
+  // G3: rendered ONLY inside `PromotionConfirm` — the CHOSEN space's confirmation step — never as a
+  // page-level block. Collapsed by default so skipping the declaration is a single click on
+  // "Confirmar promoção" (no need to even open this toggle).
   import Button from './Button.svelte';
   import Picker from './Picker.svelte';
   import { getPrincipals } from '../api';
@@ -88,7 +92,7 @@
 <div class="access-form">
   <button type="button" class="access-form__toggle" onclick={() => (open = !open)} aria-expanded={open}>
     <span>{open ? '▾' : '▸'}</span>
-    Declarar acesso (opcional)
+    Quem deve usar este espaço em produção? (opcional)
     {#if promotion.pendingAccessSpec}<span class="access-form__badge">declarado</span>{/if}
   </button>
 
