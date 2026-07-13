@@ -132,7 +132,29 @@
       closePicker();
     }
   }
+
+  // --- panel positioning (found live: Card's `overflow: hidden` clipped the absolute panel) ---
+  // The panel renders `position: fixed`, anchored to the control's viewport rect, so NO ancestor
+  // (Card, modal, table) can ever clip it. Repositioned while open on scroll (capture — inner
+  // containers too), resize, and chip changes (chips shift the control down).
+  let controlEl = $state<HTMLDivElement | null>(null);
+  let panelStyle = $state('');
+
+  function positionPanel() {
+    if (!controlEl) return;
+    const r = controlEl.getBoundingClientRect();
+    panelStyle = `top:${r.bottom + 4}px; left:${r.left}px; width:${r.width}px;`;
+  }
+
+  $effect(() => {
+    if (!open) return;
+    void values.length; // chips above the control shift it — re-anchor
+    positionPanel();
+  });
 </script>
+
+<svelte:window onresize={() => open && positionPanel()} />
+<svelte:document onscrollcapture={() => open && positionPanel()} />
 
 <div class="picker" bind:this={containerEl} onfocusout={onFocusOut}>
   <span class="picker__label">{label}</span>
@@ -156,7 +178,7 @@
     </ul>
   {/if}
 
-  <div class="picker__control">
+  <div class="picker__control" bind:this={controlEl}>
     {#if mode === 'single' && value && !open}
       <button type="button" class="picker__selected" onclick={openPicker} {disabled}>
         <span>{value.label}</span>
@@ -192,7 +214,7 @@
   </div>
 
   {#if open}
-    <ul id={panelId} class="picker__panel" role="listbox" aria-label={label}>
+    <ul id={panelId} class="picker__panel" role="listbox" aria-label={label} style={panelStyle}>
       {#if status === 'loading'}
         <li class="picker__state" aria-busy="true">Buscando…</li>
       {:else if status === 'error'}
@@ -321,12 +343,11 @@
     color: var(--foreground);
   }
   .picker__panel {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
-    z-index: 20;
-    margin: 0.25rem 0 0;
+    /* fixed + inline top/left/width from positionPanel(): immune to any clipping ancestor
+       (Card has overflow:hidden for its rounded corners — this is what cut the panel off). */
+    position: fixed;
+    z-index: 50;
+    margin: 0;
     padding: 0.3rem;
     list-style: none;
     max-height: 15rem;
