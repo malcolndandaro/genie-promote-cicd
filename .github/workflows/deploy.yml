@@ -69,3 +69,17 @@ jobs:
             title="$(cat "build/genie/${slug}.title" 2>/dev/null || true)"
             python3 scripts/apply_access.py "$f" "build/genie/${slug}.access.json" "$title"
           done
+      - name: Make deployed spaces visible to the app (CAN_READ -> app SP, idempotent)
+        # The prod-hosted app lists/exports prod Spaces as its own SP; without a per-Space ACL the
+        # Space is invisible to the app's pickers (Acesso / Trazer de volta) — found live. Runs for
+        # EVERY deployed space (unlike apply_access, which only runs when an AccessSpec sidecar
+        # exists) so no manual grant is ever needed again. See scripts/grant_app_sp_read.py.
+        run: |
+          python3 -m pip install -q 'databricks-sdk>=0.111.0'
+          for f in build/genie/*.serialized_space.json; do
+            [ -f "$f" ] || continue
+            slug="$(basename "$f" .serialized_space.json)"
+            title="$(cat "build/genie/${slug}.title" 2>/dev/null || true)"
+            [ -n "$title" ] || { echo "no .title sidecar for ${slug}; cannot resolve space id" >&2; exit 1; }
+            python3 scripts/grant_app_sp_read.py "$title"
+          done
