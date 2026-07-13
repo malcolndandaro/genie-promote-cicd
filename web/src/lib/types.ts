@@ -27,6 +27,16 @@ export interface PromotableResource {
   kind: ResourceKind;
 }
 
+/** G1: one workspace-directory principal (SCIM user or group), as returned by `/api/principals` —
+ * the ONLY shape a picker ever hands back to a submitted request; a raw typed email/username never
+ * reaches the backend as a principal value. */
+export interface Principal {
+  type: 'user' | 'group';
+  id: string;
+  display: string;
+  email: string | null;
+}
+
 /** One reviewer finding (deterministic rule or LLM). */
 export interface Finding {
   rule_id: string;

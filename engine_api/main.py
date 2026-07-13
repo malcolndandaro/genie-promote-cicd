@@ -344,6 +344,55 @@ def spaces(
     return {"spaces": _engine_call("list_spaces", lambda: app_logic.list_spaces(user_token=token))}
 
 
+@api.get("/prod-spaces")
+def prod_spaces(
+    q: str = "",
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G1: the id+title of every prod-deployed Genie Space, for the pickers that need to name a PROD
+    space a caller may NOT already have access to (F3's "request access" flow is the whole reason a
+    space id must be pickable without first proving access to it). Deliberately a thinner read than
+    `/admin/inventory` (F4): title+id only, no owner/access/phase — so it's safe to gate the same as
+    `/spaces` (any authenticated OBO caller) rather than admin-only. `q` filters server-side (a
+    case-insensitive substring on title) — Genie's own API has no server-side search, so this reads
+    the full live list fresh each call and filters here."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        spaces = app_logic.list_prod_spaces()
+        needle = q.strip().lower()
+        if needle:
+            spaces = [s for s in spaces if needle in (s.get("title") or "").lower()]
+        return {"spaces": spaces}
+
+    return _engine_call("list_prod_spaces", _run)
+
+
+@api.get("/principals")
+def principals(
+    q: str = "",
+    kind: str = "all",
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """G1: users + groups of the workspace directory, for every principal picker in the app (F2
+    access declarations, F3 access requests, F5 role assignment) — the app must never accept a
+    free-typed email/username as the SUBMITTED value; this is the one endpoint every such picker
+    calls. Gated the same as `/spaces` (any authenticated OBO caller): directory listing isn't
+    itself a security boundary here — the ACTION each picker feeds is separately gated (F2 is a
+    declaration applied only via the governed pipeline; F3/F5 require admin approval server-side)."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    if kind not in ("all", "user", "group"):
+        raise HTTPException(status_code=400, detail="kind inválido; use 'all', 'user' ou 'group'")
+    return {"principals": _engine_call(
+        "list_principals", lambda: app_logic.list_principals(q, user_token=token, kind=kind))}
+
+
 class SpacePermissionIn(BaseModel):
     principal: str
     is_group: bool = False

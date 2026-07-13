@@ -13,7 +13,17 @@
   import Badge from '../lib/components/Badge.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import DriftPanel from '../lib/components/DriftPanel.svelte';
-  import { getRoles, assignRole, revokeRole, getAdminDrift, ApiError, isAuthError } from '../lib/api';
+  import Picker from '../lib/components/Picker.svelte';
+  import {
+    getRoles,
+    assignRole,
+    revokeRole,
+    getAdminDrift,
+    getPrincipals,
+    ApiError,
+    isAuthError,
+  } from '../lib/api';
+  import type { PickerOption } from '../lib/picker';
   import type { RoleName } from '../lib/types';
 
   let rolesP = $state(getRoles());
@@ -40,19 +50,33 @@
   };
 
   // --- assign form -------------------------------------------------------------
-  let email = $state('');
+  // G1: the assigned person is PICKED from the workspace directory (`/api/principals?kind=user`),
+  // never a typed email. `UserOption` carries the real email through unchanged from `Principal`
+  // (Picker itself only reads/writes id/label/sublabel) — see AccessSpecForm's PrincipalOption for
+  // the same pattern. `githubUsername` stays free text: it's an EXTERNAL GitHub identity, not a
+  // Databricks-workspace-listable principal, so there's no directory to pick it from.
+  type UserOption = PickerOption & { email: string };
+
+  async function searchUsers(q: string): Promise<UserOption[]> {
+    const results = await getPrincipals(q, 'user');
+    return results
+      .filter((p): p is typeof p & { email: string } => !!p.email)
+      .map((p) => ({ id: p.id, label: p.display, sublabel: p.email, email: p.email }));
+  }
+
+  let person = $state<UserOption | null>(null);
   let role = $state<RoleName>('steward');
   let githubUsername = $state('');
   let submitting = $state(false);
   let submitError = $state<string | null>(null);
 
   async function submit(): Promise<void> {
-    if (!email.trim() || submitting) return;
+    if (!person || submitting) return;
     submitting = true;
     submitError = null;
     try {
-      await assignRole({ email: email.trim(), role, githubUsername: githubUsername.trim() || undefined });
-      email = '';
+      await assignRole({ email: person.email, role, githubUsername: githubUsername.trim() || undefined });
+      person = null;
       githubUsername = '';
       refresh();
     } catch (e) {
@@ -86,10 +110,9 @@
     {/snippet}
 
     <form class="assign-form" onsubmit={(e) => { e.preventDefault(); void submit(); }}>
-      <label class="field">
-        <span class="field__label">E-mail</span>
-        <input class="field__input" bind:value={email} placeholder="pessoa@empresa.com" required />
-      </label>
+      <div class="assign-form__picker">
+        <Picker label="Pessoa" placeholder="Buscar usuário…" search={searchUsers} bind:value={person} />
+      </div>
       <label class="field">
         <span class="field__label">Papel</span>
         <select class="field__input" bind:value={role}>
@@ -102,7 +125,7 @@
         <span class="field__label">Usuário do GitHub (opcional)</span>
         <input class="field__input" bind:value={githubUsername} placeholder="ex.: PSPedro176" />
       </label>
-      <Button type="submit" loading={submitting} disabled={!email.trim()}>Salvar papel</Button>
+      <Button type="submit" loading={submitting} disabled={!person}>Salvar papel</Button>
     </form>
     {#if submitError}
       <p class="error" role="alert">Não foi possível salvar o papel: {submitError}</p>
@@ -191,6 +214,9 @@
     margin-bottom: var(--space-4);
     padding-bottom: var(--space-4);
     border-bottom: 1px solid var(--border);
+  }
+  .assign-form__picker {
+    flex: 1 1 16rem;
   }
   .field {
     display: flex;

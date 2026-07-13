@@ -17,6 +17,7 @@ import type {
   RoleName,
   RolesList,
   DriftReport,
+  Principal,
 } from './types';
 import { spaceToResource } from './resources';
 
@@ -61,6 +62,34 @@ export function getWhoami(): Promise<Whoami> {
 export async function getResources(): Promise<PromotableResource[]> {
   const data = await getJSON<{ spaces?: { space_id: string; title: string }[] }>('/api/spaces');
   return (data.spaces ?? []).map(spaceToResource);
+}
+
+// --- G1: prefilled/searchable pickers — spaces + workspace-directory principals -------------------
+//
+// Every picker in the app resolves to one of these two listings; a free-typed id/email/username is
+// NEVER a legal submitted value (only a search query into one of these). `getResources` above
+// already covers the caller's OWN dev spaces (identity-filtered); the two below cover the two gaps
+// no existing listing filled: every PROD space (for "request access to a space I don't have yet")
+// and the workspace's user/group directory (for every principal field).
+
+/** Every prod-deployed Genie Space (id + title only — no owner/access/phase), for pickers that must
+ * name a space the caller may NOT already have access to (F3's request-access flow). `q` filters
+ * server-side on title. */
+export async function getProdSpaces(q = ''): Promise<PromotableResource[]> {
+  const data = await getJSON<{ spaces?: { space_id: string; title: string }[] }>(
+    `/api/prod-spaces?q=${encodeURIComponent(q)}`
+  );
+  return (data.spaces ?? []).map(spaceToResource);
+}
+
+/** Users + groups of the workspace directory (SCIM), for every principal picker (F2 access
+ * declarations, F3 access requests, F5 role assignment). `q` is a search query, server-filtered;
+ * blank returns a prefilled first page. */
+export async function getPrincipals(q = '', kind: 'all' | 'user' | 'group' = 'all'): Promise<Principal[]> {
+  const data = await getJSON<{ principals?: Principal[] }>(
+    `/api/principals?q=${encodeURIComponent(q)}&kind=${kind}`
+  );
+  return data.principals ?? [];
 }
 
 /** The opened/updated promotion PR (GH2). */

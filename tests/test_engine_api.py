@@ -155,6 +155,58 @@ def test_spaces_engine_error_maps_to_502(monkeypatch):
     assert "simulated SDK auth failure" not in r.text
 
 
+# --- GET /prod-spaces + /principals (G1: prefilled/searchable pickers) ---
+
+
+def test_prod_spaces_requires_a_token():
+    r = client.get("/prod-spaces")
+    assert r.status_code == 401
+
+
+def test_prod_spaces_returns_id_and_title(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda: [{"space_id": "a", "title": "Recebíveis"},
+                                 {"space_id": "b", "title": "Outro Espaço"}])
+    r = client.get("/prod-spaces", headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json() == {"spaces": [{"space_id": "a", "title": "Recebíveis"},
+                                   {"space_id": "b", "title": "Outro Espaço"}]}
+
+
+def test_prod_spaces_filters_by_title_case_insensitively(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda: [{"space_id": "a", "title": "Recebíveis"},
+                                 {"space_id": "b", "title": "Outro Espaço"}])
+    r = client.get("/prod-spaces", params={"q": "receb"}, headers={"x-forwarded-access-token": "tok"})
+    assert r.json() == {"spaces": [{"space_id": "a", "title": "Recebíveis"}]}
+
+
+def test_principals_requires_a_token():
+    r = client.get("/principals")
+    assert r.status_code == 401
+
+
+def test_principals_threads_query_and_kind(monkeypatch):
+    captured = {}
+
+    def fake_list_principals(q="", *, profile=None, client=None, user_token=None, kind="all", limit=25):
+        captured.update(q=q, user_token=user_token, kind=kind)
+        return [{"type": "user", "id": "u1", "display": "Ana", "email": "ana@x.com"}]
+
+    monkeypatch.setattr(engine_api.app_logic, "list_principals", fake_list_principals)
+    r = client.get("/principals", params={"q": "ana", "kind": "user"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 200
+    assert r.json() == {"principals": [{"type": "user", "id": "u1", "display": "Ana", "email": "ana@x.com"}]}
+    assert captured == {"q": "ana", "user_token": "tok", "kind": "user"}
+
+
+def test_principals_rejects_invalid_kind():
+    r = client.get("/principals", params={"kind": "bogus"},
+                   headers={"x-forwarded-access-token": "tok"})
+    assert r.status_code == 400
+
+
 # --- POST /review (AK3) ---
 
 _FAKE_REVIEW = {

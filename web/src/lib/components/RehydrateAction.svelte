@@ -1,6 +1,8 @@
 <script lang="ts">
   import Button from './Button.svelte';
-  import { postRehydrate, isAuthError, type RehydrateResult } from '../api';
+  import Picker from './Picker.svelte';
+  import { postRehydrate, isAuthError, getResources, type RehydrateResult } from '../api';
+  import { filterOptions, type PickerOption } from '../picker';
   import type { Promotion } from '../promotion.svelte';
 
   interface Props {
@@ -15,9 +17,23 @@
   type Step = 'idle' | 'choosing' | 'confirming' | 'running' | 'done' | 'error';
   let step = $state<Step>('idle');
   let mode = $state<'create' | 'overwrite'>('create');
-  let devSpaceId = $state('');
+  // G1: the dev Space to overwrite is PICKED from the caller's own dev spaces (`/api/spaces`, the
+  // same identity-filtered listing `getResources` already exposes elsewhere) — never a typed id.
+  let devSpaceOption = $state<PickerOption | null>(null);
   let result = $state<RehydrateResult | null>(null);
   let error = $state<string | null>(null);
+
+  // Fetched once per component lifetime (the dev space list doesn't change mid-flow) and filtered
+  // CLIENT-side on every keystroke via `filterOptions` — small identity-filtered list, no need to
+  // round-trip the server per character typed.
+  let devSpacesCache: PickerOption[] | null = null;
+  async function searchDevSpaces(q: string): Promise<PickerOption[]> {
+    if (!devSpacesCache) {
+      const resources = await getResources();
+      devSpacesCache = resources.map((r) => ({ id: r.id, label: r.title, sublabel: r.id }));
+    }
+    return filterOptions(devSpacesCache, q);
+  }
 
   function start(): void {
     step = 'choosing';
@@ -30,7 +46,7 @@
   }
 
   function reviewChoice(): void {
-    if (mode === 'overwrite' && !devSpaceId.trim()) return; // Button is disabled too; belt & suspenders
+    if (mode === 'overwrite' && !devSpaceOption) return; // Button is disabled too; belt & suspenders
     step = 'confirming';
   }
 
@@ -42,7 +58,7 @@
       result = await postRehydrate({
         sourceProdSpaceId: promotion.resource.id,
         mode,
-        devSpaceId: mode === 'overwrite' ? devSpaceId.trim() : undefined,
+        devSpaceId: mode === 'overwrite' ? devSpaceOption?.id : undefined,
         title: promotion.resource.title ? `${promotion.resource.title} (dev)` : undefined,
         promotionId: promotion.promotionId ?? undefined,
       });
@@ -78,21 +94,20 @@
           Sobrescrever um Space existente no dev
         </label>
         {#if mode === 'overwrite'}
-          <label class="rehydrate__field">
-            ID do Space de dev a sobrescrever
-            <input
-              type="text"
-              placeholder="ex.: 01f1..."
-              bind:value={devSpaceId}
-              class="rehydrate__input"
+          <div class="rehydrate__field">
+            <Picker
+              label="Space de dev a sobrescrever"
+              placeholder="Buscar seus Spaces de dev…"
+              search={searchDevSpaces}
+              bind:value={devSpaceOption}
             />
-          </label>
+          </div>
         {/if}
         <div class="rehydrate__actions">
           <Button variant="ghost" onclick={cancel}>Cancelar</Button>
           <Button
             variant="primary"
-            disabled={mode === 'overwrite' && !devSpaceId.trim()}
+            disabled={mode === 'overwrite' && !devSpaceOption}
             onclick={reviewChoice}
           >
             Continuar
@@ -106,8 +121,9 @@
             Isso vai <strong>criar um novo Space</strong> no dev a partir da versão de produção, rebinding
             <code>prod_</code> → <code>dev_</code>. Confirmar?
           {:else}
-            Isso vai <strong>sobrescrever</strong> o Space <code>{devSpaceId.trim()}</code> no dev com a
-            versão de produção, rebinding <code>prod_</code> → <code>dev_</code>. Confirmar?
+            Isso vai <strong>sobrescrever</strong> o Space <strong>{devSpaceOption?.label}</strong>
+            (<code>{devSpaceOption?.id}</code>) no dev com a versão de produção, rebinding
+            <code>prod_</code> → <code>dev_</code>. Confirmar?
           {/if}
         </p>
         <div class="rehydrate__actions">
@@ -167,17 +183,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-    font-size: 0.8rem;
-    color: var(--muted-foreground);
-  }
-  .rehydrate__input {
-    font-family: inherit;
-    font-size: 0.875rem;
-    padding: 0.5rem 0.75rem;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
-    color: var(--foreground);
   }
   .rehydrate__actions {
     display: flex;

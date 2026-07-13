@@ -252,6 +252,48 @@ def list_prod_spaces(profile: str | None = None, *, client: WorkspaceClient | No
     return [{"space_id": s.space_id, "title": s.title or "(sem título)"} for s in (resp.spaces or [])]
 
 
+def list_principals(query: str = "", *, profile: str | None = None, client: WorkspaceClient | None = None,
+                    user_token: str | None = None, kind: str = "all", limit: int = 25) -> list[dict]:
+    """G1: users + groups of the workspace directory (SCIM ``w.users.list``/``w.groups.list``) —
+    the ONE source every principal picker in the app (F2 access declarations, F3 access requests, F5
+    role assignment) draws from, so a business user never has to type a raw email/username. Free
+    text is a SEARCH QUERY only, filtered server-side via a SCIM ``co`` (contains) clause on
+    userName/displayName; a blank query returns the first ``limit`` of each kind, so a picker opens
+    already prefilled before the user types anything.
+
+    Directory listing is a same-workspace-prod read (the app's own workspace, post-ADR-0006) and,
+    unlike Genie Space listing, is not itself an access boundary — there's no dev-sp cross-workspace
+    hop or ``assert_can_access`` guard here. Reads as the CALLER's own OBO identity when a
+    ``user_token`` is given (matching every other user-facing read in this module, so the API call is
+    attributed per-user rather than to the app SP); a bare ``profile``/injected ``client`` is the
+    existing local/offline/test convention.
+    """
+    w = client or _client(profile, user_token=user_token)
+    q = query.strip()
+    principals: list[dict] = []
+
+    if kind in ("all", "user"):
+        user_filter = f'userName co "{q}" or displayName co "{q}"' if q else None
+        count = 0
+        for u in w.users.list(filter=user_filter):
+            principals.append({"type": "user", "id": u.id, "display": u.display_name or u.user_name or u.id,
+                               "email": u.user_name})
+            count += 1
+            if count >= limit:
+                break
+
+    if kind in ("all", "group"):
+        group_filter = f'displayName co "{q}"' if q else None
+        count = 0
+        for g in w.groups.list(filter=group_filter):
+            principals.append({"type": "group", "id": g.id, "display": g.display_name or g.id, "email": None})
+            count += 1
+            if count >= limit:
+                break
+
+    return principals
+
+
 def export_serialized(space_id: str, profile: str | None = None, client: WorkspaceClient | None = None,
                       *, user_token: str | None = None) -> dict:
     """Export a Space's ``serialized_space``. Cross-workspace rewiring (A2): with a ``user_token``

@@ -82,6 +82,92 @@ def test_export_serialized_empty_when_missing():
     assert app_logic.export_serialized("sid", "p", client=fake) == {}
 
 
+# --- G1: list_principals (SCIM users/groups directory for the prefilled pickers) ---------------
+
+
+class _FakeScimUsers:
+    """`list(filter=...)` -> iterable of NS(id, user_name, display_name). `filter=None` (blank
+    query) returns everyone; otherwise a naive substring match on the quoted query stands in for the
+    real SCIM `co` clause — enough to prove the query is actually threaded through."""
+
+    def __init__(self, users):
+        self._users = users
+
+    def list(self, filter=None):  # noqa: A002 - mirrors the SDK kwarg
+        if filter is None:
+            return list(self._users)
+        q = filter.split('"')[1].lower()
+        return [u for u in self._users if q in u.user_name.lower() or q in (u.display_name or "").lower()]
+
+
+class _FakeScimGroups:
+    def __init__(self, groups):
+        self._groups = groups
+
+    def list(self, filter=None):  # noqa: A002
+        if filter is None:
+            return list(self._groups)
+        q = filter.split('"')[1].lower()
+        return [g for g in self._groups if q in g.display_name.lower()]
+
+
+def _fake_scim_client(users=(), groups=()):
+    return NS(users=_FakeScimUsers(list(users)), groups=_FakeScimGroups(list(groups)))
+
+
+def test_list_principals_maps_users_and_groups():
+    fake = _fake_scim_client(
+        users=[NS(id="uid-1", user_name="ana@x.com", display_name="Ana Silva")],
+        groups=[NS(id="gid-1", display_name="grp_genie_receivables")],
+    )
+    out = app_logic.list_principals(client=fake)
+    assert out == [
+        {"type": "user", "id": "uid-1", "display": "Ana Silva", "email": "ana@x.com"},
+        {"type": "group", "id": "gid-1", "display": "grp_genie_receivables", "email": None},
+    ]
+
+
+def test_list_principals_falls_back_to_user_name_without_display_name():
+    fake = _fake_scim_client(users=[NS(id="uid-2", user_name="bob@x.com", display_name=None)])
+    out = app_logic.list_principals(client=fake)
+    assert out == [{"type": "user", "id": "uid-2", "display": "bob@x.com", "email": "bob@x.com"}]
+
+
+def test_list_principals_blank_query_lists_everyone_unfiltered():
+    fake = _fake_scim_client(
+        users=[NS(id="u1", user_name="ana@x.com", display_name="Ana"),
+               NS(id="u2", user_name="bob@x.com", display_name="Bob")],
+    )
+    out = app_logic.list_principals("", client=fake)
+    assert [p["id"] for p in out] == ["u1", "u2"]
+
+
+def test_list_principals_query_filters_server_side():
+    fake = _fake_scim_client(
+        users=[NS(id="u1", user_name="ana@x.com", display_name="Ana"),
+               NS(id="u2", user_name="bob@x.com", display_name="Bob")],
+        groups=[NS(id="g1", display_name="grp_ana_readers"), NS(id="g2", display_name="grp_other")],
+    )
+    out = app_logic.list_principals("ana", client=fake)
+    assert {p["id"] for p in out} == {"u1", "g1"}  # "Bob"/"grp_other" don't match "ana"
+
+
+def test_list_principals_kind_narrows_to_one_type():
+    fake = _fake_scim_client(
+        users=[NS(id="u1", user_name="ana@x.com", display_name="Ana")],
+        groups=[NS(id="g1", display_name="grp_x")],
+    )
+    assert [p["type"] for p in app_logic.list_principals(kind="user", client=fake)] == ["user"]
+    assert [p["type"] for p in app_logic.list_principals(kind="group", client=fake)] == ["group"]
+
+
+def test_list_principals_respects_limit_per_kind():
+    fake = _fake_scim_client(users=[NS(id=f"u{i}", user_name=f"u{i}@x.com", display_name=None)
+                                    for i in range(5)])
+    out = app_logic.list_principals(limit=2, client=fake)
+    assert len(out) == 2
+
+
 # --- A2: cross-workspace read-path rewiring (list_spaces/export_serialized -> dev-sp + guard) ---
 
 
