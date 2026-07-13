@@ -51,6 +51,18 @@ def _aggregate_checks(runs: list) -> str:
     return "success"
 
 
+def _failed_check_runs(runs: list) -> list:
+    """The completed runs that made `_aggregate_checks` report `failure` (mirrors its predicate)."""
+    return [r for r in runs if r.get("status") == "completed"
+            and r.get("conclusion") not in ("success", "neutral", "skipped")]
+
+
+def _truncate(text: str, limit: int = 500) -> str:
+    """Sane truncation for a check-run summary (G8) — never dump an unbounded log into the app."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def _derive_phase(pr_state: str | None, merged: bool, checks: str, deploy: dict) -> str:
     """A single phase the UI maps to a badge — reflects where the promotion actually is."""
     if merged:
@@ -230,16 +242,55 @@ class GitHubApp:
         head_sha = pr["head"]["sha"]
         merged = bool(pr.get("merged"))
         _, cr = self._api("GET", self._repo_path(f"/commits/{head_sha}/check-runs"), "check runs")
-        checks = _aggregate_checks((cr or {}).get("check_runs", []))
+        runs = (cr or {}).get("check_runs", [])
+        checks = _aggregate_checks(runs)
+        # G8: WHY it failed, in the app — no new bot permission (checks:read already covers both
+        # calls below). Only fetched on a failing verdict, so the happy-path poll pays nothing extra.
+        checks_detail = self._checks_detail(runs) if checks == "failure" else None
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
         # A merged PR was approvable by definition; otherwise read the live PR-review decision.
         review_decision = "approved" if merged else self._pr_review_decision(number)
         return {
             "pr_state": pr.get("state"), "merged": merged, "checks": checks,
+            "checks_detail": checks_detail,
             "review_decision": review_decision,
             "deploy": deploy, "pr_url": pr.get("html_url"),
             "phase": _derive_phase(pr.get("state"), merged, checks, deploy),
         }
+
+    def _checks_detail(self, runs: list) -> list[dict] | None:
+        """PT-friendly detail per FAILING check run (G8): name, conclusion, a best-effort summary,
+        and the GitHub link as a fallback. Degrades to `None` (never a partial/broken list) on any
+        unexpected error — the status read itself must never fail because this enrichment did."""
+        try:
+            return [{
+                "name": r.get("name") or "check",
+                "conclusion": r.get("conclusion"),
+                "summary": _truncate(self._check_run_summary(r)),
+                "details_url": r.get("details_url") or r.get("html_url"),
+            } for r in _failed_check_runs(runs)]
+        except Exception:  # noqa: BLE001 — a detail-fetch hiccup must not break the status read
+            return None
+
+    def _check_run_summary(self, run: dict) -> str:
+        """The most useful text GitHub has for this failing run. Bare `run:` steps (e.g. the
+        GRANT-01/`bundle validate` gates, plain `print`/exit-code failures) rarely populate
+        `output` — the CI's PT findings live in the job LOG, not the Checks API — so this falls
+        back to the run's error annotations (the `##[error]` lines GitHub does surface there); a
+        run with neither yields "" and the caller's fallback is just name+conclusion+details_url."""
+        output = run.get("output") or {}
+        text = (output.get("summary") or output.get("title") or "").strip()
+        if text:
+            return text
+        run_id = run.get("id")
+        if not run_id:
+            return ""
+        try:
+            _, annotations = self._api(
+                "GET", self._repo_path(f"/check-runs/{run_id}/annotations"), "check run annotations")
+        except GitHubError:
+            return ""
+        return "\n".join(a["message"].strip() for a in (annotations or []) if a.get("message"))
 
     def _pr_review_decision(self, number: int) -> str:
         """The PR's merge-approval gate, read from its reviews. Tolerant: any API hiccup or an empty

@@ -39,6 +39,29 @@
           <!-- Status in words: color/glyph must not be the only signal (WCAG 1.4.1). -->
           <span class="visually-hidden">— {running ? 'em execução' : STATUS_LABEL[s.status]}</span>
         </span>
+        <!-- G8: "por que falhou?" without leaving the app — the CI's own PT findings, per failing
+             check run, plus a GitHub link as the fallback. Only ever set on a failed `checks` step. -->
+        {#if !running && s.status === 'fail' && s.detail && s.detail.length > 0}
+          <details class="check-detail">
+            <summary>Ver detalhes das checagens ({s.detail.length})</summary>
+            <ul class="check-detail__list">
+              {#each s.detail as d, di (d.name + di)}
+                <li class="check-detail__item">
+                  <div class="check-detail__head">
+                    <span class="check-detail__name">{d.name}</span>
+                    <span class="check-detail__conclusion">{d.conclusion}</span>
+                  </div>
+                  {#if d.summary}<pre class="check-detail__summary">{d.summary}</pre>{/if}
+                  {#if d.details_url}
+                    <a class="check-detail__link" href={d.details_url} target="_blank" rel="noopener noreferrer">
+                      Ver log no GitHub ↗
+                    </a>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
       </li>
     {/each}
   </ul>
@@ -105,6 +128,7 @@
     position: relative;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.85rem;
     min-height: 2.3rem;
   }
@@ -175,6 +199,70 @@
   .step__label[data-status='pass'],
   .step__label[data-status='fail'] {
     color: var(--foreground);
+  }
+
+  /* G8: forced onto its own line within the wrapping flex row (flex-basis: 100%) — the standard
+     flexbox trick, no separate grid/column layout needed for one occasional full-width block. */
+  .check-detail {
+    flex: 1 0 100%;
+    margin-top: 0.15rem;
+  }
+  .check-detail summary {
+    cursor: pointer;
+    list-style: none;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--destructive);
+  }
+  .check-detail summary::-webkit-details-marker {
+    display: none;
+  }
+  .check-detail__list {
+    list-style: none;
+    margin: var(--space-2) 0 0;
+    padding: var(--space-3) 0 0;
+    border-top: 1px dashed var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .check-detail__item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .check-detail__head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+  .check-detail__name {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--foreground);
+  }
+  .check-detail__conclusion {
+    font-size: 0.75rem;
+    color: var(--destructive);
+  }
+  .check-detail__summary {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    background: var(--destructive-soft);
+    border: 1px solid color-mix(in srgb, var(--destructive) 25%, transparent);
+    border-radius: var(--radius-sm);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--foreground);
+  }
+  .check-detail__link {
+    align-self: flex-start;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--accent-hover);
   }
 
   @keyframes node-spin {

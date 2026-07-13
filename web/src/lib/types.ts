@@ -65,10 +65,21 @@ export interface EvalResult {
 /** Promotion-pipeline step status as emitted by `app_logic.build_timeline`. */
 export type StepStatus = 'pass' | 'fail' | 'running' | 'pending';
 
+/** G8: one failing GitHub PR check-run, as attached to the live `checks` verdict — the CI's own
+ * (already PT-friendly) output, so the business user learns WHY without opening GitHub. */
+export interface CheckDetail {
+  name: string;
+  conclusion: string | null;
+  summary: string;
+  details_url: string | null;
+}
+
 export interface TimelineStep {
   key: string;
   label: string;
   status: StepStatus;
+  /** G8: only ever set on the `checks` step, when the live GitHub run failed. */
+  detail?: CheckDetail[] | null;
 }
 
 /** One Genie Space permission entry the Requester declared (F2, system 1). */

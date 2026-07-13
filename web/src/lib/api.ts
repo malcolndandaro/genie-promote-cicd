@@ -20,6 +20,7 @@ import type {
   Principal,
   RulesList,
   RuleSeverity,
+  CheckDetail,
 } from './types';
 import { spaceToResource } from './resources';
 
@@ -238,6 +239,9 @@ export interface PromoteStatus {
   pr_state: string;
   merged: boolean;
   checks: 'none' | 'pending' | 'success' | 'failure';
+  /** G8: WHY the checks failed — one entry per failing check run, only populated when
+   * `checks === 'failure'` (the bot degrades to `null` on any GitHub read hiccup). */
+  checks_detail?: CheckDetail[] | null;
   /** The PR's merge-approval gate, read from its reviews (GH5) — reflects GitHub, never asserts. */
   review_decision: 'approved' | 'changes_requested' | 'review_required';
   deploy: {

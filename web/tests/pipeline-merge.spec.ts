@@ -88,3 +88,36 @@ test('a failed deploy → Deploy step shows reprovado', async ({ page }) => {
   );
   await expect(step(page, 'Deploy em produção (service principal)')).toContainText('reprovado');
 });
+
+// G8: "por que falhou?" without leaving the app — a live GitHub check-run failure escalates the
+// app's own "Checagens" verdict step + surfaces the CI's own (PT) findings in an expandable panel.
+test('checks_failed → "Checagens" step shows reprovado with an expandable PT detail panel + GitHub link', async ({
+  page,
+}) => {
+  const detail = [
+    {
+      name: 'GRANT-01 — every declared principal can SELECT the prod tables',
+      conclusion: 'failure',
+      summary: "🔴 GRANT-01 — promoção bloqueada (1 achado(s))\n'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo",
+      details_url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/42/checks',
+    },
+  ];
+  await promote(page, liveStatus({ checks: 'failure', phase: 'checks_failed', checks_detail: detail }));
+  await expect(step(page, 'Checagens determinísticas')).toContainText('reprovado');
+
+  // Closed by default — must expand the disclosure to reveal the CI's own PT findings.
+  await page.getByText('Ver detalhes das checagens').click();
+  await expect(page.getByText("'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo")).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Ver log no GitHub ↗' })).toHaveAttribute(
+    'href',
+    detail[0].details_url,
+  );
+});
+
+test('checks_failed with no fetched detail (bot read hiccup) → still reprovado, no panel, no crash', async ({
+  page,
+}) => {
+  await promote(page, liveStatus({ checks: 'failure', phase: 'checks_failed', checks_detail: null }));
+  await expect(step(page, 'Checagens determinísticas')).toContainText('reprovado');
+  await expect(page.getByText('Ver detalhes das checagens')).toHaveCount(0);
+});
