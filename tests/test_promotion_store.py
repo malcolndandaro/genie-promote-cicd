@@ -237,3 +237,53 @@ def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(st
     # limit truncates the OLDEST, never the newest
     top1 = store.list_recent_audit_events(limit=1)
     assert len(top1) == 1 and top1[0]["event_type"] == "pr_opened"
+
+
+# --- rehydrate_events: standalone audit, NO FK to a Promotion ----------------------------------
+
+
+def test_append_rehydrate_event_round_trips_with_no_promotion(store):
+    # The whole point (F1 follow-up): this row exists precisely BECAUSE there's no Promotion to
+    # attach to — inserting one must not require (or accept) a promotion_id at all.
+    e = store.append_rehydrate_event(
+        resource_id="prod-1", resource_title="Recebíveis", actor_email="ana@x", mode="create",
+        dev_space_id="dev-1", detail={"acting_identity": "ana@x"})
+    assert e.resource_id == "prod-1"
+    assert e.resource_title == "Recebíveis"
+    assert e.actor_email == "ana@x"
+    assert e.mode == "create"
+    assert e.dev_space_id == "dev-1"
+    assert e.detail == {"acting_identity": "ana@x"}
+
+    rows = store.list_rehydrate_events()
+    assert len(rows) == 1 and rows[0].id == e.id
+
+
+def test_append_rehydrate_event_requires_actor_email(store):
+    with pytest.raises(ValueError):
+        store.append_rehydrate_event(resource_id="prod-1", resource_title=None, actor_email="",
+                                     mode="create", dev_space_id="dev-1")
+
+
+def test_append_rehydrate_event_rejects_unknown_mode(store):
+    with pytest.raises(ValueError):
+        store.append_rehydrate_event(resource_id="prod-1", resource_title=None,
+                                     actor_email="ana@x", mode="delete", dev_space_id="dev-1")
+
+
+def test_list_rehydrate_events_filters_by_resource_and_orders_newest_first(store):
+    store.append_rehydrate_event(resource_id="prod-A", resource_title="A", actor_email="ana@x",
+                                 mode="create", dev_space_id="dev-A1")   # oldest
+    store.append_rehydrate_event(resource_id="prod-B", resource_title="B", actor_email="bob@x",
+                                 mode="create", dev_space_id="dev-B1")
+    store.append_rehydrate_event(resource_id="prod-A", resource_title="A", actor_email="ana@x",
+                                 mode="overwrite", dev_space_id="dev-A1")  # newest
+
+    all_rows = store.list_rehydrate_events()
+    assert [r.mode for r in all_rows] == ["overwrite", "create", "create"]  # newest-first
+
+    a_only = store.list_rehydrate_events(resource_id="prod-A")
+    assert len(a_only) == 2 and all(r.resource_id == "prod-A" for r in a_only)
+
+    top1 = store.list_rehydrate_events(limit=1)
+    assert len(top1) == 1 and top1[0].mode == "overwrite"  # limit truncates the OLDEST

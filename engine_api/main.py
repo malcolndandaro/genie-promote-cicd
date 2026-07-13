@@ -608,8 +608,10 @@ def _find_promotion_id_for_resource(store, resource_id: str) -> str | None:
     `getProdSpaces` (title+id only, no promotion_id) — RehydrateAction (started FROM a promotion's
     OWN detail) already knows its promotion_id and never needs this. Several Promotions can share a
     resource_id (re-promotions accumulate history); the most recently updated one wins. Returns None
-    when no Promotion has ever targeted this resource — the caller still fails closed (400) rather
-    than rehydrating unaudited."""
+    when no Promotion has ever targeted this resource — the caller no longer fails closed on that
+    (stakeholder decision: rehydrate must work for any prod Space the caller can access); the
+    endpoint falls through with `promotion_id=None`, and `rehydrate_space` records a standalone
+    `rehydrate_events` row instead of a Promotion-linked one."""
     candidates = [p for p in store.list_promotions(None) if p.resource_id == resource_id]
     if not candidates:
         return None
@@ -622,12 +624,21 @@ def rehydrate(
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """A3/F1: export a PROMOTED prod Space and (re-)create it in dev, rebound `prod_`->`dev_` — no
-    git PR. Guarded at BOTH blast sites by `authz.assert_can_access` on the caller's platform-
-    VERIFIED identity: the source prod Space (always) and, in `overwrite` mode, the target dev
-    Space (so a caller can't clobber a dev Space they can't reach even though the standing
-    dev-reader/writer SP could). A denial is a plain 403; an unreachable/unprovisioned dev SP
-    (SP2) is a distinct 503 with an actionable re-bootstrap message — never confused with a 403.
+    """A3/F1: export a prod Space the caller can access and (re-)create it in dev, rebound
+    `prod_`->`dev_` — no git PR. The source need NOT have been promoted through this app (the prod
+    store starts empty per ADR-0006, so most prod Spaces have no Promotion row at all). Guarded at
+    BOTH blast sites by `authz.assert_can_access` on the caller's platform-VERIFIED identity: the
+    source prod Space (always) and, in `overwrite` mode, the target dev Space (so a caller can't
+    clobber a dev Space they can't reach even though the standing dev-reader/writer SP could). A
+    denial is a plain 403; an unreachable/unprovisioned dev SP (SP2) is a distinct 503 with an
+    actionable re-bootstrap message — never confused with a 403.
+
+    Non-repudiation (A3 acceptance + A3 review, revised): every rehydrate stays auditable when a
+    durable store is present (prod), but via ONE of TWO paths (`rehydrate_space`/`_audit`) — a
+    linkable source Promotion (preferred, when one exists) gets the richer `audit_events`
+    "rehydrated" row; no match is no longer an error, it falls through with `promotion_id=None`
+    and gets a standalone `rehydrate_events` row instead. An EXPLICITLY given `promotion_id` that
+    doesn't exist is still a 404 (a dangling client reference, not "no promotion available").
     """
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
@@ -636,24 +647,15 @@ def rehydrate(
         raise HTTPException(status_code=400, detail="mode deve ser 'create' ou 'overwrite'")
     if body.mode == "overwrite" and not body.dev_space_id:
         raise HTTPException(status_code=400, detail="overwrite requer dev_space_id")
-    # Non-repudiation (A3 acceptance + A3 review): a rehydrate mutates a real dev Space, so when a
-    # durable store is present (prod) it MUST be auditable — require a linkable source Promotion.
-    # (Validated here, BEFORE _engine_call, so these stay 400/404 — an HTTPException raised inside
-    # _run would be caught by _engine_call's broad handler and re-mapped to 502.) The audit row FKs
-    # to promotions(id), so the promotion must also exist. Store=None (local/offline) keeps the
-    # prior no-audit ergonomics; the gap was only reachable in prod, where the store is required.
     store = getattr(app.state, "store", None)
     promotion_id = body.promotion_id
     if store is not None:
         # G5: the standalone screen has no promotion_id to hand back (it picked a prod Space from
-        # the plain getProdSpaces listing) — resolve it server-side before falling back to the
-        # explicit-omission 400, so that flow never has to know what a "promotion_id" is.
+        # the plain getProdSpaces listing) — resolve it server-side; a linked trail is still
+        # preferred when one exists, but finding none is no longer fatal (see the docstring above).
         if not promotion_id:
             promotion_id = _find_promotion_id_for_resource(store, body.source_prod_space_id)
-        if not promotion_id:
-            raise HTTPException(status_code=400,
-                                detail="rehydrate requer promotion_id (a promoção de origem) para a trilha de auditoria")
-        if store.get_promotion(promotion_id) is None:
+        if promotion_id and store.get_promotion(promotion_id) is None:
             raise HTTPException(status_code=404, detail="promoção de origem não encontrada")
 
     def _run() -> dict:

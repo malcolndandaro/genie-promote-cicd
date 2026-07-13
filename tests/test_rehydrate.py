@@ -289,10 +289,15 @@ def test_source_prod_read_error_from_workspace_error_is_access_denied_not_bootst
 class _FakeStore:
     def __init__(self):
         self.events = []
+        self.rehydrate_events = []
 
     def append_audit_event(self, promotion_id, event_type, **kw):
         self.events.append((promotion_id, event_type, kw))
         return NS(seq=len(self.events))
+
+    def append_rehydrate_event(self, **kw):
+        self.rehydrate_events.append(kw)
+        return NS(id=f"rh-{len(self.rehydrate_events)}")
 
 
 def test_audit_event_records_acting_identity_and_sp_broad_grant_fact():
@@ -356,20 +361,61 @@ def test_audit_records_via_real_in_memory_backend():
     assert len(store.list_audit_events(promo.id)) == 2
 
 
-def test_audited_rehydrate_requires_promotion_id_and_does_not_mutate():
-    # A3 review Finding 1 (service-level defense-in-depth): when a durable store is present a
-    # rehydrate MUST be auditable -> refuse BEFORE any dev mutation if promotion_id is missing (a
-    # bare early-return in _audit would otherwise let an unaudited create/overwrite through).
-    n = {"mut": 0}
-    dev = _acl_transport({}, genie=NS(
-        create_space=lambda *a, **k: (n.__setitem__("mut", n["mut"] + 1), NS(space_id="x"))[1],
-        update_space=lambda *a, **k: n.__setitem__("mut", n["mut"] + 1)))
+def test_no_matching_promotion_still_rehydrates_and_records_a_standalone_event():
+    # Stakeholder decision (post-review of the original "requires promotion_id" gate): the prod
+    # store starts EMPTY (ADR-0006), so most prod Spaces never went through this app's promotion
+    # flow -> rehydrate must still work for any prod Space the caller can access. With a store
+    # present and no promotion_id, the create/overwrite proceeds and gets a STANDALONE
+    # rehydrate_events row (via the fake store) instead of a Promotion-linked audit_events one.
     prod = _prod_transport("prod-1", ["ana@x"])
+    dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: NS(space_id="new-id")))
+    store = _FakeStore()
+
+    result = rehydrate.rehydrate_space(source_prod_space_id="prod-1", identity=ANA, mode="create",
+                                       prod_client=prod, dev_client=dev, store=store,
+                                       promotion_id=None)
+
+    assert result.space_id == "new-id"  # not refused -> the dev Space really got created
+    assert store.events == []  # no Promotion to link -> NOT the audit_events path
+    assert len(store.rehydrate_events) == 1
+    kw = store.rehydrate_events[0]
+    assert kw["resource_id"] == "prod-1"
+    assert kw["actor_email"] == "ana@x"
+    assert kw["mode"] == "create"
+    assert kw["dev_space_id"] == "new-id"
+    assert kw["detail"]["acting_identity"] == "ana@x"
+
+
+def test_matching_promotion_still_uses_the_linked_audit_path_not_a_standalone_row():
+    # The inverse of the above: when a source Promotion IS given, the richer Promotion-linked
+    # `rehydrated` audit_events row is used (unchanged), and NOT the standalone rehydrate_events
+    # table — the two paths are mutually exclusive per rehydrate.
+    prod = _prod_transport("prod-1", ["ana@x"])
+    dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: NS(space_id="new-id")))
+    store = _FakeStore()
+
+    rehydrate.rehydrate_space(source_prod_space_id="prod-1", identity=ANA, mode="create",
+                              prod_client=prod, dev_client=dev, store=store,
+                              promotion_id="promo-1")
+
+    assert len(store.events) == 1 and store.rehydrate_events == []
+    promotion_id, event_type, kw = store.events[0]
+    assert promotion_id == "promo-1" and event_type == "rehydrated"
+
+
+def test_standalone_event_records_via_real_in_memory_backend():
+    # End-to-end through the REAL PromotionStore/InMemoryBackend (not just a fake), so a schema/
+    # domain-logic drift in promotion_store.py's rehydrate_events table would break this test too.
     store = promotion_store.PromotionStore(promotion_store.InMemoryBackend())
-    try:
-        rehydrate.rehydrate_space(source_prod_space_id="prod-1", identity=ANA, mode="create",
-                                  prod_client=prod, dev_client=dev, store=store, promotion_id=None)
-        assert False, "expected ValueError (store present, no promotion_id)"
-    except ValueError:
-        pass
-    assert n["mut"] == 0  # refused before any create/update -> nothing mutated
+    prod = _prod_transport("prod-1", ["ana@x"])
+    dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: NS(space_id="new-id")))
+
+    rehydrate.rehydrate_space(source_prod_space_id="prod-1", identity=ANA, mode="create",
+                              prod_client=prod, dev_client=dev, store=store, promotion_id=None)
+
+    events = store.list_rehydrate_events()
+    assert len(events) == 1
+    assert events[0].resource_id == "prod-1"
+    assert events[0].actor_email == "ana@x"
+    assert events[0].mode == "create"
+    assert events[0].dev_space_id == "new-id"

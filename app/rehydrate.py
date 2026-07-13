@@ -24,12 +24,18 @@ isn't granted / can't resolve `APP_DEV_HOST` raises `DevEnvironmentNotBootstrapp
 DISTINCT exception carrying an actionable "run provision_dev_sp.sh" message — collapsing the two
 into one error class would recreate the exact "fails confusingly" bug SP2 exists to prevent.
 
-Audit (non-repudiation): every rehydrate appends one `audit_events` row (via `PromotionStore`)
-recording the ACTING identity's `user_name` (the live-checked, platform-verified caller — never a
-display header) AND the fact that the dev-reader/writer SP holds a broad standing grant reaching
-every dev Space by platform necessity — the human fact ("who did it") and the platform fact ("what
-made it technically possible") are recorded distinctly so an incident review can tell "the guard
-worked" from "the guard was bypassed" (PRD, Epic A / A2 story 8).
+Audit (non-repudiation): every rehydrate appends one row recording the ACTING identity's
+`user_name` (the live-checked, platform-verified caller — never a display header) AND the fact
+that the dev-reader/writer SP holds a broad standing grant reaching every dev Space by platform
+necessity — the human fact ("who did it") and the platform fact ("what made it technically
+possible") are recorded distinctly so an incident review can tell "the guard worked" from "the
+guard was bypassed" (PRD, Epic A / A2 story 8). TWO audit paths (stakeholder decision — rehydrate
+must work for ANY prod Space the caller can access, not only ones this app promoted; the prod
+store starts EMPTY per ADR-0006, so most prod Spaces have no Promotion row at all):
+  - a linkable source Promotion exists (`promotion_id` given/resolved) -> the richer
+    `promotion_store.audit_events` "rehydrated" row, next to that Promotion's own history;
+  - no linkable Promotion -> a STANDALONE `promotion_store.rehydrate_events` row instead (no FK,
+    same acting-identity/SP-broad-grant facts) — see `promotion_store.RehydrateEvent`.
 """
 from __future__ import annotations
 
@@ -110,29 +116,37 @@ def _dev_transport(client: Optional[WorkspaceClient]) -> WorkspaceClient:
 
 
 def _audit(store, promotion_id: Optional[str], identity: authz.VerifiedIdentity, *,
-           mode: str, source_space_id: str, dev_space_id: str, dev_warehouse_id: Optional[str]) -> None:
+           mode: str, source_space_id: str, resource_title: Optional[str], dev_space_id: str,
+           dev_warehouse_id: Optional[str]) -> None:
     """Append the non-repudiation audit row (PRD Epic A story 15 / A2 story 8): the live-checked
     ACTING identity, distinctly from the fact that the standing dev-reader/writer SP holds a broad
     grant reaching every dev Space by platform necessity (the compensating control this guard IS).
-    Uses the `rehydrated` event type (RECURRING — reseeding dev again after another wipe is
-    legitimate, not a duplicate milestone). A missing store (no Lakebase bound — local/offline) is
-    a no-op, matching every other optional-store call site in this codebase (e.g.
-    `engine_api.promote`)."""
-    if store is None or promotion_id is None:
+    A missing store (no Lakebase bound — local/offline) is a no-op, matching every other
+    optional-store call site in this codebase (e.g. `engine_api.promote`).
+
+    Two paths (see the module docstring): a linkable `promotion_id` gets the richer
+    `audit_events` "rehydrated" row (RECURRING — reseeding dev again after another wipe is
+    legitimate, not a duplicate milestone); no `promotion_id` gets a STANDALONE
+    `rehydrate_events` row instead — same facts, no FK to a Promotion that doesn't exist."""
+    if store is None:
         return
-    store.append_audit_event(
-        promotion_id, "rehydrated",
-        actor_app_email=identity.user_name,
-        detail={
-            "action": "rehydrate", "mode": mode,
-            "source_prod_space_id": source_space_id, "dev_space_id": dev_space_id,
-            "dev_warehouse_id": dev_warehouse_id,
-            "acting_identity": identity.user_name,
-            "sp_broad_grant": (
-                "dev-reader/writer service principal (scope=dev-sp) can reach every dev Space by "
-                "platform necessity (Genie has no per-Space delegation); this action was gated by "
-                "assert_can_access on the acting identity above, not by the SP's own reach"),
-        })
+    detail = {
+        "action": "rehydrate", "mode": mode,
+        "source_prod_space_id": source_space_id, "dev_space_id": dev_space_id,
+        "dev_warehouse_id": dev_warehouse_id,
+        "acting_identity": identity.user_name,
+        "sp_broad_grant": (
+            "dev-reader/writer service principal (scope=dev-sp) can reach every dev Space by "
+            "platform necessity (Genie has no per-Space delegation); this action was gated by "
+            "assert_can_access on the acting identity above, not by the SP's own reach"),
+    }
+    if promotion_id is not None:
+        store.append_audit_event(
+            promotion_id, "rehydrated", actor_app_email=identity.user_name, detail=detail)
+    else:
+        store.append_rehydrate_event(
+            resource_id=source_space_id, resource_title=resource_title,
+            actor_email=identity.user_name, mode=mode, dev_space_id=dev_space_id, detail=detail)
 
 
 def rehydrate_space(
@@ -149,7 +163,10 @@ def rehydrate_space(
     store=None,
     promotion_id: Optional[str] = None,
 ) -> RehydrateResult:
-    """Export a PROMOTED prod Space and (re-)create it in dev, rebound `prod_`->`dev_`.
+    """Export a prod Space the caller can access and (re-)create it in dev, rebound
+    `prod_`->`dev_` — the source need NOT have been promoted through this app (stakeholder
+    decision: the prod store starts empty per ADR-0006, so most prod Spaces have no Promotion row
+    at all; see the module docstring for the two resulting audit paths).
 
     ``mode`` is ``"create"`` (mint a brand-new dev Space) or ``"overwrite"`` (replace an existing
     dev Space's content in place) — see SP1 for why these are two distinct SDK calls
@@ -173,13 +190,6 @@ def rehydrate_space(
     wh = dev_warehouse_id or APP_DEV_WAREHOUSE_ID
     if not wh:
         _no_dev_warehouse()
-    # Non-repudiation (A3 review): a rehydrate mutates a real dev Space, so when a durable store is
-    # present it MUST be auditable — refuse BEFORE any mutation if there's no promotion to attach the
-    # audit event to (a bare early-return in _audit would let an unaudited create/overwrite through).
-    # store=None is the local/offline path (no Lakebase, no audit) — matches every other
-    # optional-store call site; the endpoint additionally rejects this with a 400 in prod.
-    if store is not None and promotion_id is None:
-        raise ValueError("an audited rehydrate (store present) requires promotion_id for non-repudiation")
 
     import app_logic  # local import: avoids a circular import at module load time
 
@@ -215,7 +225,9 @@ def rehydrate_space(
             title=title, parent_path=APP_DEV_PARENT_PATH)
         result_id = created.space_id
 
+    # getattr: real GenieSpace responses always carry .title, but some test-fake transports don't —
+    # resource_title is nullable in the standalone rehydrate_events row anyway (see RehydrateEvent).
     _audit(store, promotion_id, identity, mode=mode, source_space_id=source_prod_space_id,
-           dev_space_id=result_id, dev_warehouse_id=wh)
+           resource_title=getattr(space, "title", None), dev_space_id=result_id, dev_warehouse_id=wh)
 
     return RehydrateResult(space_id=result_id, mode=mode, title=title, warehouse_id=wh)

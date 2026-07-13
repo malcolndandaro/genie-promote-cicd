@@ -391,19 +391,27 @@ def _mk_promotion(store):
         current_phase="deployed", live_status=None)
 
 
-def test_rehydrate_requires_promotion_id_when_store_present(monkeypatch, store):
-    # A3 review Finding 1: with a durable store (prod), a rehydrate mutates a real dev Space and MUST
-    # be auditable -> reject (before any mutation) when there's no source Promotion to attach the
-    # audit event to. Without this, POST /rehydrate {no promotion_id} created/overwrote a dev Space
-    # with ZERO audit rows (non-repudiation gap).
+def test_rehydrate_proceeds_with_promotion_id_none_when_no_promotion_matches(monkeypatch, store):
+    # Stakeholder decision (revised from the original A3 review gate): the prod store starts EMPTY
+    # (ADR-0006), so most prod Spaces have no source Promotion at all -> rehydrate must still work.
+    # No match -> the endpoint proceeds with promotion_id=None (rehydrate_space then records a
+    # standalone rehydrate_events row instead of a Promotion-linked one — see test_rehydrate.py).
     _verify_as(monkeypatch, {"tok": "ana@x"})
-    called = {"ran": False}
-    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
-                        lambda *a, **k: called.__setitem__("ran", True))
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        seen.update(promotion_id=promotion_id, store=store)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
     r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
                     headers={"x-forwarded-access-token": "tok"})
-    assert r.status_code == 400
-    assert called["ran"] is False  # rejected before the service (no mutation)
+    assert r.status_code == 200
+    assert r.json()["space_id"] == "new-dev-id"
+    assert seen["promotion_id"] is None
+    assert seen["store"] is not None  # the store is still threaded through -> the standalone path can fire
 
 
 def test_rehydrate_rejects_unknown_promotion_id_when_store_present(monkeypatch, store):
@@ -460,17 +468,24 @@ def test_rehydrate_auto_resolves_promotion_id_by_resource_id_when_omitted(monkey
 
 
 def test_rehydrate_resolution_does_not_match_a_different_resource(monkeypatch, store):
-    # A Promotion exists, but for a DIFFERENT resource — must not be picked up as a false match; the
-    # request still 400s exactly like the empty-store case (rehydrate stays auditable, never guesses).
+    # A Promotion exists, but for a DIFFERENT resource — must not be picked up as a false match.
+    # Resolves to no match, same as the empty-store case above: proceeds with promotion_id=None
+    # rather than guessing (the caller's rehydrate still lands in the standalone audit path).
     _verify_as(monkeypatch, {"tok": "ana@x"})
     _mk_promotion(store)  # resource_id="dev-src", unrelated to "prod-1" below
-    called = {"ran": False}
-    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space",
-                        lambda *a, **k: called.__setitem__("ran", True))
+    seen = {}
+
+    def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
+                       store=None, promotion_id=None):
+        seen.update(promotion_id=promotion_id)
+        return engine_api.rehydrate_mod.RehydrateResult(
+            space_id="new-dev-id", mode="create", title=title, warehouse_id="wh-1")
+
+    monkeypatch.setattr(engine_api.rehydrate_mod, "rehydrate_space", fake_rehydrate)
     r = client.post("/rehydrate", json={"source_prod_space_id": "prod-1", "mode": "create"},
                     headers={"x-forwarded-access-token": "tok"})
-    assert r.status_code == 400
-    assert called["ran"] is False
+    assert r.status_code == 200
+    assert seen["promotion_id"] is None  # the unrelated Promotion was correctly NOT picked up
 
 
 def test_rehydrate_access_denied_maps_to_403_not_bootstrap_error(monkeypatch):
