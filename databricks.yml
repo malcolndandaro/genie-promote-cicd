@@ -64,6 +64,11 @@ variables:
       DEV workspace URL the prod-hosted app reaches into (Genie export at promotion time; F1
       rehydrate). Injected to the app as APP_DEV_HOST. Set per deployment — never hardcoded.
     default: https://your-dev-workspace.cloud.databricks.com
+  dev_warehouse_id:
+    description: >-
+      Dev SQL warehouse id the rehydrate flow binds recreated dev Spaces to (A3/G5). Injected to
+      the app as APP_DEV_WAREHOUSE_ID. Set per deployment — never hardcoded.
+    default: your-dev-warehouse-id
   dev_sp_secret_scope:
     description: >-
       Databricks secret scope holding the dev-reader/writer SP's OAuth M2M credentials

@@ -40,6 +40,7 @@ jobs:
       # A1/A2 (ADR-0006): the prod-hosted app reaches into DEV via the dev-reader SP. build_promote_app.sh
       # bakes APP_DEV_HOST into app.yaml from BUNDLE_DEV_HOST. Config-driven (ADR-0004) — set per deployment.
       BUNDLE_DEV_HOST: ${{ vars.DATABRICKS_DEV_HOST }}
+      BUNDLE_DEV_WAREHOUSE_ID: ${{ vars.DATABRICKS_DEV_WAREHOUSE_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: databricks/setup-cli@main
