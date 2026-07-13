@@ -18,6 +18,8 @@ import type {
   RolesList,
   DriftReport,
   Principal,
+  RulesList,
+  RuleSeverity,
 } from './types';
 import { spaceToResource } from './resources';
 
@@ -366,4 +368,41 @@ export function getAdminDrift(): Promise<DriftReport> {
  * the assigned Steward (visible to the promotion's owner or an admin, same as the promotion itself). */
 export function getPromotionDrift(promotionId: string): Promise<DriftReport> {
   return getJSON(`/api/promotions/${promotionId}/drift`);
+}
+
+// --- G2: admin-configurable reviewer rules (server-gated to admins) -----------------------------
+
+/** The effective rule set (hardcoded + overrides merged) + the raw override rows + the 9 hardcoded
+ * defaults. Takes effect on the NEXT review — no redeploy. */
+export function getRules(): Promise<RulesList> {
+  return getJSON('/api/admin/rules');
+}
+
+/** Disable/re-enable a hardcoded rule, override its severity/params, or create/update a custom
+ * rule. `isCustom: false` (default) must name one of the 9 hardcoded rule_ids; `isCustom: true`
+ * must NOT collide with one and requires severity + content + citation. */
+export function upsertRule(opts: {
+  ruleId: string;
+  isCustom?: boolean;
+  enabled?: boolean;
+  severity?: RuleSeverity;
+  params?: Record<string, unknown>;
+  content?: string;
+  citation?: string;
+}): Promise<{ rule: RulesList['overrides'][number] }> {
+  return postJSON('/api/admin/rules', {
+    rule_id: opts.ruleId,
+    is_custom: opts.isCustom ?? false,
+    enabled: opts.enabled ?? true,
+    severity: opts.severity ?? null,
+    params: opts.params ?? null,
+    content: opts.content ?? null,
+    citation: opts.citation ?? null,
+  });
+}
+
+/** Reset a hardcoded rule back to its default, or delete a custom rule entirely. Idempotent — a
+ * no-op if there was nothing to reset. */
+export function resetRule(ruleId: string): Promise<{ ok: boolean }> {
+  return postJSON('/api/admin/rules/reset', { rule_id: ruleId });
 }

@@ -57,8 +57,11 @@ import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
 import roles_store  # noqa: E402  (F5 — configurable roles store, store-over-env precedence)
+import rules_store  # noqa: E402  (G2 — admin-configurable reviewer rules, safe hardcoded fallback)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 import github_drift  # noqa: E402  (F5 — READ-ONLY GitHub gate drift detection)
+import handbook_rules  # noqa: E402  (G2 — the hardcoded rule_ids a plain override must reference)
+import rules_config  # noqa: E402  (G2 — the pure hardcoded+overrides merge, for GET /admin/rules)
 
 logger = logging.getLogger("engine_api")
 
@@ -85,6 +88,12 @@ async def _lifespan(app: FastAPI):
     app.state.roles_store = roles_store.build_store_from_env()
     logger.info("Roles store: %s",
                 "initialized (migrations applied)" if app.state.roles_store else "absent (no PGHOST — local/test)")
+    # G2: the admin-configurable rules store — same hard-dependency contract. `review()` reads it
+    # with `handbook_rules.RULES` as the safe fallback (see `rules_config.py`), so a fresh install
+    # with an empty/absent store reviews EXACTLY as before this slice shipped.
+    app.state.rules_store = rules_store.build_store_from_env()
+    logger.info("Rules store: %s",
+                "initialized (migrations applied)" if app.state.rules_store else "absent (no PGHOST — local/test)")
     reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
@@ -101,6 +110,8 @@ async def _lifespan(app: FastAPI):
             app.state.access_store.close()
         if app.state.roles_store is not None:
             app.state.roles_store.close()
+        if app.state.rules_store is not None:
+            app.state.rules_store.close()
 
 
 def _start_scheduled_reconciler(store):
@@ -146,6 +157,7 @@ app = FastAPI(title="genie-promote app", lifespan=_lifespan)
 app.state.store = None
 app.state.access_store = None  # F3
 app.state.roles_store = None  # F5
+app.state.rules_store = None  # G2
 api = APIRouter()
 
 
@@ -446,7 +458,12 @@ def review(
 
     def _run() -> dict:
         spec = body.access_spec.to_engine() if body.access_spec else None
-        result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec)
+        # G2: the admin-configured rule overrides (None when no store — reviews with the hardcoded
+        # handbook_rules.RULES, unchanged from before this slice).
+        store = _rules_store()
+        overrides = store.list_all_dicts() if store is not None else None
+        result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec,
+                                        rule_overrides=overrides)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
         return {k: result[k] for k in _REVIEW_FIELDS}
@@ -530,11 +547,13 @@ def promote(
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
     spec = body.access_spec.to_engine() if body.access_spec else None
+    rules_store_ = _rules_store()
+    overrides = rules_store_.list_all_dicts() if rules_store_ is not None else None
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
-            resource_title=body.resource_title, access_spec_=spec),
+            resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides),
     )
     store = getattr(app.state, "store", None)
     if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips
@@ -1187,6 +1206,107 @@ def promotion_drift(
     verified = _verified_email(x_forwarded_access_token, authorization)
     _visible_promotion_or_403(store, promotion_id, verified)
     return _engine_call("promotion_drift", _run_drift_check)
+
+
+# --- G2: admin-configurable reviewer rules (Lakebase-backed, safe hardcoded fallback) -------------
+#
+# Admin-gated the SAME way as F4/F5 (`_require_admin` on the VERIFIED identity). `review()`/
+# `promote()` above already read `_rules_store()` and thread the override rows into the engine
+# (`app_logic.review_space`/`request_promotion` -> `rules_config.effective_rules`/`eval01_config`);
+# these three endpoints are the CRUD the Settings screen's "Regras" section calls.
+
+
+def _rules_store():
+    return getattr(app.state, "rules_store", None)
+
+
+def _require_rules_store():
+    store = _rules_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+def _override_summary(o) -> dict:
+    return {"rule_id": o.rule_id, "is_custom": o.is_custom, "enabled": o.enabled,
+            "severity": o.severity, "params": o.params, "content": o.content,
+            "citation": o.citation, "updated_by": o.updated_by, "updated_at": o.updated_at}
+
+
+@api.get("/admin/rules")
+def list_rules(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The EFFECTIVE rule set (hardcoded `handbook_rules.RULES` merged with any admin overrides —
+    the exact set `review()` grounds the LLM on) alongside the raw override rows, so the Settings
+    screen can render "9 hardcoded + N custom" with each hardcoded rule's override state (or none)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_rules_store()
+    overrides = store.list_all_dicts()
+    return {"effective": rules_config.effective_rules(overrides),
+            "overrides": [_override_summary(o) for o in store.list_all()],
+            "hardcoded": handbook_rules.RULES}
+
+
+class RuleUpsertIn(BaseModel):
+    rule_id: str
+    is_custom: bool = False
+    enabled: bool = True
+    severity: str | None = None
+    params: dict | None = None
+    content: str | None = None
+    citation: str | None = None
+
+
+@api.post("/admin/rules")
+def upsert_rule(
+    body: RuleUpsertIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Disable/re-enable a hardcoded rule, override its severity/params, or create/update a custom
+    rule — takes effect on the NEXT review, no redeploy. A plain override (`is_custom=False`) must
+    name one of the 9 hardcoded `rule_id`s (checked here, against `handbook_rules.RULES` — the
+    store itself is rule_id-agnostic so it can also hold genuinely new custom ids); a custom rule
+    must NOT collide with a hardcoded id. Audited (`rule_created`/`rule_updated`) under the caller's
+    VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_rules_store()
+    known_ids = {r["rule_id"] for r in handbook_rules.RULES}
+    if body.is_custom and body.rule_id in known_ids:
+        raise HTTPException(status_code=400,
+                            detail=f"rule_id {body.rule_id!r} já é uma regra do handbook — use override, não custom.")
+    if not body.is_custom and body.rule_id not in known_ids:
+        raise HTTPException(status_code=400,
+                            detail=f"rule_id {body.rule_id!r} não é uma regra conhecida do handbook.")
+    try:
+        override = store.upsert(
+            rule_id=body.rule_id, actor_email=verified, is_custom=body.is_custom,
+            enabled=body.enabled, severity=body.severity, params=body.params,
+            content=body.content, citation=body.citation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"rule": _override_summary(override)}
+
+
+class RuleResetIn(BaseModel):
+    rule_id: str
+
+
+@api.post("/admin/rules/reset")
+def reset_rule(
+    body: RuleResetIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Reset a hardcoded rule back to its default (removes the override) or delete a custom rule
+    entirely. Idempotent — a no-op (200, not 404) if there was nothing to reset. Audited
+    (`rule_reset`/`rule_deleted`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_rules_store()
+    store.reset(body.rule_id, actor_email=verified)
+    return {"ok": True}
 
 
 # Mount the API twice: at root (legacy engine-API contract) and under /api (what the SPA calls).

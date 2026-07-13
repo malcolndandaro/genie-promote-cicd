@@ -39,6 +39,7 @@ import grant_check  # noqa: E402
 import handbook_rules  # noqa: E402
 import pre_render  # noqa: E402
 import review_core  # noqa: E402
+import rules_config  # noqa: E402  (G2 — admin-configurable rules; safe fallback to handbook_rules.RULES)
 from github_app import GitHubApp  # noqa: E402
 from promotion_comment import PROMOTION_COMMENT_MARKER, render_promotion_comment  # noqa: E402
 
@@ -403,10 +404,17 @@ def _pii_access_findings(space: dict, spec: "access_spec.AccessSpec") -> list[di
 def review_space(space_id: str, profile: str | None = None, to_env: str = "prod", domain: str = DOMAIN,
                  consumer_group: str | None = None, grant_profile: str | None = None,
                  user_token: str | None = None,
-                 access_spec_: "access_spec.AccessSpec | None" = None) -> dict:
+                 access_spec_: "access_spec.AccessSpec | None" = None,
+                 rule_overrides: list[dict] | None = None) -> dict:
     """The hero flow: export -> pre-render -> allowlist (ENV-01) + grant check (GRANT-01)
     -> agent review (EVAL-01 deterministic) -> eval gate. Deterministic findings own their
     rule_id (no double-count). Returns findings/gate/eval/allowlist_violations/timeline/prod_serialized.
+
+    ``rule_overrides`` (G2, optional) is the raw admin-configured override rows from
+    `app/rules_store.py` (`RulesStore.list_all_dicts()`), or `None` when no store is bound —
+    `rules_config.effective_rules`/`eval01_config` degrade to `handbook_rules.RULES`'s hardcoded
+    defaults in that case, so a caller with no store behaves EXACTLY as before this rule ever
+    existed.
 
     The in-app GRANT-01 preview only runs when an explicit, reachable prod target is
     configured (grant_profile arg or APP_PROD_PROFILE locally) — the prod catalog is
@@ -459,13 +467,19 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
             pass
     deterministic += _pii_access_findings(prod_space, spec)
 
+    # G2: the EFFECTIVE rule set (hardcoded RULES + admin overrides/custom rules) grounds the
+    # prompt; EVAL-01's threshold/severity backstop is resolved the same way (finalize_findings
+    # owns that check deterministically — see rules_config's docstring for why).
+    effective = rules_config.effective_rules(rule_overrides)
+    min_bench, eval01_severity = rules_config.eval01_config(rule_overrides)
     ctx = review_core.build_space_context(prod_space)
-    system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, deterministic)
+    system, user = review_core.build_review_prompt(ctx, effective, deterministic)
     # LLM reviewer = shared operation -> app SP / local profile (a serving scope isn't part of
     # OBO; the reviewer agent doesn't read the user's data, and it never runs against dev).
     sp = _client(profile)
     review = review_core.parse_review(_claude(system, user, profile, client=sp))
-    findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"])
+    findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"],
+                                             min_benchmark=min_bench, eval01_severity=eval01_severity)
     gate = review_core.decide_gate(findings)
     try:
         # eval_gate still uses the `databricks` CLI — absent on the Apps container, and
@@ -524,7 +538,8 @@ def github_app_factory(profile: str | None = None) -> GitHubApp:
 def request_promotion(space_id: str, profile: str | None = None, *, user_token: str | None = None,
                       requester_email: str | None = None, resource_title: str | None = None,
                       domain: str = DOMAIN, github: GitHubApp | None = None,
-                      access_spec_: "access_spec.AccessSpec | None" = None) -> dict:
+                      access_spec_: "access_spec.AccessSpec | None" = None,
+                      rule_overrides: list[dict] | None = None) -> dict:
     """GH2 (+ F2): open (or update) a real promotion PR for a space and post the attributed review
     comment.
 
@@ -544,7 +559,7 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     fix/approval loop; pr-checks + the Steward gate (GH4) enforce the outcome.
     """
     full = review_space(space_id, profile=profile, user_token=user_token, domain=domain,
-                        access_spec_=access_spec_)
+                        access_spec_=access_spec_, rule_overrides=rule_overrides)
     review = {k: full[k] for k in REVIEW_FIELDS}
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the

@@ -217,3 +217,40 @@ export interface DriftReport {
   has_unknown: boolean;
   findings: DriftFinding[];
 }
+
+/** G2: admin-configurable reviewer rules. `RuleSeverity` mirrors genie_reviewer's SEVERITIES. */
+export type RuleSeverity = 'BLOCKER' | 'SUGGESTION' | 'STYLE';
+
+/** One rule in the EFFECTIVE set the reviewer actually grounds on (hardcoded + overrides merged) —
+ * same shape as a `handbook_rules.RULES` entry, `params` present only when set (e.g. EVAL-01's
+ * `min_benchmarks`). */
+export interface EffectiveRule {
+  rule_id: string;
+  severity_hint: RuleSeverity;
+  citation: string;
+  content: string;
+  params?: Record<string, unknown>;
+}
+
+/** The raw override/custom-rule row (`app/rules_store.py`'s `RuleOverride`) — distinct from
+ * `EffectiveRule`: this is what an admin configured, not the merged result. */
+export interface RuleOverride {
+  rule_id: string;
+  is_custom: boolean;
+  enabled: boolean;
+  severity: RuleSeverity | null;
+  params: Record<string, unknown> | null;
+  content: string | null;
+  citation: string | null;
+  updated_by: string | null;
+  updated_at: string;
+}
+
+/** `GET /admin/rules`'s response: the effective set the reviewer uses right now, the raw override
+ * rows (so the UI can show each hardcoded rule's override state, or none), and the 9 hardcoded
+ * defaults (so a reset's "back to default" values are known without a second call). */
+export interface RulesList {
+  effective: EffectiveRule[];
+  overrides: RuleOverride[];
+  hardcoded: EffectiveRule[];
+}
