@@ -2,7 +2,10 @@
 
 Encapsulates GitHub App auth + the REST calls behind a small interface:
   - open_or_update_promotion(branch, path, content, title, body) -> {number, html_url}
-  - upsert_comment(number, marker, body) -> {id}            (one comment, updated in place)
+  - post_review_comment(number, marker, body) -> {id, seq}   (a NEW comment per review — history,
+                                                              not one canonical comment mutated
+                                                              in place; marker + seq/timestamp
+                                                              header on every comment)
   - get_status(number) -> {...}                              (GH3)
 
 Auth: mints a short-lived App JWT (RS256) from the App id + private key, exchanges it for an
@@ -303,13 +306,18 @@ class GitHubApp:
         # calls below). Only fetched on a failing verdict, so the happy-path poll pays nothing extra.
         checks_detail = self._checks_detail(runs) if checks == "failure" else None
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
+        # Fix C: WHY the DEPLOY failed (e.g. apply_access.py crashing on real declared access) —
+        # same "only on a failing verdict" gating as checks_detail, no new bot permission
+        # (actions:read already covers /jobs; annotations reuse the checks_detail scope).
+        deploy_detail = (self._deploy_detail(deploy["run_id"], deploy["run_url"])
+                         if deploy["run_id"] and deploy["conclusion"] == "failure" else None)
         # A merged PR was approvable by definition; otherwise read the live PR-review decision.
         review_decision = "approved" if merged else self._pr_review_decision(number)
         return {
             "pr_state": pr.get("state"), "merged": merged, "checks": checks,
             "checks_detail": checks_detail,
             "review_decision": review_decision,
-            "deploy": deploy, "pr_url": pr.get("html_url"),
+            "deploy": deploy, "deploy_detail": deploy_detail, "pr_url": pr.get("html_url"),
             "phase": _derive_phase(pr.get("state"), merged, checks, deploy),
         }
 
@@ -406,6 +414,46 @@ class GitHubApp:
                 "waiting_approval": status == "waiting", "run_url": wf.get("html_url"),
                 "run_id": run_id, "approver": approver}
 
+    def _deploy_detail(self, run_id: int, run_url: str | None) -> dict | None:
+        """PT-friendly detail for a FAILED deploy run (Fix C — mirrors G8's `_checks_detail`, one
+        level down: a deploy failure is a WORKFLOW JOB failing, not a PR check-run). Walks the
+        run's jobs for the first step with `conclusion == "failure"`, and — best-effort — that
+        job's own check-run annotations (a job IS a check run on GitHub Actions; `check_run_url`
+        carries its id), summarized with the SAME noise filtering as `_check_run_summary`.
+        Degrades to `None` on any hiccup — `get_status` must never fail because this enrichment
+        did (same contract as `_checks_detail`)."""
+        try:
+            _, body = self._api(
+                "GET", self._repo_path(f"/actions/runs/{run_id}/jobs"), "workflow run jobs")
+            for job in (body or {}).get("jobs", []):
+                failed_step = next(
+                    (s for s in (job.get("steps") or []) if s.get("conclusion") == "failure"), None)
+                if failed_step is None:
+                    continue
+                return {
+                    "failed_step": failed_step.get("name") or job.get("name") or "step",
+                    "summary": _truncate(self._job_annotations_summary(job)),
+                    "details_url": job.get("html_url") or run_url,
+                }
+            return None
+        except Exception:  # noqa: BLE001 — a detail-fetch hiccup must not break the status read
+            return None
+
+    def _job_annotations_summary(self, job: dict) -> str:
+        """Best-effort annotations for a failing job, via its check-run id (parsed from
+        `check_run_url`, e.g. `.../check-runs/12345`). "" if the job carries none or the fetch
+        hiccups — the caller's fallback is just failed_step + details_url."""
+        check_run_url = job.get("check_run_url") or ""
+        run_id = check_run_url.rstrip("/").rsplit("/", 1)[-1]
+        if not run_id:
+            return ""
+        try:
+            _, annotations = self._api(
+                "GET", self._repo_path(f"/check-runs/{run_id}/annotations"), "check run annotations")
+        except GitHubError:
+            return ""
+        return _summarize_annotations(annotations or [])
+
     def audit_facts(self, number: int) -> dict:
         """GitHub-sourced governance identities + timestamps for the durable audit trail (LB4).
 
@@ -497,14 +545,26 @@ class GitHubApp:
             raise GitHubError(status, "get branch protection", body)
         return body
 
-    # --- comment (one canonical, updated in place) --------------------------
-    def upsert_comment(self, number: int, marker: str, body: str) -> dict:
+    # --- comment (a NEW comment per review — history, never mutated in place) ----------------
+    def post_review_comment(self, number: int, marker: str, body: str) -> dict:
+        """POST a fresh comment for every review request — a re-request must NOT erase the prior
+        round's findings via an in-place PATCH (stakeholder decision, found live: a re-review
+        looked like nothing had happened). `body` already carries `marker` as its hidden first
+        line (`render_promotion_comment`); this inserts a human-visible "Revisão #N — <timestamp>
+        UTC" header right after it, so the PR timeline reads as a history, not a single mutating
+        comment. `marker` still tags EVERY review comment (not just one) — a caller that needs
+        "the current promotion comment" must scan for `marker` and take the LATEST match (by id
+        or created_at), never assume there's exactly one."""
         _, comments = self._api("GET", self._repo_path(f"/issues/{number}/comments"), "list comments")
-        for c in comments or []:
-            if marker in (c.get("body") or ""):
-                _, updated = self._api("PATCH", self._repo_path(f"/issues/comments/{c['id']}"),
-                                       "update comment", {"body": body})
-                return {"id": updated["id"], "updated": True}
+        seq = sum(1 for c in (comments or []) if marker in (c.get("body") or "")) + 1
+        marker_line, _, rest = body.partition("\n")
+        header = f"### 🧞 Revisão #{seq} — {self._utc_now_str()}"
+        dated_body = f"{marker_line}\n{header}\n{rest.lstrip(chr(10))}"
         _, created = self._api("POST", self._repo_path(f"/issues/{number}/comments"),
-                               "create comment", {"body": body})
-        return {"id": created["id"], "updated": False}
+                               "create comment", {"body": dated_body})
+        return {"id": created["id"], "seq": seq}
+
+    def _utc_now_str(self) -> str:
+        """UTC timestamp for the review-history header, via the injectable clock (`self._now`) —
+        same testability pattern as token caching, so a test can assert an exact header string."""
+        return time.strftime("%Y-%m-%d %H:%M", time.gmtime(self._now())) + " UTC"

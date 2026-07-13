@@ -121,3 +121,50 @@ test('checks_failed with no fetched detail (bot read hiccup) → still reprovado
   await expect(step(page, 'Checagens determinísticas')).toContainText('reprovado');
   await expect(page.getByText('Ver detalhes das checagens')).toHaveCount(0);
 });
+
+// Fix C: mirrors G8 one level down — a merged PR whose prod DEPLOY run failed (e.g. apply_access.py
+// crashing on real declared access) must surface WHY in the app, not a bare "Falha".
+test('deploy_failed → Deploy step shows reprovado with an expandable PT detail panel + GitHub link', async ({
+  page,
+}) => {
+  await promote(
+    page,
+    liveStatus({
+      merged: true,
+      pr_state: 'closed',
+      deploy: { status: 'completed', conclusion: 'failure', waiting_approval: false, run_url: 'r', run_id: 9, approver: null },
+      phase: 'deploy_failed',
+      deploy_detail: {
+        failed_step: 'Apply declared access',
+        summary: "AttributeError: 'dict' object has no attribute 'as_dict'",
+        details_url: 'https://github.com/malcolndandaro/genie-promote-cicd/actions/runs/9/jobs/101',
+      },
+    }),
+  );
+  await expect(step(page, 'Deploy em produção (service principal)')).toContainText('reprovado');
+
+  // Closed by default — must expand the disclosure to reveal WHY the deploy step failed.
+  await page.getByText('Ver detalhes do deploy').click();
+  await expect(page.getByText("AttributeError: 'dict' object has no attribute 'as_dict'")).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Ver log no GitHub ↗' })).toHaveAttribute(
+    'href',
+    'https://github.com/malcolndandaro/genie-promote-cicd/actions/runs/9/jobs/101',
+  );
+});
+
+test('deploy_failed with no fetched detail (bot read hiccup) → still reprovado, no panel, no crash', async ({
+  page,
+}) => {
+  await promote(
+    page,
+    liveStatus({
+      merged: true,
+      pr_state: 'closed',
+      deploy: { status: 'completed', conclusion: 'failure', waiting_approval: false, run_url: 'r', run_id: 9, approver: null },
+      phase: 'deploy_failed',
+      deploy_detail: null,
+    }),
+  );
+  await expect(step(page, 'Deploy em produção (service principal)')).toContainText('reprovado');
+  await expect(page.getByText('Ver detalhes do deploy')).toHaveCount(0);
+});

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { TimelineStep, StepStatus } from '../types';
-  import { STATUS_GLYPH, STATUS_LABEL } from '../pipeline';
+  import { STATUS_GLYPH, STATUS_LABEL, DETAIL_SUMMARY_LABEL } from '../pipeline';
 
   interface Props {
     steps: TimelineStep[];
@@ -39,11 +39,12 @@
           <!-- Status in words: color/glyph must not be the only signal (WCAG 1.4.1). -->
           <span class="visually-hidden">— {running ? 'em execução' : STATUS_LABEL[s.status]}</span>
         </span>
-        <!-- G8: "por que falhou?" without leaving the app — the CI's own PT findings, per failing
-             check run, plus a GitHub link as the fallback. Only ever set on a failed `checks` step. -->
+        <!-- G8 (checks) / Fix C (deploy): "por que falhou?" without leaving the app — the CI's
+             own PT findings, plus a GitHub link as the fallback. Only ever set on a failed step
+             that has an enrichment (checks or deploy today). -->
         {#if !running && s.status === 'fail' && s.detail && s.detail.length > 0}
           <details class="check-detail">
-            <summary>Ver detalhes das checagens ({s.detail.length})</summary>
+            <summary>{DETAIL_SUMMARY_LABEL[s.key] ?? 'Ver detalhes'} ({s.detail.length})</summary>
             <ul class="check-detail__list">
               {#each s.detail as d, di (d.name + di)}
                 <li class="check-detail__item">

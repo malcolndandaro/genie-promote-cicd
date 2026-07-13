@@ -618,8 +618,9 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
 
     Flow: review the space (OBO export + app-SP reviewer; reused for the PR comment) → export the
     DEV-shaped serialized_space (OBO) → as the BOT, ensure the promotion branch, write the artifact
-    to src/ (CI rebinds dev_->prod_), open-or-find the PR, and upsert one comment that mirrors the
-    UI (steps + gate + findings/blockers) attributing the human requester.
+    to src/ (CI rebinds dev_->prod_), open-or-find the PR, and POST a new review comment mirroring
+    the UI (steps + gate + findings/blockers) attributing the human requester — every re-request
+    posts ANOTHER comment (never edits the prior one in place), so the PR keeps a review history.
 
     ``access_spec_`` (F2, optional) is the Requester's declared `AccessSpec` — DECLARATION is
     app-direct (this function just writes it to a committed sidecar), but ENFORCEMENT (actually
@@ -689,9 +690,9 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
               f"Espaço `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo; `pr-checks` "
               f"é o gate automático e o Steward libera o deploy de produção (segregação de funções)."),
     )
-    gh.upsert_comment(pr["number"], PROMOTION_COMMENT_MARKER,
-                      render_promotion_comment(review, requester_email,
-                                               resource_title=prod_title, table_mapping=table_mapping))
+    gh.post_review_comment(pr["number"], PROMOTION_COMMENT_MARKER,
+                           render_promotion_comment(review, requester_email,
+                                                    resource_title=prod_title, table_mapping=table_mapping))
     return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch}
 
 

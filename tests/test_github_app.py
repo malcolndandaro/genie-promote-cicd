@@ -240,15 +240,34 @@ def test_no_branch_reset_while_a_pr_is_open():
     assert not any(m == "PATCH" for m, _ in fg.calls)  # no reset while the PR is open
 
 
-def test_upsert_comment_creates_then_updates_one_comment():
+def test_post_review_comment_posts_a_new_comment_every_time():
+    # A re-request must NOT erase the prior round's findings via an in-place PATCH (stakeholder
+    # decision, found live) — two sequential requests must produce TWO comments, seq 1 then 2.
     fg = FakeGitHub()
     gh = _app(fg)
     pr = gh.open_or_update_promotion(branch="b", path="p", content="x", title="t", body="b")
-    r1 = gh.upsert_comment(pr["number"], "<!--m-->", "<!--m-->\nfirst")
-    r2 = gh.upsert_comment(pr["number"], "<!--m-->", "<!--m-->\nsecond")
-    assert r1["updated"] is False and r2["updated"] is True and r2["id"] == r1["id"]
-    assert len(fg.comments[pr["number"]]) == 1                       # one comment, updated in place
-    assert fg.comments[pr["number"]][0]["body"].endswith("second")
+    r1 = gh.post_review_comment(pr["number"], "<!--m-->", "<!--m-->\nfirst")
+    r2 = gh.post_review_comment(pr["number"], "<!--m-->", "<!--m-->\nsecond")
+    assert r1["seq"] == 1 and r2["seq"] == 2
+    assert r2["id"] != r1["id"]                                       # a NEW comment, not the same one
+    assert len(fg.comments[pr["number"]]) == 2                        # history, not one mutated comment
+    bodies = [c["body"] for c in fg.comments[pr["number"]]]
+    assert bodies[0].startswith("<!--m-->\n### 🧞 Revisão #1")
+    assert bodies[0].endswith("first")
+    assert bodies[1].startswith("<!--m-->\n### 🧞 Revisão #2")
+    assert bodies[1].endswith("second")
+    assert all("<!--m-->" in b for b in bodies)  # marker survives on EVERY review comment
+
+
+def test_post_review_comment_header_uses_the_injected_clock():
+    fg = FakeGitHub()
+    gh = GitHubApp(owner="o", repo="r", transport=fg.transport, token_provider=lambda: "tok",
+                   now=lambda: 1783976400.0)  # 2026-07-13 21:00:00 UTC
+    pr = gh.open_or_update_promotion(branch="b", path="p", content="x", title="t", body="b")
+    r = gh.post_review_comment(pr["number"], "<!--m-->", "<!--m-->\nbody")
+    body = fg.comments[pr["number"]][0]["body"]
+    assert "2026-07-13 21:00 UTC" in body
+    assert r["seq"] == 1
 
 
 def test_github_error_raised_on_non_2xx():
@@ -265,7 +284,11 @@ def test_github_error_raised_on_non_2xx():
     assert e.value.status == 422
 
 
-def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=None, annotations=None):
+def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=None, annotations=None,
+                      jobs=None):
+    """`jobs` (Fix C): {run_id: [job, ...]} for `/actions/runs/{id}/jobs` — a job's own
+    `check-runs/{id}/annotations` reuses the SAME `annotations` dict (keyed by check-run id, same
+    as the PR-check-run path above; a job IS a check run on GitHub Actions)."""
     def t(method, url, headers, body):
         p = url.split("api.github.com")[-1]
         if p.endswith("/access_tokens"):
@@ -279,6 +302,9 @@ def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=N
             return 200, pull
         if "/check-runs" in p:
             return 200, {"check_runs": check_runs}
+        if p.endswith("/jobs") and "/actions/runs/" in p:  # Fix C: precedes the generic /actions/runs match
+            run_id = int(p.split("/actions/runs/")[1].split("/jobs")[0])
+            return 200, {"jobs": (jobs or {}).get(run_id, [])}
         if "/approvals" in p:  # must precede the /actions/runs check (it's a sub-path)
             return 200, approvals or []
         if "/actions/runs" in p:
@@ -553,6 +579,151 @@ def test_status_deploy_failed():
     assert s["phase"] == "deploy_failed"
 
 
+# --- Fix C: "why did the DEPLOY fail?" without leaving the app ------------------------------
+
+
+def test_deploy_detail_none_when_deploy_succeeds():
+    # Only fetched on a failing conclusion — the happy-path poll pays nothing extra (mirrors G8).
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "success", "html_url": "r", "id": 9}],
+    ).get_status(1)
+    assert s["deploy_detail"] is None
+
+
+def test_deploy_detail_reports_the_first_failing_step_and_its_annotations():
+    # Root-cause regression scenario: apply_access.py crashed on a raw-dict SDK call (Fix A) —
+    # this is what a business user would have seen in the app instead of a bare "Falha".
+    jobs = {9: [{
+        "id": 101, "name": "deploy", "status": "completed", "conclusion": "failure",
+        "html_url": "https://github.com/o/r/actions/runs/9/jobs/101",
+        "check_run_url": "https://api.github.com/repos/o/r/check-runs/101",
+        "steps": [
+            {"name": "Checkout", "status": "completed", "conclusion": "success", "number": 1},
+            {"name": "Apply declared access", "status": "completed", "conclusion": "failure", "number": 5},
+        ],
+    }]}
+    annotations = {101: [{"annotation_level": "failure",
+                          "message": "AttributeError: 'dict' object has no attribute 'as_dict'"}]}
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "r", "id": 9}],
+        jobs=jobs, annotations=annotations,
+    ).get_status(1)
+    assert s["phase"] == "deploy_failed"
+    assert s["deploy_detail"] == {
+        "failed_step": "Apply declared access",
+        "summary": "AttributeError: 'dict' object has no attribute 'as_dict'",
+        "details_url": "https://github.com/o/r/actions/runs/9/jobs/101",
+    }
+
+
+def test_deploy_detail_falls_back_to_the_run_url_when_the_job_has_no_html_url():
+    jobs = {9: [{"id": 101, "name": "deploy", "conclusion": "failure", "check_run_url": "",
+                "steps": [{"name": "Deploy", "status": "completed", "conclusion": "failure"}]}]}
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "failure",
+          "html_url": "https://run-url", "id": 9}],
+        jobs=jobs,
+    ).get_status(1)
+    assert s["deploy_detail"]["details_url"] == "https://run-url"
+    assert s["deploy_detail"]["summary"] == ""  # no check_run_url -> no annotations attempted
+
+
+def test_deploy_detail_none_when_no_step_has_conclusion_failure():
+    # The run's own conclusion is `failure` but no individual step literally is (e.g. a cancelled
+    # step) — degrade to no detail rather than pointing at the wrong step.
+    jobs = {9: [{"id": 101, "name": "deploy", "conclusion": "cancelled",
+                "steps": [{"name": "Apply declared access", "status": "completed",
+                          "conclusion": "cancelled"}]}]}
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "r", "id": 9}],
+        jobs=jobs,
+    ).get_status(1)
+    assert s["deploy_detail"] is None
+
+
+def test_deploy_detail_annotation_fetch_error_degrades_summary_to_empty():
+    # A hiccup reading the job's annotations must not drop the whole detail — it just falls back
+    # to failed_step + details_url with an empty summary (mirrors checks_detail's own test).
+    jobs = {9: [{
+        "id": 101, "name": "deploy", "conclusion": "failure", "html_url": "https://x/job",
+        "check_run_url": "https://api.github.com/repos/o/r/check-runs/101",
+        "steps": [{"name": "Apply declared access", "status": "completed", "conclusion": "failure"}],
+    }]}
+
+    def t(method, url, headers, body):
+        p = url.split("api.github.com")[-1]
+        if p.endswith("/annotations"):
+            return 500, {"message": "boom"}
+        if p.endswith("/access_tokens"):
+            return 201, {"token": "x"}
+        if "/pulls/" in p and p.split("/pulls/")[1].split("?")[0].isdigit():
+            return 200, _MERGED_PR
+        if "/reviews" in p:
+            return 200, []
+        if "/check-runs" in p:
+            return 200, {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        if p.endswith("/jobs") and "/actions/runs/" in p:
+            return 200, {"jobs": jobs[9]}
+        if "/approvals" in p:
+            return 200, []
+        if "/actions/runs" in p:
+            return 200, {"workflow_runs": [
+                {"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "r", "id": 9}]}
+        return 500, {"message": f"unhandled {method} {p}"}
+
+    s = GitHubApp(owner="o", repo="r", transport=t, token_provider=lambda: "tok").get_status(1)
+    assert s["deploy_detail"] == {
+        "failed_step": "Apply declared access", "summary": "", "details_url": "https://x/job"}
+
+
+def test_deploy_detail_none_when_the_jobs_fetch_errors():
+    # The jobs endpoint itself 500s — degrade to no detail, never break the status read.
+    def t(method, url, headers, body):
+        p = url.split("api.github.com")[-1]
+        if p.endswith("/jobs") and "/actions/runs/" in p:
+            return 500, {"message": "boom"}
+        if p.endswith("/access_tokens"):
+            return 201, {"token": "x"}
+        if "/pulls/" in p and p.split("/pulls/")[1].split("?")[0].isdigit():
+            return 200, _MERGED_PR
+        if "/reviews" in p:
+            return 200, []
+        if "/check-runs" in p:
+            return 200, {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        if "/approvals" in p:
+            return 200, []
+        if "/actions/runs" in p:
+            return 200, {"workflow_runs": [
+                {"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "r", "id": 9}]}
+        return 500, {"message": f"unhandled {method} {p}"}
+
+    s = GitHubApp(owner="o", repo="r", transport=t, token_provider=lambda: "tok").get_status(1)
+    assert s["phase"] == "deploy_failed"
+    assert s["deploy_detail"] is None
+
+
+def test_deploy_detail_never_breaks_the_status_read_on_an_unexpected_error(monkeypatch):
+    jobs = {9: [{
+        "id": 101, "name": "deploy", "conclusion": "failure", "html_url": "u",
+        "check_run_url": "https://api.github.com/repos/o/r/check-runs/101",
+        "steps": [{"name": "Apply declared access", "status": "completed", "conclusion": "failure"}],
+    }]}
+    gh = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "r", "id": 9}],
+        jobs=jobs,
+    )
+    monkeypatch.setattr(gh, "_job_annotations_summary",
+                        lambda job: (_ for _ in ()).throw(RuntimeError("boom")))
+    s = gh.get_status(1)
+    assert s["phase"] == "deploy_failed"   # the status read itself is unharmed
+    assert s["deploy_detail"] is None      # the enrichment degrades wholesale, not partially
+
+
 def test_status_closed_not_merged():
     pr = {"number": 1, "state": "closed", "merged": False, "head": {"sha": "s"}, "html_url": "u"}
     s = _status_transport(pr, [{"status": "completed", "conclusion": "success"}], []).get_status(1)
@@ -600,7 +771,7 @@ def test_installation_token_is_cached_across_calls():
     gh = GitHubApp(owner="o", repo="r", transport=fg.transport, token_provider=provider,
                    now=lambda: 1000.0)
     pr = gh.open_or_update_promotion(branch="b", path="p", content="x", title="t", body="b")
-    gh.upsert_comment(pr["number"], "<!--m-->", "<!--m-->\nx")
+    gh.post_review_comment(pr["number"], "<!--m-->", "<!--m-->\nx")
     assert n["c"] == 1  # token minted once, then cached (not re-minted per request)
 
 

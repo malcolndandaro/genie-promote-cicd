@@ -21,7 +21,12 @@ from databricks.sdk.service.iam import PermissionLevel  # noqa: E402
 
 class FakeGroups:
     """In-memory account-group store. Members are held by numeric id (SCIM `value` is an id, not a
-    name) — mirroring the real API, so a name-as-value bug can't pass these tests."""
+    name) — mirroring the real API, so a name-as-value bug can't pass these tests.
+
+    `patch()` calls `.as_dict()` on each operation and requires a `schemas` kwarg, exactly like the
+    real `GroupsAPI.patch` — a caller passing a raw dict (instead of a typed `iam.Patch`) blows up
+    here with the SAME `AttributeError` the real SDK raises, so this class of bug can't silently
+    pass the suite again."""
 
     def __init__(self, preexisting=None):
         self.groups: dict[str, NS] = {}   # display_name -> NS(id, display_name, members)
@@ -41,13 +46,16 @@ class FakeGroups:
         self.groups[display_name] = g
         return g
 
-    def patch(self, group_id: str, operations: list):
-        self.patch_calls.append((group_id, operations))
+    def patch(self, group_id: str, *, operations: list, schemas: list):
+        assert schemas, "groups.patch must be called with the SCIM PatchOp schema"
+        serialized = [op.as_dict() for op in operations]  # raises AttributeError on a raw dict
+        self.patch_calls.append((group_id, serialized))
         group = next(g for g in self.groups.values() if g.id == group_id)
-        for op in operations:
-            if op["op"] == "add" and op["path"] == "members":
+        for op in serialized:
+            if op["op"] == "add":
+                members = (op.get("value") or {}).get("members", [])
                 existing = {m.value for m in group.members}
-                for v in op["value"]:
+                for v in members:
                     if v["value"] not in existing:
                         group.members.append(NS(value=v["value"], display=v["value"]))
 
@@ -65,11 +73,16 @@ class FakeUsers:
 
 
 class FakeGrants:
+    """`update()` calls `.as_dict()` on each change, exactly like the real `GrantsAPI.update` — a
+    caller passing a raw dict (instead of a typed `catalog.PermissionsChange`) blows up here with
+    the same `AttributeError` the real SDK raises."""
+
     def __init__(self):
         self.calls = []
 
     def update(self, *, securable_type, full_name, changes):
-        self.calls.append({"securable_type": securable_type, "full_name": full_name, "changes": changes})
+        serialized = [c.as_dict() for c in changes]  # raises AttributeError on a raw dict
+        self.calls.append({"securable_type": securable_type, "full_name": full_name, "changes": serialized})
 
 
 class FakePermissions:
@@ -119,7 +132,7 @@ def test_reconcile_membership_references_members_by_ID_not_name():
     w = fake_client()
     group = apply_access.get_or_create_group(w, "grp_genie_receivables")
     apply_access.reconcile_membership(w, group, [access_spec.Principal("ana@x.com")])
-    added = w.groups.patch_calls[0][1][0]["value"]
+    added = w.groups.patch_calls[0][1][0]["value"]["members"]
     assert added == [{"value": "uid-ana@x.com"}]      # resolved id, NOT "ana@x.com"
     assert added[0]["value"] != "ana@x.com"
 
@@ -128,7 +141,34 @@ def test_reconcile_membership_resolves_a_group_principal_via_groups_api():
     w = fake_client(groups_pre={"data_analysts": "gid-existing-42"})
     group = apply_access.get_or_create_group(w, "grp_genie_receivables")
     apply_access.reconcile_membership(w, group, [access_spec.Principal("data_analysts", is_group=True)])
-    assert w.groups.patch_calls[-1][1][0]["value"] == [{"value": "gid-existing-42"}]
+    assert w.groups.patch_calls[-1][1][0]["value"]["members"] == [{"value": "gid-existing-42"}]
+
+
+def test_reconcile_membership_issues_one_patch_call_per_principal():
+    # A failure on one principal must be attributable to exactly that principal — so adds are
+    # issued as separate `groups.patch` calls, never batched into one operation.
+    w = fake_client()
+    group = apply_access.get_or_create_group(w, "grp_genie_receivables")
+    apply_access.reconcile_membership(
+        w, group,
+        [access_spec.Principal("ana@x.com"), access_spec.Principal("bob@x.com")])
+    assert len(w.groups.patch_calls) == 2
+    added_ids = {c[1][0]["value"]["members"][0]["value"] for c in w.groups.patch_calls}
+    assert added_ids == {"uid-ana@x.com", "uid-bob@x.com"}
+
+
+def test_reconcile_membership_names_the_failing_principal_on_error():
+    # A patch failure must be re-raised naming the specific principal that failed, not a bare
+    # SDK error — this is what makes a real-workspace failure attributable in the CI log.
+    w = fake_client()
+    group = apply_access.get_or_create_group(w, "grp_genie_receivables")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated API failure")
+
+    w.groups.patch = boom
+    with pytest.raises(RuntimeError, match="bob@x.com"):
+        apply_access.reconcile_membership(w, group, [access_spec.Principal("bob@x.com")])
 
 
 def test_reconcile_membership_is_idempotent_on_the_member_id_set():
@@ -146,6 +186,28 @@ def test_reconcile_membership_fails_loud_on_unresolvable_principal():
         apply_access.reconcile_membership(w, group, [access_spec.Principal("ghost@x.com")])
 
 
+def test_reconcile_membership_passes_typed_patch_objects_not_raw_dicts():
+    """Root-cause regression for the live crash (prod deploy run 29282475355):
+    `AttributeError: 'dict' object has no attribute 'as_dict'` — groups.patch was called with a
+    raw dict operation. The real SDK calls `.as_dict()` on each operation before serializing, so
+    every operation passed here must be a typed model (`iam.Patch`), never a plain dict."""
+    captured_ops: list = []
+    w = fake_client()
+    real_patch = w.groups.patch
+
+    def spy_patch(group_id, *, operations, schemas):
+        captured_ops.extend(operations)
+        return real_patch(group_id, operations=operations, schemas=schemas)
+
+    w.groups.patch = spy_patch
+    group = apply_access.get_or_create_group(w, "grp_genie_receivables")
+    apply_access.reconcile_membership(w, group, [access_spec.Principal("ana@x.com")])
+    assert captured_ops
+    for op in captured_ops:
+        assert not isinstance(op, dict)
+        assert hasattr(op, "as_dict"), f"expected a typed SDK model, got {type(op)}"
+
+
 # --- UC grants -------------------------------------------------------------------------------
 
 def test_apply_uc_grants_is_schema_scoped_and_additive():
@@ -157,6 +219,25 @@ def test_apply_uc_grants_is_schema_scoped_and_additive():
     schema_call = next(c for c in w.grants.calls if c["securable_type"] == "schema")
     assert schema_call["changes"] == [
         {"principal": "grp_genie_receivables", "add": ["USE_SCHEMA", "SELECT"]}]
+
+
+def test_apply_uc_grants_passes_typed_permissions_change_not_raw_dicts():
+    """Same class of bug as groups.patch: grants.update calls `.as_dict()` on each change before
+    serializing, so every change passed here must be a typed `catalog.PermissionsChange`."""
+    captured_changes: list = []
+    w = fake_client()
+    real_update = w.grants.update
+
+    def spy_update(*, securable_type, full_name, changes):
+        captured_changes.extend(changes)
+        return real_update(securable_type=securable_type, full_name=full_name, changes=changes)
+
+    w.grants.update = spy_update
+    apply_access.apply_uc_grants(w, "grp_genie_receivables", {("prod_recebiveis", "diamond")})
+    assert captured_changes
+    for change in captured_changes:
+        assert not isinstance(change, dict)
+        assert hasattr(change, "as_dict"), f"expected a typed SDK model, got {type(change)}"
 
 
 # --- Space permissions: per-principal, NO upgrade (SHOULD-FIX 3) ------------------------------

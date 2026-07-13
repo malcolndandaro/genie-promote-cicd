@@ -80,23 +80,35 @@ export function buildPromotionSteps(review: Review, live: PromoteStatus | null):
         ? 'pass'
         : 'pending';
 
-  const deploy: StepStatus =
-    live?.phase === 'deployed'
-      ? 'pass'
-      : live?.phase === 'deploy_failed'
-        ? 'fail'
-        : live?.phase === 'deploying'
-          ? 'running'
-          : 'pending';
+  const deployFailed = live?.phase === 'deploy_failed';
+  const deploy: StepStatus = live?.phase === 'deployed' ? 'pass' : deployFailed ? 'fail'
+    : live?.phase === 'deploying' ? 'running' : 'pending';
+  // Fix C: WHY the deploy failed, rendered by the SAME <details> panel `checks` already uses —
+  // adapt the single `deploy_detail` into a one-item `CheckDetail[]`-shaped list, no new UI code.
+  const deployDetail = deployFailed && live?.deploy_detail
+    ? [{
+        name: live.deploy_detail.failed_step,
+        conclusion: 'failure',
+        summary: live.deploy_detail.summary,
+        details_url: live.deploy_detail.details_url,
+      }]
+    : null;
 
   return [
     ...verdict,
     { key: 'pr_review', label: 'Revisão do PR (aprovação de merge)', status: prReview },
     { key: 'merge', label: 'Merge para main', status: merge },
     { key: 'approval', label: 'Aprovação do Steward (deploy)', status: approval },
-    { key: 'deploy', label: 'Deploy em produção (service principal)', status: deploy },
+    { key: 'deploy', label: 'Deploy em produção (service principal)', status: deploy, detail: deployDetail },
   ];
 }
+
+/** PT label for the failing-step `<details>` summary (G8 checks / Fix C deploy), keyed by step —
+ * "checagens" is wrong wording for a deploy failure, so this isn't one generic string. */
+export const DETAIL_SUMMARY_LABEL: Record<string, string> = {
+  checks: 'Ver detalhes das checagens',
+  deploy: 'Ver detalhes do deploy',
+};
 
 /** Glyph per status (a hollow ring for pending is drawn in CSS). */
 export const STATUS_GLYPH: Record<StepStatus, string> = {
