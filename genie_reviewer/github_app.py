@@ -51,6 +51,48 @@ def _aggregate_checks(runs: list) -> str:
     return "success"
 
 
+def _failed_check_runs(runs: list) -> list:
+    """The completed runs that made `_aggregate_checks` report `failure` (mirrors its predicate)."""
+    return [r for r in runs if r.get("status") == "completed"
+            and r.get("conclusion") not in ("success", "neutral", "skipped")]
+
+
+# G9: found live — the app's annotation fallback was picking up GitHub's OWN generic noise (a
+# Node.js-version deprecation warning + the auto "Process completed with exit code N." failure
+# annotation every non-zero step gets) instead of anything useful, because our checks (e.g.
+# GRANT-01) weren't emitting real annotations at all — bare print()s never become one. Now that
+# `scripts/check_grants.py` emits real `::error::`/`::warning::` annotations, this needs to prefer
+# those over GitHub's own noise rather than just joining everything in annotation order.
+_NOISE_PREFIXES = ("Process completed with exit code",)
+_NOISE_SUBSTRINGS = ("Node.js 20 is deprecated",)
+
+
+def _is_noise_annotation(message: str) -> bool:
+    return message.startswith(_NOISE_PREFIXES) or any(s in message for s in _NOISE_SUBSTRINGS)
+
+
+def _summarize_annotations(annotations: list) -> str:
+    """Join a failing check-run's annotation messages into its summary text — preferring
+    FAILURE-level annotations (our own `::error::` findings, e.g. GRANT-01's baseline BLOCKERs,
+    report at this level; GitHub's warning-level deprecation notices don't) and filtering the
+    well-known noise annotations, but ONLY when doing so still leaves something real to show —
+    never filtering a run's summary down to nothing."""
+    msgs = [a["message"].strip() for a in annotations if a.get("message")]
+    if not msgs:
+        return ""
+    failures = [a["message"].strip() for a in annotations
+                if a.get("annotation_level") == "failure" and a.get("message")]
+    pool = failures or msgs  # prefer failure-level; fall back to every annotation otherwise
+    filtered = [m for m in pool if not _is_noise_annotation(m)]
+    return "\n".join(filtered or pool)  # never filter a real pool down to nothing
+
+
+def _truncate(text: str, limit: int = 500) -> str:
+    """Sane truncation for a check-run summary (G8) — never dump an unbounded log into the app."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def _derive_phase(pr_state: str | None, merged: bool, checks: str, deploy: dict) -> str:
     """A single phase the UI maps to a badge — reflects where the promotion actually is."""
     if merged:
@@ -146,18 +188,28 @@ class GitHubApp:
 
     # --- promotion PR -------------------------------------------------------
     def open_or_update_promotion(self, *, branch: str, path: str, content: str,
-                                 title: str, body: str, extra_files: dict | None = None) -> dict:
+                                 title: str, body: str, extra_files: dict | None = None,
+                                 remove_files: "list[str] | None" = None) -> dict:
         """Write the artifact (+ any extra_files, e.g. a per-space title sidecar) to the promotion
         branch and open-or-reuse the PR. Idempotent: while a PR is open, re-requesting updates the
         same branch + PR (no spam). When there's NO open PR (first request, or a prior promotion
         merged), the branch is reset to base first so the new PR has a clean diff (avoids the
-        stale-branch / 'no commits between' edge)."""
+        stale-branch / 'no commits between' edge).
+
+        `remove_files` (G9, found live PR #25): sidecar paths to DELETE from the branch when THIS
+        request no longer declares them. `extra_files` only ever UPSERTS — a prior round's
+        `.access.json`/`.mapping.json` would otherwise survive on the branch forever once committed,
+        even after the Requester clears the declaration, and CI would keep reading the stale
+        sidecar. Deleting is 404-tolerant (`_delete_file_if_exists`), so this is always safe to pass
+        unconditionally, including on a path that was never committed."""
         pr = self._find_open_pr(branch)
         if pr is None:
             self._reset_branch_to_base(branch)
         self._put_file(branch, path, content, f"promote: update {path}")
         for p, c in (extra_files or {}).items():
             self._put_file(branch, p, c, f"promote: update {p}")
+        for p in (remove_files or []):
+            self._delete_file_if_exists(branch, p, f"promote: clear {p}")
         return pr if pr is not None else self._create_pr(branch, title, body)
 
     def get_file_content(self, path: str, *, ref: str | None = None) -> str | None:
@@ -208,6 +260,21 @@ class GitHubApp:
             payload["sha"] = existing["sha"]
         self._api("PUT", self._repo_path(f"/contents/{path}"), "put file", payload)
 
+    def _delete_file_if_exists(self, branch: str, path: str, message: str) -> None:
+        """DELETE a committed file from `branch`, if present. A 404 (never committed, or already
+        cleared by a prior call) is a silent no-op — mirrors `_put_file`'s GET-then-act shape, but
+        this must be safe to call UNCONDITIONALLY (every request passes every optional sidecar path
+        here, declared or not)."""
+        status, existing = self._transport(
+            "GET", f"{_API}{self._repo_path(f'/contents/{path}')}?ref={branch}",
+            self._headers(self._token()), None)
+        if status == 404:
+            return
+        if status != 200 or not existing:
+            raise GitHubError(status, "get file (for delete)", existing)
+        self._api("DELETE", self._repo_path(f"/contents/{path}"), "delete file",
+                  {"message": message, "sha": existing["sha"], "branch": branch})
+
     def _find_open_pr(self, branch: str) -> dict | None:
         # The promotion branch is bot-owned, so the first open PR for it is ours.
         _, prs = self._api("GET", self._repo_path(f"/pulls?head={self.owner}:{branch}&state=open"),
@@ -230,16 +297,56 @@ class GitHubApp:
         head_sha = pr["head"]["sha"]
         merged = bool(pr.get("merged"))
         _, cr = self._api("GET", self._repo_path(f"/commits/{head_sha}/check-runs"), "check runs")
-        checks = _aggregate_checks((cr or {}).get("check_runs", []))
+        runs = (cr or {}).get("check_runs", [])
+        checks = _aggregate_checks(runs)
+        # G8: WHY it failed, in the app — no new bot permission (checks:read already covers both
+        # calls below). Only fetched on a failing verdict, so the happy-path poll pays nothing extra.
+        checks_detail = self._checks_detail(runs) if checks == "failure" else None
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
         # A merged PR was approvable by definition; otherwise read the live PR-review decision.
         review_decision = "approved" if merged else self._pr_review_decision(number)
         return {
             "pr_state": pr.get("state"), "merged": merged, "checks": checks,
+            "checks_detail": checks_detail,
             "review_decision": review_decision,
             "deploy": deploy, "pr_url": pr.get("html_url"),
             "phase": _derive_phase(pr.get("state"), merged, checks, deploy),
         }
+
+    def _checks_detail(self, runs: list) -> list[dict] | None:
+        """PT-friendly detail per FAILING check run (G8): name, conclusion, a best-effort summary,
+        and the GitHub link as a fallback. Degrades to `None` (never a partial/broken list) on any
+        unexpected error — the status read itself must never fail because this enrichment did."""
+        try:
+            return [{
+                "name": r.get("name") or "check",
+                "conclusion": r.get("conclusion"),
+                "summary": _truncate(self._check_run_summary(r)),
+                "details_url": r.get("details_url") or r.get("html_url"),
+            } for r in _failed_check_runs(runs)]
+        except Exception:  # noqa: BLE001 — a detail-fetch hiccup must not break the status read
+            return None
+
+    def _check_run_summary(self, run: dict) -> str:
+        """The most useful text GitHub has for this failing run. Bare `run:` steps (e.g. the
+        GRANT-01/`bundle validate` gates, plain `print`/exit-code failures) rarely populate
+        `output` — the CI's PT findings live in the job LOG, not the Checks API — so this falls
+        back to the run's annotations, summarized (preferring real `::error::`/`::warning::`
+        content over GitHub's own generic noise — `_summarize_annotations`); a run with neither
+        yields "" and the caller's fallback is just name+conclusion+details_url."""
+        output = run.get("output") or {}
+        text = (output.get("summary") or output.get("title") or "").strip()
+        if text:
+            return text
+        run_id = run.get("id")
+        if not run_id:
+            return ""
+        try:
+            _, annotations = self._api(
+                "GET", self._repo_path(f"/check-runs/{run_id}/annotations"), "check run annotations")
+        except GitHubError:
+            return ""
+        return _summarize_annotations(annotations or [])
 
     def _pr_review_decision(self, number: int) -> str:
         """The PR's merge-approval gate, read from its reviews. Tolerant: any API hiccup or an empty

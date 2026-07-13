@@ -6,7 +6,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "genie_reviewer"))
-from github_app import GitHubApp, GitHubError  # noqa: E402
+from github_app import GitHubApp, GitHubError, _summarize_annotations  # noqa: E402
 
 
 class FakeGitHub:
@@ -61,6 +61,13 @@ class FakeGitHub:
                 self.files[key] = {"sha": f"blob-{len(self.files) + 1}", "content": body["content"],
                                    "had_sha": "sha" in body}
                 return 200, {"content": {"sha": self.files[key]["sha"]}}
+            if method == "DELETE":
+                if key not in self.files:
+                    return 404, {}
+                if body.get("sha") != self.files[key]["sha"]:  # real GitHub 409s on a stale sha
+                    return 409, {"message": "sha does not match"}
+                del self.files[key]
+                return 200, {"commit": {}}
 
         if path.split("?")[0].endswith("/pulls"):
             if method == "GET":
@@ -138,6 +145,43 @@ def test_open_commits_extra_files_alongside_the_artifact():
     assert ("promote/x", "src/genie/s.json") in fg.files
     assert ("promote/x", "src/genie/s.title") in fg.files
     assert base64.b64decode(fg.files[("promote/x", "src/genie/s.title")]["content"]).decode() == "My Space\n"
+
+
+# --- G9: remove_files — clearing a stale sidecar on a re-request (found live, PR #25) -----------
+
+
+def test_remove_files_deletes_a_previously_committed_sidecar():
+    fg = FakeGitHub()
+    gh = _app(fg)
+    gh.open_or_update_promotion(branch="promote/x", path="p", content="{}", title="t", body="b",
+                                extra_files={"src/genie/x.access.json": '{"a": 1}'})
+    assert ("promote/x", "src/genie/x.access.json") in fg.files
+
+    gh.open_or_update_promotion(branch="promote/x", path="p", content="{}", title="t", body="b",
+                                remove_files=["src/genie/x.access.json"])
+    assert ("promote/x", "src/genie/x.access.json") not in fg.files
+
+
+def test_remove_files_is_a_noop_for_a_path_never_committed():
+    # Every request passes every optional sidecar path here, declared or not — must never error on
+    # one that was never written (the common case: nothing was ever declared for this space).
+    fg = FakeGitHub()
+    pr = _app(fg).open_or_update_promotion(branch="promote/x", path="p", content="{}", title="t",
+                                           body="b", remove_files=["src/genie/x.access.json"])
+    assert pr["number"] == 1  # completed without error
+
+
+def test_remove_files_does_not_touch_the_main_artifact_or_other_extra_files():
+    fg = FakeGitHub()
+    gh = _app(fg)
+    gh.open_or_update_promotion(
+        branch="promote/x", path="p", content="{}", title="t", body="b",
+        extra_files={"src/genie/x.title": "T\n", "src/genie/x.mapping.json": "{}"})
+    gh.open_or_update_promotion(branch="promote/x", path="p", content="{}", title="t", body="b",
+                                remove_files=["src/genie/x.mapping.json"])
+    assert ("promote/x", "p") in fg.files
+    assert ("promote/x", "src/genie/x.title") in fg.files
+    assert ("promote/x", "src/genie/x.mapping.json") not in fg.files
 
 
 def test_get_file_content_returns_none_when_absent():
@@ -221,11 +265,14 @@ def test_github_error_raised_on_non_2xx():
     assert e.value.status == 422
 
 
-def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=None):
+def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=None, annotations=None):
     def t(method, url, headers, body):
         p = url.split("api.github.com")[-1]
         if p.endswith("/access_tokens"):
             return 201, {"token": "x"}
+        if p.endswith("/annotations"):  # must precede the generic /check-runs match below (G8)
+            run_id = int(p.rsplit("/", 2)[1])
+            return 200, (annotations or {}).get(run_id, [])
         if "/reviews" in p:  # must precede the generic /pulls/{n} branch (path also has /pulls/)
             return 200, reviews or []
         if "/pulls/" in p and p.split("/pulls/")[1].split("?")[0].isdigit():
@@ -272,6 +319,147 @@ def test_status_checks_running_when_open():
 def test_status_checks_failed():
     s = _status_transport(_OPEN_PR, [{"status": "completed", "conclusion": "failure"}], []).get_status(1)
     assert s["checks"] == "failure" and s["phase"] == "checks_failed"
+
+
+# --- G8: "why did it fail?" without leaving the app -------------------------
+
+
+def test_checks_detail_none_when_checks_pass():
+    s = _status_transport(_OPEN_PR, [{"status": "completed", "conclusion": "success"}], []).get_status(1)
+    assert s["checks_detail"] is None
+
+
+def test_checks_detail_uses_output_summary_when_present():
+    run = {"id": 1, "name": "bundle validate (prod)", "status": "completed", "conclusion": "failure",
+           "output": {"summary": "algo deu errado"}, "details_url": "https://x/1"}
+    s = _status_transport(_OPEN_PR, [run], []).get_status(1)
+    assert s["checks"] == "failure"
+    assert s["checks_detail"] == [{"name": "bundle validate (prod)", "conclusion": "failure",
+                                   "summary": "algo deu errado", "details_url": "https://x/1"}]
+
+
+def test_checks_detail_falls_back_to_annotations_when_output_is_empty():
+    # Bare `run:` steps (GRANT-01, print()-based) don't populate `output` — the PT findings live in
+    # the annotations GitHub DOES surface for a failed step. G9: GRANT-01 now emits them as REAL
+    # `::error::` workflow-command annotations (failure-level) — and GitHub's OWN generic noise (the
+    # step's auto "Process completed with exit code N." failure annotation) must be filtered out
+    # when real content is present (this is now "the annotation-fallback test" — it must show noise
+    # filtering, not just a plain join).
+    run = {"id": 9, "name": "GRANT-01 — every declared principal can SELECT", "status": "completed",
+           "conclusion": "failure", "output": {}, "html_url": "https://x/9"}
+    ann = {9: [
+        {"annotation_level": "failure", "message": "🔴 GRANT-01 — promoção bloqueada (1 achado(s))"},
+        {"annotation_level": "failure",
+         "message": "'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo"},
+        {"annotation_level": "failure", "message": "Process completed with exit code 1."},
+    ]}
+    s = _status_transport(_OPEN_PR, [run], [], annotations=ann).get_status(1)
+    detail = s["checks_detail"][0]
+    assert detail["summary"] == ("🔴 GRANT-01 — promoção bloqueada (1 achado(s))\n"
+                                 "'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo")
+    assert "exit code" not in detail["summary"]  # GitHub's own noise annotation is filtered out
+    assert detail["details_url"] == "https://x/9"  # falls back to html_url (no details_url given)
+
+
+# --- G9: _summarize_annotations — prefer failure-level, filter GitHub's own generic noise --------
+
+
+def test_summarize_annotations_prefers_failure_level_over_warning_level():
+    anns = [
+        {"annotation_level": "warning", "message": "Node.js 20 is deprecated. See ..."},
+        {"annotation_level": "failure", "message": "algo real quebrou"},
+    ]
+    assert _summarize_annotations(anns) == "algo real quebrou"
+
+
+def test_summarize_annotations_filters_exit_code_noise_when_real_content_exists():
+    anns = [
+        {"annotation_level": "failure", "message": "achado real"},
+        {"annotation_level": "failure", "message": "Process completed with exit code 1."},
+    ]
+    assert _summarize_annotations(anns) == "achado real"
+
+
+def test_summarize_annotations_filters_node_deprecation_noise_when_real_content_exists():
+    # No failure-level annotation at all here (a different check might only warn) — the noise
+    # SUBSTRING filter must still work on its own, independent of the level preference.
+    anns = [
+        {"annotation_level": "warning", "message": "Node.js 20 is deprecated. See https://x for info."},
+        {"annotation_level": "warning", "message": "aviso real"},
+    ]
+    assert _summarize_annotations(anns) == "aviso real"
+
+
+def test_summarize_annotations_never_filters_down_to_nothing():
+    # If EVERY annotation is noise, keep it anyway — better than an empty summary.
+    anns = [{"annotation_level": "failure", "message": "Process completed with exit code 1."}]
+    assert _summarize_annotations(anns) == "Process completed with exit code 1."
+
+
+def test_summarize_annotations_empty_list_is_empty_string():
+    assert _summarize_annotations([]) == ""
+
+
+def test_checks_detail_final_fallback_when_no_output_and_no_annotations():
+    run = {"id": 3, "name": "validate", "status": "completed", "conclusion": "failure",
+           "details_url": "https://x/3"}
+    s = _status_transport(_OPEN_PR, [run], [], annotations={3: []}).get_status(1)
+    assert s["checks_detail"] == [{"name": "validate", "conclusion": "failure",
+                                   "summary": "", "details_url": "https://x/3"}]
+
+
+def test_checks_detail_only_covers_the_failing_runs():
+    ok = {"id": 1, "name": "ok-check", "status": "completed", "conclusion": "success"}
+    bad = {"id": 2, "name": "bad-check", "status": "completed", "conclusion": "failure",
+           "output": {"summary": "quebrou"}, "details_url": "u"}
+    s = _status_transport(_OPEN_PR, [ok, bad], []).get_status(1)
+    assert [d["name"] for d in s["checks_detail"]] == ["bad-check"]
+
+
+def test_checks_detail_truncates_a_long_summary():
+    run = {"id": 4, "name": "validate", "status": "completed", "conclusion": "failure",
+           "output": {"summary": "x" * 900}, "details_url": "u"}
+    s = _status_transport(_OPEN_PR, [run], []).get_status(1)
+    summary = s["checks_detail"][0]["summary"]
+    assert len(summary) == 501 and summary.endswith("…")
+
+
+def test_checks_detail_annotation_fetch_error_degrades_that_runs_summary_to_empty():
+    # A hiccup reading ONE run's annotations must not break the whole checks_detail list — that run
+    # just falls all the way to name+conclusion+details_url (empty summary).
+    run = {"id": 5, "name": "validate", "status": "completed", "conclusion": "failure",
+           "output": {}, "details_url": "u"}
+
+    def t(method, url, headers, body):
+        p = url.split("api.github.com")[-1]
+        if p.endswith("/annotations"):
+            return 500, {"message": "boom"}
+        if p.endswith("/access_tokens"):
+            return 201, {"token": "x"}
+        if "/check-runs" in p:
+            return 200, {"check_runs": [run]}
+        if "/pulls/" in p and p.split("/pulls/")[1].split("?")[0].isdigit():
+            return 200, _OPEN_PR
+        if "/reviews" in p:
+            return 200, []
+        if "/actions/runs" in p:
+            return 200, {"workflow_runs": []}
+        return 500, {"message": f"unhandled {method} {p}"}
+
+    s = GitHubApp(owner="o", repo="r", transport=t, token_provider=lambda: "tok").get_status(1)
+    assert s["checks"] == "failure"
+    assert s["checks_detail"] == [{"name": "validate", "conclusion": "failure",
+                                   "summary": "", "details_url": "u"}]
+
+
+def test_checks_detail_never_breaks_the_status_read_on_an_unexpected_error(monkeypatch):
+    run = {"id": 1, "name": "x", "status": "completed", "conclusion": "failure"}
+    gh = _status_transport(_OPEN_PR, [run], [])
+    monkeypatch.setattr(gh, "_check_run_summary",
+                        lambda run: (_ for _ in ()).throw(RuntimeError("boom")))
+    s = gh.get_status(1)
+    assert s["checks"] == "failure"  # the status read itself is unharmed
+    assert s["checks_detail"] is None  # the enrichment degrades wholesale, not partially
 
 
 def test_status_open_when_checks_pass_pre_merge():

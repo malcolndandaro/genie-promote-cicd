@@ -80,6 +80,20 @@ class AccessSpec:
             seen.setdefault(p.name, None)
         return tuple(seen)
 
+    def declared_groups(self) -> tuple[str, ...]:
+        """Names of every declared principal that is a GROUP (not an individual user), deduped,
+        order-preserving — across BOTH systems. G9: the only class whose UC-grantability needs
+        verifying (`grant_check.is_uc_grantable_group`); an individual user is always account-level,
+        so callers should never run that check against a declared user."""
+        seen: dict[str, None] = {}
+        for sp in self.space_permissions:
+            if sp.principal.is_group:
+                seen.setdefault(sp.principal.name, None)
+        for p in self.uc_principals:
+            if p.is_group:
+                seen.setdefault(p.name, None)
+        return tuple(seen)
+
     def is_empty(self) -> bool:
         return not self.space_permissions and not self.uc_principals
 

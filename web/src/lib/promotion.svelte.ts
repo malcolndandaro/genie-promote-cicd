@@ -90,7 +90,17 @@ export class Promotion {
     return { state: 'ready', canApprove: true };
   }
 
-  /** Pick a resource. A new selection invalidates any prior verdict so nothing misleads. */
+  /** Incremented on every `select()` call (same-space reselection included) — `MeusEspacos`
+   * keys the confirmation panel off this, not `resource?.id`, so the declaration forms
+   * (AccessSpecForm/PromotionMappingForm) always remount fresh, even for the SAME space. */
+  selectionSeq = $state(0);
+
+  /** Pick a resource. A new selection invalidates any prior verdict so nothing misleads — including
+   * a RE-selection of the SAME space: a prior round's declared access/title/table-mapping must
+   * never silently ride the next request (found live, PR #25 — a re-request of the same space still
+   * carried the previous AccessSpec because neither this reset nor a remount happened for the
+   * same-space case). `selectionSeq` additionally forces the declaration forms to remount, which is
+   * what actually re-seeds PromotionMappingForm's title/table-mapping from the fresh preview. */
   select(resource: PromotableResource | null): void {
     this.resource = resource;
     this.review = null;
@@ -101,6 +111,10 @@ export class Promotion {
     this.promotionId = null;
     this.audit = [];
     this.requesterEmail = this.viewerEmail; // a fresh flow is requested by the viewer
+    this.pendingAccessSpec = undefined;
+    this.pendingProdTitle = undefined;
+    this.pendingTableMapping = undefined;
+    this.selectionSeq += 1;
   }
 
   /** Refresh the audit trail (LB4) for the active promotion. Best-effort: keep the last on error. */
