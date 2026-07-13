@@ -207,7 +207,7 @@ def test_principals_threads_query_and_kind(monkeypatch):
                    headers={"x-forwarded-access-token": "tok"})
     assert r.status_code == 200
     assert r.json() == {"principals": [{"type": "user", "id": "u1", "display": "Ana", "email": "ana@x.com"}]}
-    assert captured == {"q": "ana", "user_token": "tok", "kind": "user"}
+    assert captured == {"q": "ana", "user_token": None, "kind": "user"}  # SP transport: OBO gates the caller, never forwarded to SCIM
 
 
 def test_principals_rejects_invalid_kind():

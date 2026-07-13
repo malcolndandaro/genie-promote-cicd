@@ -264,10 +264,12 @@ def list_principals(query: str = "", *, profile: str | None = None, client: Work
 
     Directory listing is a same-workspace-prod read (the app's own workspace, post-ADR-0006) and,
     unlike Genie Space listing, is not itself an access boundary — there's no dev-sp cross-workspace
-    hop or ``assert_can_access`` guard here. Reads as the CALLER's own OBO identity when a
-    ``user_token`` is given (matching every other user-facing read in this module, so the API call is
-    attributed per-user rather than to the app SP); a bare ``profile``/injected ``client`` is the
-    existing local/offline/test convention.
+    hop or ``assert_can_access`` guard here. The read runs as the APP SP by default: the
+    Apps-forwarded OBO token is DOWNSCOPED to the app's ``user_api_scopes`` (today only
+    ``dashboards.genie``), so SCIM calls 403 on it — verified live. ``user_token`` remains accepted
+    for local/dev callers whose token has full scopes; the deployed endpoint gates the CALLER on
+    their OBO token but passes no token here. A bare ``profile``/injected ``client`` is the existing
+    local/offline/test convention.
     """
     w = client or _client(profile, user_token=user_token)
     q = query.strip()

@@ -398,14 +398,19 @@ def principals(
     free-typed email/username as the SUBMITTED value; this is the one endpoint every such picker
     calls. Gated the same as `/spaces` (any authenticated OBO caller): directory listing isn't
     itself a security boundary here — the ACTION each picker feeds is separately gated (F2 is a
-    declaration applied only via the governed pipeline; F3/F5 require admin approval server-side)."""
+    declaration applied only via the governed pipeline; F3/F5 require admin approval server-side).
+
+    TRANSPORT NOTE (found live): the SCIM read runs as the APP SP, not the caller's OBO token —
+    the Apps-forwarded user token is DOWNSCOPED to the app's `user_api_scopes` (today only
+    `dashboards.genie`), so SCIM `users.list` 403s on it ("Sem permissão para este recurso (OBO)").
+    The OBO token still gates WHO may call; the SP is transport only, same split as `/spaces`."""
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
     if kind not in ("all", "user", "group"):
         raise HTTPException(status_code=400, detail="kind inválido; use 'all', 'user' ou 'group'")
     return {"principals": _engine_call(
-        "list_principals", lambda: app_logic.list_principals(q, user_token=token, kind=kind))}
+        "list_principals", lambda: app_logic.list_principals(q, kind=kind))}
 
 
 class SpacePermissionIn(BaseModel):
