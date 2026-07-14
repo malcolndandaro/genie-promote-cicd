@@ -44,9 +44,13 @@ Two spikes gated this decision before it was estimated:
    write rights** (the CI/CD SP was the only such identity, and it only ever ran from short-lived
    GitHub Actions jobs). The dev-reader/writer SP is a **standing, long-running credential with
    dev-side Genie-API write reach**, held by an always-on app. We accept this explicitly:
-   - It is **named and scoped** to the Genie APIs only (no UC/warehouse/other grants) — a
-     compensating application-layer control, since Genie itself has no per-Space delegation (the
-     SP can reach every dev Space by platform necessity).
+   - It is **named and scoped** to the Genie APIs plus the minimum UC/warehouse reach an export
+     actually needs to function (`workspace-access` entitlement, warehouse `CAN_USE`, and
+     `USE_CATALOG`/`USE_SCHEMA` on `dev_<domain>` — no `SELECT`, no other catalogs, no admin
+     entitlements) — as implemented in `scripts/provision_dev_sp.sh`. This is narrower than the
+     CI/CD SP's prod grants (which additionally hold `MANAGE`, needed to grant *other* principals),
+     and is a compensating application-layer control, since Genie itself has no per-Space delegation
+     (the SP can reach every dev Space by platform necessity).
    - It is **audit-distinguishable**: every dev-touching action records the live, OBO-verified
      acting identity (A2) distinctly from the fact that the SP performed the call — so an incident
      review can tell "a verified user triggered this via the SP" from "the SP was misused."

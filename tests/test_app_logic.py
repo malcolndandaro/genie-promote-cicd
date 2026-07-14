@@ -783,7 +783,7 @@ def _stub_review_space_llm_leg(monkeypatch):
                         lambda space: {"n_benchmark": 5})
     monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
     monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
-    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate",
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
                         lambda *a, **k: {"status": "advisory", "summary": "ok"})
 
 
@@ -885,6 +885,85 @@ def test_review_space_grant01_preview_flags_non_grantable_declared_group(monkeyp
     assert "apply_access" not in grant_findings[0]["message"]
 
 
+# --- eval-run gate threading (W2): review_space must target the SAME workspace as the export ---
+
+def _stub_review_space_llm_leg_only(monkeypatch):
+    """Same LLM-leg stubbing as `_stub_review_space_llm_leg`, WITHOUT touching `run_eval_gate_rest`
+    — the tests below need to observe/control that call themselves."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": []}})
+    monkeypatch.setattr(app_logic.review_core, "build_space_context", lambda space: {"n_benchmark": 5})
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
+
+
+def test_review_space_eval_uses_dev_sp_client_when_user_token_present(monkeypatch):
+    """W2: once the app is prod-hosted, OBO cannot reach dev (ADR-0006) — a user_token means the
+    eval-run gate MUST target the dev-reader/writer SP (scope="dev-sp"), the SAME transport
+    export_serialized itself uses, never a bare prod-local client."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    dev_sp_sentinel = object()
+
+    def fake_client(*a, **k):
+        return dev_sp_sentinel if k.get("scope") == "dev-sp" else NS()
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+    captured = {}
+
+    def fake_run_eval_gate_rest(space_id, *, client, **kw):
+        captured["client"] = client
+        return {"status": "advisory", "summary": "ok"}
+
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
+
+    app_logic.review_space("sp1", user_token="tok")
+    assert captured["client"] is dev_sp_sentinel
+
+
+def test_review_space_eval_uses_plain_profile_client_without_user_token(monkeypatch):
+    """Local/offline convenience (a bare profile, no OBO token in the loop): the eval-run gate must
+    target the profile directly — never scope="dev-sp", which requires the dev SP to be bootstrapped
+    at all (same convention as export_serialized's own profile-only path)."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    calls = []
+
+    def fake_client(*a, **k):
+        calls.append((a, k))
+        return NS()
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+    captured = {}
+
+    def fake_run_eval_gate_rest(space_id, *, client, **kw):
+        captured["client"] = client
+        return {"status": "advisory", "summary": "ok"}
+
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
+
+    app_logic.review_space("sp1", profile="local-profile")
+    assert all(k.get("scope") != "dev-sp" for _, k in calls)
+    assert ("local-profile",) in [a for a, _ in calls]
+
+
+def test_review_space_eval_degrades_when_dev_sp_not_configured(monkeypatch):
+    """If the dev-reader/writer SP isn't bootstrapped (no APP_DEV_HOST), the eval step must degrade
+    to advisory — never blow up the whole review — exactly like an unreachable eval-run endpoint."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    monkeypatch.setattr(app_logic, "APP_DEV_HOST", None)  # dev SP never bootstrapped
+    real_client = app_logic._client
+
+    def fake_client(*a, **k):
+        # exercise the REAL fail-loud dev-sp path (APP_DEV_HOST is None); stub everything else so
+        # this test never constructs a real WorkspaceClient.
+        return real_client(*a, **k) if k.get("scope") == "dev-sp" else NS()
+
+    monkeypatch.setattr(app_logic, "_client", fake_client)
+
+    result = app_logic.review_space("sp1", user_token="tok")
+    assert result["eval"]["status"] == "advisory"
+    assert "APP_DEV_HOST" in result["eval"]["summary"]
+    assert result["gate"] is not None  # the rest of the review still completed normally
+
+
 def test_review_space_pii_interplay_flags_declared_access_to_masked_column(monkeypatch):
     """PII-01/02 interplay (F2 acceptance criteria): declaring access that reaches a column with a
     PII/bank-secrecy signal (CPF here) surfaces a grounded SUGGESTION so the Steward double-checks
@@ -897,7 +976,7 @@ def test_review_space_pii_interplay_flags_declared_access_to_masked_column(monke
                         lambda space: {"n_benchmark": 5})
     monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
     monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
-    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate",
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
                         lambda *a, **k: {"status": "advisory", "summary": "ok"})
 
     spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("data_analysts", is_group=True),))
@@ -918,7 +997,7 @@ def test_review_space_no_pii_finding_when_no_access_declared(monkeypatch):
                         lambda space: {"n_benchmark": 5})
     monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
     monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
-    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate",
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
                         lambda *a, **k: {"status": "advisory", "summary": "ok"})
 
     result = app_logic.review_space("sp1")

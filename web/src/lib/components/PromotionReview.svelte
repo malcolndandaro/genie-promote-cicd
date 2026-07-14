@@ -11,6 +11,7 @@
   import { pendingTimeline } from '../pipeline';
   import { PHASE_LABEL, phaseTone } from '../status';
   import { getPromotionDrift } from '../api';
+  import { genieSpaceUrl } from '../links';
   import type { DriftReport } from '../types';
   import type { Promotion } from '../promotion.svelte';
 
@@ -19,8 +20,20 @@
     userEmail: string | null;
     /** The dev workspace host (G5, `/api/whoami.dev_host`) — threaded down to RehydrateAction. */
     devHost?: string | null;
+    /** W3: the prod workspace host (`/api/whoami.prod_host`) — used to build the "Abrir Genie em
+     * produção" deep-link once the promotion is deployed. */
+    prodHost?: string | null;
   }
-  let { promotion, userEmail, devHost = null }: Props = $props();
+  let { promotion, userEmail, devHost = null, prodHost = null }: Props = $props();
+
+  // W3: only once BOTH the resolved prod Space id (server-side, phase-gated — see
+  // `_with_prod_space_id`) AND the prod host are available — never guess a URL from a partial
+  // answer.
+  let prodGenieUrl = $derived(
+    promotion.liveStatus?.phase === 'deployed' && promotion.liveStatus?.prod_space_id && prodHost
+      ? genieSpaceUrl(prodHost, promotion.liveStatus.prod_space_id)
+      : null,
+  );
 
   // F5 US-35: contextual drift, surfaced HERE for the assigned Steward — not only on a passive
   // Settings panel nobody opens. Fetched once per promotion (not polled — role/GitHub-gate drift
@@ -78,6 +91,11 @@
           <a class="pr-banner__link" href={promotion.pr.url} target="_blank" rel="noopener noreferrer">
             Ver no GitHub ↗
           </a>
+          {#if prodGenieUrl}
+            <a class="pr-banner__link" href={prodGenieUrl} target="_blank" rel="noopener noreferrer">
+              Abrir Genie em produção ↗
+            </a>
+          {/if}
         </div>
       {/if}
       <ReviewPanel review={promotion.review} {userEmail} liveStatus={promotion.liveStatus}>

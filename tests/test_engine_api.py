@@ -11,6 +11,7 @@ never hit a live workspace).
 """
 import os
 import sys
+from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine_api"))
@@ -18,6 +19,13 @@ import authz  # noqa: E402  (app/authz.py — on sys.path via the app/ insert ab
 import main as engine_api  # engine_api/main.py  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
+
+def _fake_config(monkeypatch, host: str) -> None:
+    """W3: `whoami`'s `prod_host` reads `Config().host` (the app's OWN workspace, ADR-0006) — never
+    the real SDK Config (which would resolve to whatever ~/.databrickscfg/env the test happens to
+    run under). Every whoami test that asserts on the full response body needs this stubbed."""
+    monkeypatch.setattr(engine_api, "Config", lambda: NS(host=host))
 
 client = TestClient(engine_api.app)
 
@@ -45,10 +53,12 @@ def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_DEV_HOST", raising=False)
+    _fake_config(monkeypatch, "https://prod.example.com/")  # trailing slash -> whoami strips it
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False,
-                        "repo_url": "https://gh/acme/repo", "dev_host": None}
+                        "repo_url": "https://gh/acme/repo", "dev_host": None,
+                        "prod_host": "https://prod.example.com"}
 
 
 def test_whoami_steward_none_when_unset(monkeypatch):
@@ -57,10 +67,26 @@ def test_whoami_steward_none_when_unset(monkeypatch):
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_DEV_HOST", raising=False)
+    _fake_config(monkeypatch, "https://prod.example.com")
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False,
-                        "repo_url": "https://gh/acme/repo", "dev_host": None}
+                        "repo_url": "https://gh/acme/repo", "dev_host": None,
+                        "prod_host": "https://prod.example.com"}
+
+
+def test_whoami_prod_host_reflects_config(monkeypatch):
+    # W3: unlike dev_host (a plain env var), prod_host reads Config().host — the workspace the app
+    # itself runs in (ADR-0006) — and strips a trailing slash to match dev_host's bare-URL shape.
+    _fake_config(monkeypatch, "https://prod.cloud.databricks.com/")
+    body = client.get("/whoami", headers={"x-forwarded-email": "m@x"}).json()
+    assert body["prod_host"] == "https://prod.cloud.databricks.com"
+
+
+def test_whoami_prod_host_none_when_config_has_no_host(monkeypatch):
+    _fake_config(monkeypatch, "")
+    body = client.get("/whoami", headers={"x-forwarded-email": "m@x"}).json()
+    assert body["prod_host"] is None
 
 
 def test_whoami_repo_url_defaults_when_unset(monkeypatch):
@@ -664,10 +690,11 @@ def test_api_prefix_whoami(monkeypatch):
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_DEV_HOST", raising=False)
+    _fake_config(monkeypatch, "https://prod.example.com")
     r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
     assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x",
                                                  "is_admin": False, "repo_url": "https://gh/acme/repo",
-                                                 "dev_host": None}
+                                                 "dev_host": None, "prod_host": "https://prod.example.com"}
 
 
 def test_api_prefix_spaces_threads_token(monkeypatch):
@@ -786,6 +813,85 @@ def test_promote_status_github_error_maps_to_503(monkeypatch):
 
     monkeypatch.setattr(engine_api.app_logic, "promotion_status", boom)
     assert client.get("/api/promote/6/status").status_code == 503
+
+
+# --- W3: resolve prod_space_id (from resource_title) once a promotion is 'deployed' -------------
+
+def test_with_prod_space_id_omits_when_not_deployed(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda *a, **k: [{"space_id": "p1", "title": "Recebíveis"}])
+    status = engine_api._with_prod_space_id({"phase": "open"}, "Recebíveis")
+    assert "prod_space_id" not in status
+
+
+def test_with_prod_space_id_omits_when_no_resource_title(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda *a, **k: [{"space_id": "p1", "title": "Recebíveis"}])
+    status = engine_api._with_prod_space_id({"phase": "deployed"}, None)
+    assert "prod_space_id" not in status
+
+
+def test_with_prod_space_id_none_status_passes_through():
+    assert engine_api._with_prod_space_id(None, "Recebíveis") is None
+
+
+def test_with_prod_space_id_resolves_on_unique_match(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces", lambda *a, **k: [
+        {"space_id": "prod-abc", "title": "Recebíveis"}, {"space_id": "prod-xyz", "title": "Outro"}])
+    status = engine_api._with_prod_space_id({"phase": "deployed"}, "Recebíveis")
+    assert status["prod_space_id"] == "prod-abc"
+
+
+def test_with_prod_space_id_omits_on_duplicate_title(monkeypatch):
+    # NEVER guesses: two live prod Spaces sharing the same title -> omit, don't pick one.
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces", lambda *a, **k: [
+        {"space_id": "prod-a", "title": "Recebíveis"}, {"space_id": "prod-b", "title": "Recebíveis"}])
+    status = engine_api._with_prod_space_id({"phase": "deployed"}, "Recebíveis")
+    assert "prod_space_id" not in status
+
+
+def test_with_prod_space_id_omits_on_no_match(monkeypatch):
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda *a, **k: [{"space_id": "prod-a", "title": "Outro Espaço"}])
+    status = engine_api._with_prod_space_id({"phase": "deployed"}, "Recebíveis")
+    assert "prod_space_id" not in status
+
+
+def test_with_prod_space_id_degrades_on_list_prod_spaces_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("prod unreachable")
+
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces", boom)
+    status = engine_api._with_prod_space_id({"phase": "deployed"}, "Recebíveis")
+    assert "prod_space_id" not in status  # best-effort deep-link never breaks the status read
+
+
+def test_promote_status_endpoint_embeds_prod_space_id_when_deployed(monkeypatch, store):
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=9))
+    client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis"},
+                headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
+    monkeypatch.setattr(engine_api.app_logic, "promotion_status", lambda n, *a, **k: {
+        "pr_state": "closed", "merged": True, "checks": "success", "review_decision": "approved",
+        "deploy": {"status": "completed", "conclusion": "success", "waiting_approval": False, "approver": "pedro"},
+        "pr_url": "https://gh/pr/9", "phase": "deployed"})
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda *a, **k: [{"space_id": "prod-999", "title": "Recebíveis"}])
+    r = client.get("/api/promote/9/status")
+    assert r.status_code == 200 and r.json()["prod_space_id"] == "prod-999"
+
+
+def test_promotion_detail_resolves_prod_space_id_from_cached_status(monkeypatch, store):
+    """The recover-on-open payload (`/promotions/{id}`) reads the CACHED `live_status` — resolution
+    still has to run at READ time (not only on the live poll), since a cached blob may predate this
+    field entirely, or the promotion may never be polled again once terminal."""
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))
+    pid = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis"},
+                      headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
+    store.update_cache(pid, current_phase="deployed", live_status={"phase": "deployed"}, terminal=True)
+    monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
+                        lambda *a, **k: [{"space_id": "prod-777", "title": "Recebíveis"}])
+    body = client.get(f"/api/promotions/{pid}").json()
+    assert body["live_status"]["prod_space_id"] == "prod-777"
 
 
 # --- LB3: persistence on request + recover-on-open (no reviewer re-run) -----

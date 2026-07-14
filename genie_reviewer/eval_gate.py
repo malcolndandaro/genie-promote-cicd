@@ -1,4 +1,4 @@
-"""Eval-run quality gate (S7).
+"""Eval-run quality gate (S7, REST-ified W2).
 
 Runs the Genie benchmark eval, gates promotion on pass-rate, and DEGRADES GRACEFULLY
 (advisory, non-blocking) when there are no benchmark questions or the endpoint is
@@ -9,16 +9,35 @@ Benchmark questions are authored in the Genie UI (not in serialized_space; no CL
 create them), so a space without authored benchmarks hits the advisory path — the common
 case, and exactly what "graceful degradation" means here.
 
-[VERIFY] the live result field shape (`genie-list-eval-results`) against a space with
-authored benchmark questions; `_passed` is intentionally tolerant of field naming.
+Two gates share the same `decide_eval` verdict logic:
+  - `run_eval_gate` — the ORIGINAL, shells out to the `databricks` CLI. Kept for local/script
+    use (a profile + the CLI on PATH); the deployed app's Apps container has no CLI, which is
+    why it always degraded to advisory there.
+  - `run_eval_gate_rest` (W2) — the one the app actually uses now: the typed Genie eval-run SDK
+    (`WorkspaceClient.genie.genie_create_eval_run`/`genie_get_eval_run`), so a real eval-run runs
+    from the deployed app too. Verified live against the dev demo space (24 benchmark questions):
+    `genie_create_eval_run` returns a `GenieEvalRunResponse` immediately (status RUNNING/
+    NOT_STARTED); `genie_get_eval_run` polls the SAME shape until a terminal `eval_run_status`
+    (DONE/EVALUATION_CANCELLED/EVALUATION_FAILED/EVALUATION_TIMEOUT); a DONE run carries
+    `num_correct`/`num_done`/`num_needs_review`/`num_questions` — `num_done` was absent on
+    in-flight (RUNNING) list entries but present once terminal, so the pass-rate is only computed
+    at DONE, never inferred from a partial count.
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 
 _PASS_TOKENS = {"PASS", "PASSED", "SUCCESS", "CORRECT", "TRUE", "OK"}
 _NO_BENCH = "no benchmark"
+
+# W2: how long run_eval_gate_rest waits for a real eval-run to reach a terminal status before
+# degrading to "in progress, not awaited" — an eval-run can outlive one review request, and this
+# gate must never block a promotion review indefinitely on it. Config-driven (ADR-0004).
+_DEFAULT_WAIT_SECONDS = float(os.environ.get("APP_EVAL_WAIT_SEC", "45"))
+_TERMINAL_STATUSES = {"DONE", "EVALUATION_CANCELLED", "EVALUATION_FAILED", "EVALUATION_TIMEOUT"}
 
 
 def _passed(item: dict) -> bool:
@@ -91,3 +110,66 @@ def run_eval_gate(space_id: str, profile: str, threshold: float = 0.8) -> dict:
     results = (data.get("results") or data.get("eval_results")
                or (data if isinstance(data, list) else []))
     return decide_eval(results, threshold)
+
+
+def _status_name(status) -> str:
+    """Normalize an `EvaluationStatusType` (SDK enum) or a plain string to its bare name (mirrors
+    `app_logic._priv_name`'s enum/str normalization) — tests exercise both shapes."""
+    return getattr(status, "value", status) or ""
+
+
+def run_eval_gate_rest(space_id: str, *, client, threshold: float = 0.8,
+                       wait_seconds: float | None = None, poll_interval: float = 5.0) -> dict:
+    """REST/SDK-based eval-run gate (W2) — what the deployed app actually calls now, in place of
+    `run_eval_gate`'s `databricks` CLI subprocess (absent on the Apps container). `client` is a
+    `WorkspaceClient` (or a fake exposing the same `.genie.genie_create_eval_run`/
+    `.genie.genie_get_eval_run` shape) targeting the workspace the Space lives in — the caller
+    resolves that (dev-sp or a profile; see `app_logic.review_space`).
+
+    Creates the run, then polls `genie_get_eval_run` until `eval_run_status` reaches a terminal
+    value or `wait_seconds` elapses (default `APP_EVAL_WAIT_SEC`, ~45s) — a real eval-run can
+    outlive one review request, so this NEVER blocks a promotion review indefinitely on it: a
+    still-running run past the budget degrades to an advisory "in progress, not awaited" result
+    rather than a timeout error.
+
+    NEVER raises: any failure (no benchmark questions authored, the eval-run API unreachable, a
+    poll error, a non-DONE terminal status) degrades to the SAME advisory `decide_eval` path the
+    CLI gate uses — an eval-run is a quality signal, never infrastructure a promotion can be
+    hard-blocked on.
+
+    Pass-rate is `num_correct / num_done` at DONE — a question still `needs_review` (not yet a
+    confirmed GOOD/BAD assessment) counts as NOT passed, the conservative read: an ambiguous
+    result should never look like a pass. Reuses `decide_eval` (a synthetic per-question list of
+    that many passes/fails) for the actual threshold/severity decision + PT copy, so there is ONE
+    place that owns the pass/block boundary regardless of which gate produced the counts.
+    """
+    wait_seconds = _DEFAULT_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    try:
+        run = client.genie.genie_create_eval_run(space_id)
+    except Exception as e:  # noqa: BLE001 — e.g. no benchmark questions authored on this Space
+        reason = _NO_BENCH if _NO_BENCH in str(e).lower() else str(e)[:160]
+        return decide_eval(None, threshold, available=False, reason=reason)
+
+    deadline = time.monotonic() + wait_seconds
+    status = _status_name(run.eval_run_status)
+    while status not in _TERMINAL_STATUSES and time.monotonic() < deadline:
+        time.sleep(poll_interval)
+        try:
+            run = client.genie.genie_get_eval_run(space_id, run.eval_run_id)
+        except Exception as e:  # noqa: BLE001 — transient poll failure: degrade, never crash the review
+            return decide_eval(None, threshold, available=False, reason=f"poll de eval-run falhou: {e}")
+        status = _status_name(run.eval_run_status)
+
+    if status not in _TERMINAL_STATUSES:
+        return {"status": "advisory", "pass_rate": None, "n": run.num_questions or 0,
+                "summary": "🟡 eval-run em execução — resultado não aguardado (acompanhe no Genie)."}
+    if status != "DONE":
+        return decide_eval(None, threshold, available=False,
+                           reason=f"eval-run terminou como {status.lower()}")
+
+    n_done = run.num_done or 0
+    if n_done == 0:
+        return decide_eval([], threshold)  # -> "sem perguntas de benchmark" advisory
+    n_correct = run.num_correct or 0
+    synthetic = [{"passed": True}] * n_correct + [{"passed": False}] * max(n_done - n_correct, 0)
+    return decide_eval(synthetic, threshold)

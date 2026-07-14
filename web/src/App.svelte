@@ -96,7 +96,12 @@
       promoting={promotion.phase === 'reviewing'}
     />
   {:else if router.route.id === 'espacos'}
-    <MeusEspacos {promotion} userEmail={who?.email ?? null} devHost={who?.dev_host ?? null} />
+    <MeusEspacos
+      {promotion}
+      userEmail={who?.email ?? null}
+      devHost={who?.dev_host ?? null}
+      prodHost={who?.prod_host ?? null}
+    />
   {:else if router.route.id === 'promocoes'}
     <MinhasPromocoes
       {who}

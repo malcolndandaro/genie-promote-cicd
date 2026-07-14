@@ -349,11 +349,18 @@ def whoami(
     is the distinct approver for the separation-of-duties model (SV4). `dev_host` (G5) is the dev
     workspace host (`APP_DEV_HOST`, the same one `rehydrate.py` targets) — exposed purely so the SPA
     can build a deep-link to a just-rehydrated dev Space; `None` when unconfigured (local/offline).
+    `prod_host` (W3) is the PROD workspace host the app itself runs in — unlike `dev_host` there is
+    no separate `APP_PROD_HOST` config var to read (ADR-0006: prod is just wherever the app's own
+    `Config()` resolves to, the same source `_verified_email` already uses to verify an OBO token
+    against this workspace), so it's read from `Config().host` and stripped of a trailing slash to
+    match `dev_host`'s bare-URL shape; exposed purely so the SPA can build an "Abrir Genie em
+    produção" deep-link once a promotion reaches `deployed` (see `_with_prod_space_id`).
     """
     verified = _verified_email(x_forwarded_access_token, authorization)
     return {"email": x_forwarded_email, "steward": _steward_display(),
             "is_admin": _is_admin(verified), "repo_url": _repo_url(),
-            "dev_host": os.environ.get("APP_DEV_HOST")}
+            "dev_host": os.environ.get("APP_DEV_HOST"),
+            "prod_host": (Config().host or "").rstrip("/") or None}
 
 
 @api.get("/spaces")
@@ -627,14 +634,44 @@ def promote_preview(
     return _engine_call("promote_preview", _run)
 
 
+def _with_prod_space_id(status: dict | None, resource_title: str | None) -> dict | None:
+    """W3: once a promotion has reached `deployed`, embed the resolved PROD Genie Space id so the
+    SPA can render an "Abrir Genie em produção" deep-link. The promotion's own `resource_id` is the
+    DEV Space id (a Promotion's identity is the Space AUTHORED in dev — Genie mints a brand-new id
+    on `create_space`, it is never the same id in prod), so the prod id has to be RESOLVED, the same
+    way `apply_access.py::resolve_space_id` does: matching the promotion's stored `resource_title`
+    against the live prod listing (`app_logic.list_prod_spaces`).
+
+    Resolved FRESH on every call rather than persisted — cheap (title is stable once deployed, so
+    there's nothing to invalidate) and means a promotion cached BEFORE this field existed still
+    picks it up on its next read, with no backfill/migration needed. Client-side polling already
+    stops at the `deployed` phase (a terminal phase), so this never becomes a per-5s-poll cost.
+
+    NEVER guesses: a `resource_title` that matches zero or MORE THAN ONE live prod Space omits the
+    field entirely (same non-ambiguity rule `apply_access.py`'s own resolution enforces) — the UI
+    hides the button rather than link to the wrong, or a nonexistent, Space."""
+    if not status or status.get("phase") != "deployed" or not resource_title:
+        return status
+    try:
+        matches = [s["space_id"] for s in app_logic.list_prod_spaces() if s.get("title") == resource_title]
+    except Exception:  # noqa: BLE001 — a best-effort deep-link must never break the status read
+        matches = []
+    if len(matches) == 1:
+        status = {**status, "prod_space_id": matches[0]}
+    return status
+
+
 @api.get("/promote/{number}/status")
 def promote_status(number: int) -> dict:
     """GH3 + LB4: live status of a promotion PR (checks + merge + prod deploy/gate), read as the BOT
     (app SP). On each read it RECONCILES the persisted promotion against this live status — appending
     any newly-reached audit events (GitHub-sourced identities) + refreshing the cached status — so
-    the audit trail self-heals + a reload renders the cached status instantly. Reflect, never assert."""
+    the audit trail self-heals + a reload renders the cached status instantly. Reflect, never assert.
+    W3: also resolves `prod_space_id` onto the response once the phase is `deployed` (see
+    `_with_prod_space_id`)."""
     status = _engine_call("promotion_status", lambda: app_logic.promotion_status(number))
     store = getattr(app.state, "store", None)
+    promotion = None
     if store is not None:
         promotion = store.find_by_pr(number)
         if promotion is not None:
@@ -644,7 +681,7 @@ def promote_status(number: int) -> dict:
                 reconcile_mod.reconcile(store, promotion, status, app_logic.github_app_factory)
             except Exception:  # noqa: BLE001 — a reconcile hiccup must not break the status read
                 logger.exception("reconcile failed for PR #%s", number)
-    return status
+    return _with_prod_space_id(status, promotion.resource_title if promotion is not None else None)
 
 
 # --- A3/F1: prod->dev rehydrate (one-click reseed, no git PR) ---------------
@@ -1060,7 +1097,10 @@ def get_promotion(
         "pr": {"number": p.pr_number, "url": p.pr_url} if p.pr_number else None,
         # The cached status lets the SPA render the phase badge IMMEDIATELY on load (LB4), before the
         # first live poll lands. The audit trail (append-only, GitHub-attributed) drives the trail view.
-        "live_status": p.live_status,
+        # W3: re-resolved here too (not just the live poll) — the cache may predate this field, or
+        # this promotion may never be polled again once terminal, so the deep-link is enriched at
+        # READ time, not baked in only at the moment it was cached.
+        "live_status": _with_prod_space_id(p.live_status, p.resource_title),
         "audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)],
     }
 

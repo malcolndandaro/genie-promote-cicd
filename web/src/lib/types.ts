@@ -15,6 +15,10 @@ export interface Whoami {
   /** The dev workspace host (G5, `APP_DEV_HOST`) — lets the SPA build a deep-link to a Space just
    * rehydrated back into dev. `null`/absent when unconfigured (local/offline; the link is omitted). */
   dev_host?: string | null;
+  /** W3: the PROD workspace host the app itself runs in — lets the SPA build an "Abrir Genie em
+   * produção" deep-link once a promotion reaches `deployed`. `null`/absent when it can't be
+   * resolved (local/offline; the link is omitted). */
+  prod_host?: string | null;
 }
 
 /**

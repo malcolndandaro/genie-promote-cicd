@@ -13,8 +13,10 @@
     userEmail: string | null;
     /** The dev workspace host (G5) — threaded down to PromotionReview's RehydrateAction. */
     devHost?: string | null;
+    /** W3: the prod workspace host — threaded down to PromotionReview's "Abrir Genie em produção". */
+    prodHost?: string | null;
   }
-  let { promotion, userEmail, devHost = null }: Props = $props();
+  let { promotion, userEmail, devHost = null, prodHost = null }: Props = $props();
 
   // The user's promotable resources (OBO). In $state so an error is retryable.
   let resourcesP = $state(getResources());
@@ -103,7 +105,7 @@
   {/if}
 
   <!-- The active promotion's review/pipeline/approval (in-place below the grid). -->
-  <PromotionReview {promotion} {userEmail} {devHost} />
+  <PromotionReview {promotion} {userEmail} {devHost} {prodHost} />
 </div>
 
 <style>

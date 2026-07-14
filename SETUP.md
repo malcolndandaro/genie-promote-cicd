@@ -1,15 +1,14 @@
-# CI/CD go-live runbook (S3)
+# CI/CD go-live runbook (S3, bootstrap order per ADR-0006)
 
-> **ADR-0006/A1 note:** the `genie-promote-app` App + its Lakebase instance moved from the `dev`
-> target to `prod` (the app is now a durable, prod-hosted control plane — see
-> `docs/adr/0006-app-in-prod-cross-workspace-reach.md`). This runbook predates that move and still
-> describes app/Lakebase provisioning as **dev target only** below — treat every `-p cerc-mlops-dev`
-> in the *GitHub App (bot)* and *Lakebase* sections as needing to become `-p <prod-profile>` /
-> `-t prod`, and see the README's *"Governance console: app-in-prod, cross-workspace reach"* section
-> for the current picture. A full rewrite of this runbook is tracked as follow-up (not part of A1).
+The `genie-promote-app` App + its Lakebase instance live in the **prod** workspace (a durable,
+prod-hosted control plane — `docs/adr/0006-app-in-prod-cross-workspace-reach.md`); the app reaches
+into **dev** only for the Genie-API operations that must run there, via a standing
+**dev-reader/writer service principal**. That split drives the bootstrap order below: the CI/CD SP +
+prod app/Lakebase come up FIRST (nothing governance-related works without them), the dev-reader/
+writer SP is a SEPARATE, later step that unlocks the promotion export + rehydrate paths.
 
-The pipeline code is complete and committed. Three human steps make it **live** —
-they need your GitHub account + workspace-admin + this machine, so they're not
+The pipeline code is complete and committed. The human steps below make it **live** —
+they need your GitHub account + workspace-admin on BOTH workspaces + this machine, so they're not
 done autonomously. All are scripted.
 
 ## What's already done (autonomous)
@@ -24,20 +23,35 @@ done autonomously. All are scripted.
 - `scripts/provision_ci.sh` — creates the SP, grants least-privilege, generates the
   OAuth secret, sets repo vars/secret, and prints the gate + runner steps.
 
-## Go-live (3 steps, ~10 min)
+## Go-live — prod control plane first (ADR-0006), ~15 min
 1. **Create the repo + push**
    ```bash
-   cd genie-cicd-app
+   cd genie-promote-cicd
    gh repo create <owner>/genie-promote --private --source . --remote origin --push
    ```
-2. **Provision CI/CD identity + gate**
+2. **Provision the CI/CD identity + gate (prod)**
    ```bash
    GH_REPO=<owner>/genie-promote bash scripts/provision_ci.sh
    ```
-   Then add **Pedro (Steward)** as the required reviewer on the `prod` Environment.
-3. **Register the self-hosted runner** (the one piece that needs this machine —
+   This grants the CI/CD SP UC `MANAGE` on the domain catalog (needed so `apply_access.py` can grant
+   *other* declared principals, not just itself — workspace-admin alone does not imply UC `MANAGE`).
+   Then add your **Steward** as the required reviewer on the `prod` Environment.
+3. **Set the DEV repo variables** — `deploy.yml` bakes these into the deployed app's `app.yaml`
+   (`APP_DEV_HOST`/`APP_DEV_WAREHOUSE_ID`) so the prod-hosted app knows which dev workspace to reach
+   into (ADR-0004: config-driven, never hardcoded):
+   ```bash
+   gh variable set DATABRICKS_DEV_HOST         --repo <owner>/genie-promote --body "https://your-dev-workspace.cloud.databricks.com"
+   gh variable set DATABRICKS_DEV_WAREHOUSE_ID --repo <owner>/genie-promote --body "<dev sql warehouse id>"
+   ```
+4. **Register the self-hosted runner** (the one piece that needs this machine —
    both workspaces enforce IP access lists, so GitHub-hosted runners are rejected).
    The exact commands are printed by `provision_ci.sh` step 6.
+5. **Push to `main`** (or merge a first PR) to deploy the app + Lakebase to prod — see *Verify*
+   below. Nothing governance-related (access requests, admin console, roles, rehydrate) works until
+   this lands: the app must start successfully against a migrated, empty Lakebase first.
+6. **Bootstrap the dev-reader/writer SP** (`provision_dev_sp.sh`, below) — a SEPARATE, later step.
+   It unlocks the promotion export + rehydrate paths, not the app-in-prod milestone itself, so it's
+   fine to do this after the app is already live.
 
 ## Why a self-hosted runner (the S3 blocker)
 `enableIpAccessLists=true` on both `databricks-dev` and `databricks-prod`. A
@@ -65,47 +79,51 @@ now only renders + deploys dev's `setup` job (no app there anymore).
 
 ## Verify (after go-live)
 Open a PR that touches a resource → `pr-checks` validates → merge → `deploy-prod`
-pauses on the prod gate → Pedro approves → SP runs `bundle deploy -t prod`.
+pauses on the prod gate → the Steward approves → SP runs `bundle deploy -t prod`.
 
 ## GitHub App (bot) for the in-app PR integration (GH1)
 
 The app opens promotion PRs + posts review comments as a **GitHub App (bot)** — never a human PAT
-or the Databricks SP. To provision (one-time, HITL):
+or the Databricks SP. These credentials are workspace-agnostic (an App ID/installation ID/private
+key have nothing to do with dev vs. prod), but they must land in a secret scope the app's SP can
+read *in the workspace the app actually runs in* — **prod**, since ADR-0006 (they used to be
+provisioned in dev, back when the app was dev-hosted; that no longer applies). To provision
+(one-time, HITL):
 
-1. **github.com/settings/apps → New GitHub App.** Name `genie-promote-bot`; disable the webhook;
-   repository permissions: **Contents: RW, Pull requests: RW, Issues: RW, Deployments: RO,
+1. **github.com/settings/apps → New GitHub App.** Name it (e.g. `genie-promote-bot`); disable the
+   webhook; repository permissions: **Contents: RW, Pull requests: RW, Issues: RW, Deployments: RO,
    Actions: RO** (Metadata RO is automatic). Install scope: only this account.
-2. **Generate a private key** (downloads a `.pem`) and **Install** the App on `genie-promote-cicd`.
+2. **Generate a private key** (downloads a `.pem`) and **Install** the App on your repo.
 3. Capture the **App ID** (app page) and **Installation ID** (`GET /app/installations` as the App,
-   or the install URL). The app slug here is `genie-promote-bot` (App ID 4146857, installation
-   142628812 on `malcolndandaro`).
-4. **Store the three values** in a Databricks secret scope the app's SP can read:
+   or the install URL).
+4. **Store the three values** in a Databricks secret scope the app's SP can read — in **prod**:
    ```
-   databricks secrets create-scope genie_promote -p cerc-mlops-dev
-   databricks secrets put-secret  genie_promote github_app_id          --string-value <APP_ID>          -p cerc-mlops-dev
-   databricks secrets put-secret  genie_promote github_installation_id --string-value <INSTALLATION_ID> -p cerc-mlops-dev
-   databricks secrets put-secret  genie_promote github_app_private_key --string-value "$(cat key.pem)"  -p cerc-mlops-dev
-   databricks secrets put-acl     genie_promote <app-sp-client-id> READ -p cerc-mlops-dev
+   databricks secrets create-scope genie_promote -p <prod-profile>
+   databricks secrets put-secret  genie_promote github_app_id          --string-value <APP_ID>          -p <prod-profile>
+   databricks secrets put-secret  genie_promote github_installation_id --string-value <INSTALLATION_ID> -p <prod-profile>
+   databricks secrets put-secret  genie_promote github_app_private_key --string-value "$(cat key.pem)"  -p <prod-profile>
+   databricks secrets put-acl     genie_promote <app-sp-client-id> READ -p <prod-profile>
    ```
-   The app SP is `databricks apps get genie-promote-app -o json | .service_principal_client_id`.
+   The app SP is `databricks apps get genie-promote-app -p <prod-profile> -o json | .service_principal_client_id`.
 5. **Verify** the bot can authenticate: mint an App JWT (RS256, iss=App ID) → `GET /app` →
    `POST /app/installations/<id>/access_tokens` → `GET /repos/.../<repo>` returns 200.
 
 The app reads these at runtime (GH2 wires the read path: app.yaml `valueFrom` / runtime SDK). Never
 commit the `.pem`; if it ever transits an insecure channel, regenerate it in the App's settings.
 
-## Lakebase (durable promotion state / audit / cache) — provisioning + config (LB1, ADR-0005)
+## Lakebase (durable promotion state / audit / cache) — provisioning + config (LB1, ADR-0005/0006)
 
-The app persists promotions, review snapshots, and an append-only audit trail in **Lakebase
-(Databricks Postgres)** — a durable index + audit log + status cache over GitHub-as-truth (ADR-0005).
-It is provisioned **all-DABs, config-driven** (ADR-0004) and lives with the app (**dev target only** —
-the app is the dev front door; prod is just the promotion target, no app).
+The app persists promotions, AccessSpecs, access requests, roles, rule overrides, and an
+append-only audit trail in **Lakebase (Databricks Postgres)** — a durable index + audit log + status
+cache over GitHub-as-truth (ADR-0005). It is provisioned **all-DABs, config-driven** (ADR-0004) and
+lives with the app in the **prod target** (ADR-0006 — prod is the durable control plane; dev is wiped
+on a ~7-day cycle and cannot hold governance state).
 
-**What deploys it:** the dev target in `databricks.yml` declares a `database_instances` resource
-(`promote_db`) and binds it to `promote_app` via the app's `database` resource. `bash
-scripts/deploy_dev.sh -p cerc-mlops-dev` (or `bundle deploy -t dev`) provisions the instance and the
-binding. The `/database/` API provisions an **autoscaling-backed** instance (CU_1 floor,
-scale-to-zero) — not a fixed bill.
+**What deploys it:** the prod target in `databricks.yml` declares a `database_instances` resource
+(`promote_db`) and binds it to `promote_app` via the app's `database` resource. `bundle deploy -t
+prod` (after `bash scripts/build_promote_app.sh` — see *Local deploys* above) provisions both (see
+the ordering note below). The `/database/` API provisions an **autoscaling-backed** instance (CU_1
+floor, scale-to-zero) — not a fixed bill.
 
 **Config knobs** (`databricks.yml` `variables:`, override with `--var` or per-target) — a new
 customer changes only these and redeploys:
@@ -144,7 +162,7 @@ github_app_factory)` after building the store from the SP-OAuth path.
 
 **Connectivity smoke** (`SELECT 1` via OAuth, no password):
 ```bash
-python scripts/verify_lakebase.py --profile cerc-mlops-dev          # local operator (your identity)
+python scripts/verify_lakebase.py --profile <prod-profile>          # local operator (your identity)
 # on the deployed app the same logic runs as the SP off the injected PG* env
 ```
 
@@ -161,3 +179,43 @@ verify with the default schema first, *your* identity creates + owns `genie_prom
 then locked out. `scripts/verify_lakebase_store.py` defaults to a throwaway schema
 (`lb_verify_local`, dropped after) for exactly this reason — pass `--schema genie_promote` only after
 the deployed app owns it (and only if your identity has access).
+
+## Dev-reader/writer SP — bootstrap + secret replication (A2, ADR-0006)
+
+The prod-hosted app has no forwarded dev token (OBO cannot span workspaces), so every dev-side Genie
+call — list/export at promotion time, rehydrate — runs as a **standing dev-reader/writer service
+principal**, scoped to the Genie APIs plus the minimum UC/warehouse reach an export needs (never
+`SELECT`, never other catalogs). This is a **separate bootstrap step from Go-live above** — it
+unlocks the promotion export + rehydrate paths, not the app-in-prod milestone itself, and it's safe
+to do any time after the app is live.
+
+1. **Provision (and re-run after every dev workspace wipe — this is a self-heal, not one-time)**:
+   ```bash
+   DEV_WAREHOUSE_ID=<dev sql warehouse id> \
+   DEV_SPACE_IDS=<comma-separated existing dev Genie space ids, if any> \
+     bash scripts/provision_dev_sp.sh   # DEV_PROFILE defaults to your dev CLI profile — override it
+   ```
+   This creates (or reuses) the SP in **dev**, re-asserts workspace access + warehouse `CAN_USE` +
+   per-Space Genie `CAN_MANAGE` + the `dev_<domain>` catalog binding/grants, and mints an OAuth
+   secret **only if the currently-stored one is no longer valid** — never on every routine re-run.
+2. **Replicate the SP's credentials into PROD (a manual step — not automated).** The script above
+   writes `dev_sp_client_id`/`dev_sp_client_secret` into a secret scope in the **dev** workspace (its
+   own bookkeeping, so it can re-validate the stored secret's freshness on the next self-heal run).
+   But the app reads those SAME keys **at runtime as its own (prod) identity** — Databricks secret
+   scopes are per-workspace, so a scope of the same name in dev is a different object than one in
+   prod. Copy the two values into a secret scope of the same name (the `dev_sp_secret_scope` bundle
+   variable, default `genie_promote`) **in prod**, and grant the app SP READ on it — mirroring exactly
+   how the GitHub bot's credentials already work (above):
+   ```bash
+   CLIENT_ID=$(databricks secrets get-secret genie_promote dev_sp_client_id -p <dev-profile> -o json | python3 -c "import json,sys,base64;print(base64.b64decode(json.load(sys.stdin)['value']).decode())")
+   CLIENT_SECRET=$(databricks secrets get-secret genie_promote dev_sp_client_secret -p <dev-profile> -o json | python3 -c "import json,sys,base64;print(base64.b64decode(json.load(sys.stdin)['value']).decode())")
+   databricks secrets create-scope genie_promote -p <prod-profile>   # no-op if it already exists (GitHub bot creds may already live here)
+   databricks secrets put-secret genie_promote dev_sp_client_id     --string-value "$CLIENT_ID"     -p <prod-profile>
+   databricks secrets put-secret genie_promote dev_sp_client_secret --string-value "$CLIENT_SECRET" -p <prod-profile>
+   databricks secrets put-acl    genie_promote <app-sp-client-id> READ -p <prod-profile>
+   ```
+   Re-run this replication step whenever `provision_dev_sp.sh` actually mints a fresh secret (it
+   prints whether it did) — a routine self-heal re-run that reuses the existing secret needs no
+   re-replication. No app redeploy is needed either way: the app reads the scope live, at call time.
+3. **Verify**: request a promotion in the app for a dev Space — a `DevEnvironmentNotBootstrapped`
+   error (actionable, distinct from a plain access-denied) means step 1 or 2 above is still missing.
