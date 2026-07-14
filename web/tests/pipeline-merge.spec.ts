@@ -168,3 +168,66 @@ test('deploy_failed with no fetched detail (bot read hiccup) → still reprovado
   await expect(step(page, 'Deploy em produção (service principal)')).toContainText('reprovado');
   await expect(page.getByText('Ver detalhes do deploy')).toHaveCount(0);
 });
+
+// W3: "Abrir Genie em produção" — a deep-link to the promoted Space, once it's actually deployed.
+// The engine resolves `prod_space_id` server-side (title match against the live prod listing) and
+// the SPA only ever renders the link when BOTH that id AND `/api/whoami.prod_host` are present —
+// never a guess from a partial answer.
+const DEPLOYED = () => liveStatus({
+  merged: true,
+  pr_state: 'closed',
+  deploy: { status: 'completed', conclusion: 'success', waiting_approval: false, run_url: 'r', run_id: 9, approver: 'pedro' },
+  phase: 'deployed',
+});
+
+test('deployed with a resolved prod_space_id + prod_host → shows the "Abrir Genie em produção" deep-link', async ({
+  page,
+}) => {
+  await page.route('**/api/whoami', (route) =>
+    route.fulfill({
+      json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com',
+             prod_host: 'prod.example.com' },
+    }),
+  );
+  await promote(page, { ...DEPLOYED(), prod_space_id: 'prod-999' });
+  const link = page.getByRole('link', { name: 'Abrir Genie em produção ↗' });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute('href', 'https://prod.example.com/genie/rooms/prod-999');
+});
+
+test('deployed but prod_space_id could not be resolved (no/ambiguous title match) → the deep-link is omitted', async ({
+  page,
+}) => {
+  await page.route('**/api/whoami', (route) =>
+    route.fulfill({
+      json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com',
+             prod_host: 'prod.example.com' },
+    }),
+  );
+  await promote(page, DEPLOYED()); // no prod_space_id on the status payload
+  await expect(page.getByText('Implantado em produção')).toBeVisible(); // deployed, still rendered
+  await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
+});
+
+test('deployed with prod_space_id but no prod_host configured → the deep-link is omitted', async ({ page }) => {
+  // beforeEach's default /api/whoami mock has no prod_host — no override needed here.
+  await promote(page, { ...DEPLOYED(), prod_space_id: 'prod-999' });
+  await expect(page.getByText('Implantado em produção')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
+});
+
+test('not yet deployed (merged, awaiting deploy) → the deep-link never shows even with a resolved id', async ({
+  page,
+}) => {
+  await page.route('**/api/whoami', (route) =>
+    route.fulfill({
+      json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com',
+             prod_host: 'prod.example.com' },
+    }),
+  );
+  // Defensive: the backend only ever resolves prod_space_id when phase === 'deployed' (see
+  // engine_api._with_prod_space_id), but the UI itself must ALSO gate on phase, not merely on the
+  // field's presence, in case a stale/malformed payload carries it early.
+  await promote(page, { ...liveStatus({ merged: true, pr_state: 'closed', phase: 'merged' }), prod_space_id: 'prod-999' });
+  await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
+});

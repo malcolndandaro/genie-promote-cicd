@@ -554,13 +554,18 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
                                              min_benchmark=min_bench, eval01_severity=eval01_severity)
     gate = review_core.decide_gate(findings)
     try:
-        # eval_gate still uses the `databricks` CLI — absent on the Apps container, and
-        # profile is None under OBO. It's advisory by design, so degrade (never break the
-        # review). The authoritative eval-run gate runs in CI with a real profile.
-        eval_res = eval_gate.run_eval_gate(space_id, profile)
-    except Exception:  # noqa: BLE001
+        # W2: a REAL eval-run via the typed Genie REST API (genie_create_eval_run/
+        # genie_get_eval_run) — works from the deployed app (no `databricks` CLI on the Apps
+        # container, unlike the legacy eval_gate.run_eval_gate this replaces). The Space being
+        # reviewed lives in DEV, so this targets the SAME transport export_serialized just used
+        # for the export step above: the dev-reader/writer SP under OBO (scope="dev-sp" — OBO
+        # cannot span workspaces once the app is prod-hosted, ADR-0006), or the given profile
+        # directly for local/offline callers with no user_token.
+        eval_client = _client(scope="dev-sp") if user_token else _client(profile)
+        eval_res = eval_gate.run_eval_gate_rest(space_id, client=eval_client)
+    except Exception as e:  # noqa: BLE001 — never break the review; degrade to advisory
         eval_res = eval_gate.decide_eval(None, available=False,
-                                         reason="eval-run indisponível neste ambiente (sem CLI)")
+                                         reason=f"eval-run indisponível neste ambiente ({e})")
     return {
         "findings": findings, "gate": gate, "eval": eval_res,
         "allowlist_violations": violations, "consumer_group": consumer_group,

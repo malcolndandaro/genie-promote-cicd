@@ -259,6 +259,10 @@ export interface PromoteStatus {
   deploy_detail?: DeployDetail | null;
   pr_url: string;
   phase: PromotePhase;
+  /** W3: the resolved PROD Genie Space id, present ONLY once `phase === 'deployed'` AND the
+   * promotion's title matched exactly one live prod Space (never a guess) — lets the SPA render an
+   * "Abrir Genie em produção" deep-link via `genieSpaceUrl(prod_host, prod_space_id)`. */
+  prod_space_id?: string | null;
 }
 
 /** Read the live status of a promotion PR (bot read; reflects GitHub, never asserts a deploy). */
