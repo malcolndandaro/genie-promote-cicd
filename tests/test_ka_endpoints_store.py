@@ -120,6 +120,13 @@ def test_list_enabled_for_space_excludes_disabled_endpoints(store):
     assert store.list_enabled_for_space("any-space") == []
 
 
+def test_list_enabled_for_space_dicts_is_dataclass_free(store):
+    store.create(name="Global", serving_endpoint_name="ka-g", is_global=True, actor_email="admin@x")
+    dicts = store.list_enabled_for_space_dicts("any-space")
+    assert dicts == [dict(d) for d in dicts]  # plain dicts, not KaEndpoint instances
+    assert dicts[0]["serving_endpoint_name"] == "ka-g"
+
+
 # --- audit trail: append-only -------------------------------------------------------------------
 
 

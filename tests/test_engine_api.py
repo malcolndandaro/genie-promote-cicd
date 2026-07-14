@@ -325,6 +325,50 @@ def test_review_without_access_spec_passes_none_through(monkeypatch):
     assert captured["access_spec_"] is None
 
 
+# --- S7b: /review and /promote thread this space's in-scope, enabled KA endpoints through ------
+
+
+def test_review_threads_scoped_ka_endpoints_into_the_engine(monkeypatch):
+    from ka_endpoints_store import InMemoryBackend as KaInMemoryBackend
+    from ka_endpoints_store import KaEndpointsStore
+
+    ka_store = KaEndpointsStore(KaInMemoryBackend())
+    ka_store.create(name="In scope", serving_endpoint_name="ka-a", scope_space_ids=["01f16e83"],
+                    actor_email="admin@x")
+    ka_store.create(name="Out of scope", serving_endpoint_name="ka-b", scope_space_ids=["other-space"],
+                    actor_email="admin@x")
+    engine_api.app.state.ka_endpoints_store = ka_store
+    try:
+        captured = {}
+
+        def fake_review_space(space_id, *a, ka_endpoints=None, **k):
+            captured["ka_endpoints"] = ka_endpoints
+            return dict(_FAKE_REVIEW)
+
+        monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
+        r = client.post("/review", json={"space_id": "01f16e83"},
+                        headers={"x-forwarded-access-token": "tok-r"})
+        assert r.status_code == 200
+        assert [e["name"] for e in captured["ka_endpoints"]] == ["In scope"]
+    finally:
+        engine_api.app.state.ka_endpoints_store = None
+
+
+def test_review_passes_none_ka_endpoints_when_store_absent(monkeypatch):
+    # No ka_endpoints_store fixture at all — must still work exactly as before S7.
+    captured = {}
+
+    def fake_review_space(space_id, *a, ka_endpoints=None, **k):
+        captured["ka_endpoints"] = ka_endpoints
+        return dict(_FAKE_REVIEW)
+
+    monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
+    r = client.post("/review", json={"space_id": "01f16e83"},
+                    headers={"x-forwarded-access-token": "tok-r"})
+    assert r.status_code == 200
+    assert captured["ka_endpoints"] is None
+
+
 def test_review_requires_space_id():
     r = client.post("/review", json={}, headers={"x-forwarded-access-token": "tok"})
     assert r.status_code == 422  # FastAPI validation: space_id is required

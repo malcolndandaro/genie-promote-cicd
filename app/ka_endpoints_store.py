@@ -170,6 +170,12 @@ class KaEndpointsStore:
         return [e for e in self.list_all()
                if e.enabled and (e.is_global or space_id in e.scope_space_ids)]
 
+    def list_enabled_for_space_dicts(self, space_id: str) -> list[dict]:
+        """Plain dicts — what `app_logic.review_space`/`request_promotion` actually consume
+        (mirrors `rules_store.list_all_dicts()`'s dataclass-free boundary so the pure engine
+        module has zero store dependency)."""
+        return [dataclasses.asdict(e) for e in self.list_enabled_for_space(space_id)]
+
     # -- audit trail (append-only) ---------------------------------------------
     def _append_event(self, ka_endpoint_id: str, event_type: str, *, actor_email: str,
                       detail: Optional[dict] = None) -> KaEndpointAuditEvent:

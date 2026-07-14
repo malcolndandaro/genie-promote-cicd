@@ -536,8 +536,12 @@ def review(
         # handbook_rules.RULES, unchanged from before this slice).
         store = _rules_store()
         overrides = store.list_all_dicts() if store is not None else None
+        # S7b: this space's in-scope, enabled KA endpoints (None/empty when none registered —
+        # additive-only, D5, so a caller with no KA endpoints reviews exactly as before S7).
+        ka_store = _ka_store()
+        ka_endpoints = ka_store.list_enabled_for_space_dicts(body.space_id) if ka_store is not None else None
         result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec,
-                                        rule_overrides=overrides)
+                                        rule_overrides=overrides, ka_endpoints=ka_endpoints)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
         return {k: result[k] for k in _REVIEW_FIELDS}
@@ -651,12 +655,15 @@ def promote(
     spec = body.access_spec.to_engine() if body.access_spec else None
     rules_store_ = _rules_store()
     overrides = rules_store_.list_all_dicts() if rules_store_ is not None else None
+    # S7b: same in-scope/enabled KA endpoint lookup as /review, above.
+    ka_store_ = _ka_store()
+    ka_endpoints = ka_store_.list_enabled_for_space_dicts(body.space_id) if ka_store_ is not None else None
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
             resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides,
-            table_mapping=body.table_mapping),
+            ka_endpoints=ka_endpoints, table_mapping=body.table_mapping),
     )
     store = getattr(app.state, "store", None)
     if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips

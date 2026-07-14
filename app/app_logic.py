@@ -401,6 +401,71 @@ def _claude(system: str, user: str, profile: str, client: WorkspaceClient | None
     return choices[0].message.content if choices and choices[0].message else ""
 
 
+def _query_ka_endpoint(serving_endpoint_name: str, question: str, profile: str,
+                       client: WorkspaceClient | None = None) -> str:
+    """S7b (app-ux-overhaul): query a registered Knowledge Assistant endpoint — same query
+    mechanics as `_claude` (RS1: a KA endpoint IS a serving endpoint, Chat Completions shape),
+    just a single USER message (no system prompt — the KA's OWN indexed knowledge grounds it,
+    not this app's reviewer persona) against a DIFFERENT endpoint name. No explicit client-side
+    timeout (RS1 found no dedicated timeout param on `query()` itself); the SDK's own HTTP
+    client default is relied on, and `_ka_advisory_findings` below catches ANY failure uniformly
+    (timeout, 429, 5xx, not-ready) rather than trying to distinguish them."""
+    w = client or _client(profile)
+    resp = w.serving_endpoints.query(
+        name=serving_endpoint_name,
+        messages=[ChatMessage(role=ChatMessageRole.USER, content=question)],
+        max_tokens=1000,
+    )
+    choices = resp.choices or []
+    return choices[0].message.content if choices and choices[0].message else ""
+
+
+def _ka_question(ctx: dict) -> str:
+    """The one-shot governance Q&A sent to each in-scope KA endpoint — summarizes the space
+    being promoted and asks the KA (grounded on whatever it's indexed, e.g. a handbook) whether
+    it sees anything worth flagging. D5: purely advisory input, never a rule the reviewer must
+    obey — the answer is surfaced as-is, not merged into the reviewer's own judgment."""
+    tables = ", ".join(t["identifier"] for t in ctx.get("tables", [])) or "(nenhuma)"
+    instructions = " | ".join(ctx.get("instructions", [])[:3]) or "(nenhuma)"
+    return (
+        "Este Genie Space está sendo promovido para produção. Com base no conhecimento indexado, "
+        "há alguma preocupação de governança, convenção ou boa prática relevante para este espaço? "
+        f"Tabelas: {tables}. Instruções: {instructions}."
+    )
+
+
+def _ka_advisory_findings(ka_endpoints: list[dict] | None, ctx: dict, profile: str,
+                          client: WorkspaceClient | None = None) -> list[dict]:
+    """S7b: one advisory finding per in-scope, enabled KA endpoint (D5 — additive only, NEVER a
+    BLOCKER; `ka_endpoints` is already filtered to this space's scope by the caller via
+    `KaEndpointsStore.list_enabled_for_space_dicts`). A query failure degrades to a quiet,
+    non-blocking notice (GR1) rather than a silent skip OR a broken review — caught broadly
+    (any Exception), matching this module's existing best-effort pattern for the grant-check
+    preview above."""
+    if not ka_endpoints:
+        return []
+    question = _ka_question(ctx)
+    findings = []
+    for ep in ka_endpoints:
+        rule_id = f"KA:{ep['name']}"
+        try:
+            answer = _query_ka_endpoint(ep["serving_endpoint_name"], question, profile, client=client)
+            findings.append({
+                "severity": "SUGGESTION", "rule_id": rule_id,
+                "citation": f"Knowledge Assistant › {ep['name']}",
+                "message": answer or "(sem resposta)",
+                "suggestion": None,
+            })
+        except Exception as e:  # noqa: BLE001 — advisory-only; a KA outage must never break the review
+            findings.append({
+                "severity": "STYLE", "rule_id": rule_id,
+                "citation": f"Knowledge Assistant › {ep['name']}",
+                "message": f"Knowledge Assistant '{ep['name']}' indisponível — consulta ignorada ({e}).",
+                "suggestion": None,
+            })
+    return findings
+
+
 def build_timeline(checks_ok: bool, gate: dict, eval_res: dict, approved: bool, deployed: bool) -> list[dict]:
     """The promotion status timeline the UI renders (S9)."""
     def st(done, fail=False, running=False):
@@ -489,7 +554,8 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
                  consumer_group: str | None = None, grant_profile: str | None = None,
                  user_token: str | None = None,
                  access_spec_: "access_spec.AccessSpec | None" = None,
-                 rule_overrides: list[dict] | None = None) -> dict:
+                 rule_overrides: list[dict] | None = None,
+                 ka_endpoints: list[dict] | None = None) -> dict:
     """The hero flow: export -> pre-render -> allowlist (ENV-01) + grant check (GRANT-01)
     -> agent review (EVAL-01 deterministic) -> eval gate. Deterministic findings own their
     rule_id (no double-count). Returns findings/gate/eval/allowlist_violations/timeline/prod_serialized.
@@ -499,6 +565,13 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     `rules_config.effective_rules`/`eval01_config` degrade to `handbook_rules.RULES`'s hardcoded
     defaults in that case, so a caller with no store behaves EXACTLY as before this rule ever
     existed.
+
+    ``ka_endpoints`` (S7b, optional) is this space's IN-SCOPE, ENABLED Knowledge Assistant
+    endpoints — `app/ka_endpoints_store.py`'s `KaEndpointsStore.list_enabled_for_space_dicts
+    (space_id)`, or `None`/empty when none are registered/in-scope. Each produces ONE additive
+    advisory finding (never a BLOCKER, D5) via `_ka_advisory_findings`; a query failure degrades
+    to a quiet notice finding rather than breaking the review (GR1) — this never affects the
+    gate the way `deterministic` findings do.
 
     The in-app GRANT-01 preview only runs when an explicit, reachable prod target is
     configured (grant_profile arg or APP_PROD_PROFILE locally) — the prod catalog is
@@ -567,6 +640,10 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     review = review_core.parse_review(_claude(system, user, profile, client=sp))
     findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"],
                                              min_benchmark=min_bench, eval01_severity=eval01_severity)
+    # S7b: additive-only KA advisory findings — appended AFTER finalize_findings owns the
+    # deterministic rule_ids, so decide_gate below sees them but they can never win a BLOCKER
+    # (every KA finding is SUGGESTION or, on failure, STYLE — never BLOCKER, D5).
+    findings = findings + _ka_advisory_findings(ka_endpoints, ctx, profile, client=sp)
     gate = review_core.decide_gate(findings)
     try:
         # W2: a REAL eval-run via the typed Genie REST API (genie_create_eval_run/
@@ -632,6 +709,7 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                       domain: str = DOMAIN, github: GitHubApp | None = None,
                       access_spec_: "access_spec.AccessSpec | None" = None,
                       rule_overrides: list[dict] | None = None,
+                      ka_endpoints: list[dict] | None = None,
                       table_mapping: "dict[str, str] | None" = None) -> dict:
     """GH2 (+ F2 + G7): open (or update) a real promotion PR for a space and post the attributed
     review comment.
@@ -663,7 +741,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     fix/approval loop; pr-checks + the Steward gate (GH4) enforce the outcome.
     """
     full = review_space(space_id, profile=profile, user_token=user_token, domain=domain,
-                        access_spec_=access_spec_, rule_overrides=rule_overrides)
+                        access_spec_=access_spec_, rule_overrides=rule_overrides,
+                        ka_endpoints=ka_endpoints)
     review = {k: full[k] for k in REVIEW_FIELDS}
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the
