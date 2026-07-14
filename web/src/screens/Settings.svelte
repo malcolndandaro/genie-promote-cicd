@@ -23,6 +23,9 @@
     getRules,
     upsertRule,
     resetRule,
+    getPromptTemplate,
+    savePromptTemplate,
+    resetPromptTemplate,
     ApiError,
     isAuthError,
   } from '../lib/api';
@@ -32,11 +35,13 @@
   let rolesP = $state(getRoles());
   let driftP = $state(getAdminDrift());
   let rulesP = $state(getRules());
+  let promptTemplateP = $state(getPromptTemplate());
 
   function refresh(): void {
     rolesP = getRoles();
     driftP = getAdminDrift();
     rulesP = getRules();
+    promptTemplateP = getPromptTemplate();
   }
 
   function errorText(err: unknown): string {
@@ -186,6 +191,57 @@
       customError = e instanceof Error ? e.message : String(e);
     } finally {
       submittingCustom = false;
+    }
+  }
+
+  // --- S8: reviewer prompt template (persona/policy) --------------------------------------------
+  // The admin edits ONLY the persona/policy text (`review_core.DEFAULT_PERSONA`); the PROTECTED_CORE
+  // (prompt-injection defense + JSON output schema) is always appended server-side and is NOT
+  // editable here. The textarea is pre-filled from the current custom override when one is saved,
+  // otherwise from the hardcoded default — so the admin always edits from a valid baseline. A bad
+  // template is rejected server-side (400, via one real test review) and surfaced inline; on
+  // success we reload so the saved value (and its "custom" state) round-trips through the store.
+  let promptText = $state('');
+  let savingPrompt = $state(false);
+  let resettingPrompt = $state(false);
+  let promptError = $state<string | null>(null);
+
+  // Reseed the editable textarea whenever the template (re)loads (initial mount + every refresh()).
+  $effect(() => {
+    promptTemplateP
+      .then((config) => {
+        promptText = config.custom ? config.custom.template_text : config.default;
+      })
+      .catch(() => {
+        /* the {#await} block renders the load error — nothing to seed */
+      });
+  });
+
+  async function savePrompt(): Promise<void> {
+    if (savingPrompt || !promptText.trim()) return;
+    savingPrompt = true;
+    promptError = null;
+    try {
+      await savePromptTemplate(promptText);
+      refresh();
+    } catch (e) {
+      promptError = e instanceof Error ? e.message : String(e);
+    } finally {
+      savingPrompt = false;
+    }
+  }
+
+  async function resetPrompt(): Promise<void> {
+    if (resettingPrompt) return;
+    resettingPrompt = true;
+    promptError = null;
+    try {
+      await resetPromptTemplate();
+      refresh();
+    } catch (e) {
+      promptError = e instanceof Error ? e.message : String(e);
+    } finally {
+      resettingPrompt = false;
     }
   }
 </script>
@@ -416,6 +472,65 @@
       <p class="error" role="alert">{errorText(err)}</p>
     {/await}
   </Card>
+
+  <Card
+    title="Prompt do revisor"
+    subtitle="O texto de persona/política que o agente revisor usa. Mudanças têm efeito imediato na próxima revisão, sem redeploy."
+  >
+    {#snippet actions()}
+      <button type="button" class="refresh" onclick={refresh}>Atualizar</button>
+    {/snippet}
+
+    <p class="muted text-sm">
+      A defesa contra injeção de prompt e o esquema de saída JSON (o "núcleo protegido") são sempre
+      aplicados pelo servidor e NÃO são editáveis aqui — você edita apenas a persona/política.
+    </p>
+
+    {#await promptTemplateP}
+      <Skeleton height="3rem" />
+      <Skeleton height="3rem" width="80%" />
+    {:then config}
+      <div class="prompt-editor">
+        {#if config.custom}
+          <p class="muted text-xs">
+            Template customizado salvo por {config.custom.updated_by} em {config.custom.updated_at}.
+          </p>
+        {:else}
+          <p class="muted text-xs">
+            Nenhum template customizado — editando a partir do padrão do sistema.
+          </p>
+        {/if}
+        <label class="field">
+          <span class="field__label">Persona/política do revisor</span>
+          <textarea class="field__input prompt-textarea" rows="12" bind:value={promptText}></textarea>
+        </label>
+        <div class="row__meta">
+          <Button
+            loading={savingPrompt}
+            disabled={!promptText.trim() || resettingPrompt}
+            onclick={() => savePrompt()}
+          >
+            Salvar
+          </Button>
+          {#if config.custom}
+            <Button
+              variant="ghost"
+              loading={resettingPrompt}
+              disabled={savingPrompt}
+              onclick={() => resetPrompt()}
+            >
+              Restaurar padrão
+            </Button>
+          {/if}
+        </div>
+        {#if promptError}
+          <p class="error" role="alert">Não foi possível salvar o prompt: {promptError}</p>
+        {/if}
+      </div>
+    {:catch err}
+      <p class="error" role="alert">{errorText(err)}</p>
+    {/await}
+  </Card>
 </div>
 
 <style>
@@ -531,5 +646,18 @@
     align-items: center;
     gap: 0.35rem;
     cursor: pointer;
+  }
+  .prompt-editor {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+  .prompt-textarea {
+    width: 100%;
+    resize: vertical;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.85rem;
+    line-height: 1.5;
   }
 </style>

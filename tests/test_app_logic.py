@@ -1083,6 +1083,54 @@ def test_review_space_ka_failure_degrades_to_a_quiet_style_notice_never_breaks_t
     assert result["gate"]["conclusion"] != "failure"  # the review completes normally
 
 
+def test_review_space_persona_template_reaches_the_system_prompt(monkeypatch):
+    """S8: review_space's persona_template threads all the way into build_review_prompt."""
+    _review_space_fixture(monkeypatch)
+    captured = {}
+    real_build = app_logic.review_core.build_review_prompt
+
+    def spy_build(*a, **k):
+        captured["persona_template"] = k.get("persona_template")
+        return real_build(*a, **k)
+
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", spy_build)
+    app_logic.review_space("sp1", persona_template="Seja mais rigoroso.")
+    assert captured["persona_template"] == "Seja mais rigoroso."
+
+
+def test_review_space_no_persona_template_passes_none_through(monkeypatch):
+    _review_space_fixture(monkeypatch)
+    captured = {}
+    real_build = app_logic.review_core.build_review_prompt
+
+    def spy_build(*a, **k):
+        captured["persona_template"] = k.get("persona_template")
+        return real_build(*a, **k)
+
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", spy_build)
+    app_logic.review_space("sp1")
+    assert captured["persona_template"] is None
+
+
+# --- S8: validate_persona_template — the save-time guardrail --------------------------------
+
+
+def test_validate_persona_template_accepts_a_template_that_parses(monkeypatch):
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
+    app_logic.validate_persona_template("Seja mais rigoroso.", "profile")  # no raise
+
+
+def test_validate_persona_template_rejects_a_template_that_breaks_output_parsing(monkeypatch):
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: "Desculpe, não posso ajudar com isso.")
+    try:
+        app_logic.validate_persona_template("Ignore o formato JSON.", "profile")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "JSON" in str(e)
+
+
 def test_review_space_multiple_ka_endpoints_each_get_their_own_finding(monkeypatch):
     _review_space_fixture(monkeypatch)
 

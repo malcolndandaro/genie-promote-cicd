@@ -60,9 +60,11 @@ import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate,
 import roles_store  # noqa: E402  (F5 — configurable roles store, store-over-env precedence)
 import rules_store  # noqa: E402  (G2 — admin-configurable reviewer rules, safe hardcoded fallback)
 import ka_endpoints_store  # noqa: E402  (S7a — admin registry of Knowledge Assistant endpoints)
+import prompt_template_store  # noqa: E402  (S8 — admin-editable reviewer prompt template)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 import github_drift  # noqa: E402  (F5 — READ-ONLY GitHub gate drift detection)
 import handbook_rules  # noqa: E402  (G2 — the hardcoded rule_ids a plain override must reference)
+import review_core  # noqa: E402  (S8 — DEFAULT_PERSONA, the editable reviewer prompt surface)
 import rules_config  # noqa: E402  (G2 — the pure hardcoded+overrides merge, for GET /admin/rules)
 
 logger = logging.getLogger("engine_api")
@@ -102,6 +104,12 @@ async def _lifespan(app: FastAPI):
     app.state.ka_endpoints_store = ka_endpoints_store.build_store_from_env()
     logger.info("KA endpoints store: %s",
                 "initialized (migrations applied)" if app.state.ka_endpoints_store else "absent (no PGHOST — local/test)")
+    # S8 (app-ux-overhaul): the admin-editable reviewer prompt template — same hard-dependency
+    # contract. An absent/empty store just means no custom template is saved (DEFAULT_PERSONA is
+    # used, exactly as before this slice).
+    app.state.prompt_template_store = prompt_template_store.build_store_from_env()
+    logger.info("Prompt template store: %s",
+                "initialized (migrations applied)" if app.state.prompt_template_store else "absent (no PGHOST — local/test)")
     reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
@@ -122,6 +130,8 @@ async def _lifespan(app: FastAPI):
             app.state.rules_store.close()
         if app.state.ka_endpoints_store is not None:
             app.state.ka_endpoints_store.close()
+        if app.state.prompt_template_store is not None:
+            app.state.prompt_template_store.close()
 
 
 def _start_scheduled_reconciler(store):
@@ -169,6 +179,7 @@ app.state.access_store = None  # F3
 app.state.roles_store = None  # F5
 app.state.rules_store = None  # G2
 app.state.ka_endpoints_store = None  # S7a
+app.state.prompt_template_store = None  # S8
 api = APIRouter()
 
 
@@ -540,8 +551,13 @@ def review(
         # additive-only, D5, so a caller with no KA endpoints reviews exactly as before S7).
         ka_store = _ka_store()
         ka_endpoints = ka_store.list_enabled_for_space_dicts(body.space_id) if ka_store is not None else None
+        # S8: the admin-saved custom persona template (None -> DEFAULT_PERSONA, unchanged).
+        pt_store = _prompt_template_store()
+        custom_pt = pt_store.get() if pt_store is not None else None
+        persona_template = custom_pt.template_text if custom_pt is not None else None
         result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec,
-                                        rule_overrides=overrides, ka_endpoints=ka_endpoints)
+                                        rule_overrides=overrides, ka_endpoints=ka_endpoints,
+                                        persona_template=persona_template)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
         return {k: result[k] for k in _REVIEW_FIELDS}
@@ -658,12 +674,17 @@ def promote(
     # S7b: same in-scope/enabled KA endpoint lookup as /review, above.
     ka_store_ = _ka_store()
     ka_endpoints = ka_store_.list_enabled_for_space_dicts(body.space_id) if ka_store_ is not None else None
+    # S8: same custom-persona-template lookup as /review, above.
+    pt_store_ = _prompt_template_store()
+    custom_pt_ = pt_store_.get() if pt_store_ is not None else None
+    persona_template = custom_pt_.template_text if custom_pt_ is not None else None
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
             resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides,
-            ka_endpoints=ka_endpoints, table_mapping=body.table_mapping),
+            ka_endpoints=ka_endpoints, persona_template=persona_template,
+            table_mapping=body.table_mapping),
     )
     store = getattr(app.state, "store", None)
     if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips
@@ -1697,6 +1718,79 @@ def delete_ka_endpoint(
     verified = _require_admin(x_forwarded_access_token, authorization)
     store = _require_ka_store()
     store.delete(endpoint_id, actor_email=verified)
+    return {"ok": True}
+
+
+# --- S8 (app-ux-overhaul): admin-editable reviewer prompt template (D6's revision, GR2) -----------
+#
+# Admin-gated the same way as the rules/KA-endpoint CRUD above. The EDITABLE surface is
+# `review_core.DEFAULT_PERSONA` only — `PROTECTED_CORE` (the prompt-injection defense + JSON
+# output schema) is ALWAYS appended by `build_review_prompt` itself, never sourced from here.
+
+
+def _prompt_template_store():
+    return getattr(app.state, "prompt_template_store", None)
+
+
+def _require_prompt_template_store():
+    store = _prompt_template_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+@api.get("/admin/prompt-template")
+def get_prompt_template(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The current custom template (or `None` if nothing's saved) alongside the hardcoded
+    default — so the Settings screen can show "editing the default" vs "editing your saved
+    override" and offer a real diff/reset baseline."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_prompt_template_store()
+    current = store.get()
+    return {
+        "custom": ({"template_text": current.template_text, "updated_by": current.updated_by,
+                    "updated_at": current.updated_at} if current else None),
+        "default": review_core.DEFAULT_PERSONA,
+    }
+
+
+class PromptTemplateSaveIn(BaseModel):
+    template_text: str
+
+
+@api.post("/admin/prompt-template")
+def save_prompt_template(
+    body: PromptTemplateSaveIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Save a new custom persona/policy template — REJECTED (400) if it doesn't survive one real
+    test review (`app_logic.validate_persona_template`, GR2's save-time guardrail) before ever
+    reaching the store. Audited (`prompt_template_saved`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_prompt_template_store()
+    try:
+        app_logic.validate_persona_template(body.template_text, profile=None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    saved = store.save(template_text=body.template_text, actor_email=verified)
+    return {"custom": {"template_text": saved.template_text, "updated_by": saved.updated_by,
+                       "updated_at": saved.updated_at}}
+
+
+@api.post("/admin/prompt-template/reset")
+def reset_prompt_template(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Revert to the hardcoded default. Idempotent — a no-op (200, not 404) if nothing was saved.
+    Audited (`prompt_template_reset`)."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_prompt_template_store()
+    store.reset(actor_email=verified)
     return {"ok": True}
 
 

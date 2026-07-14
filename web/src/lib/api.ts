@@ -22,6 +22,8 @@ import type {
   RulesList,
   RuleSeverity,
   KaEndpoint,
+  PromptTemplateConfig,
+  PromptTemplateCustom,
   CheckDetail,
   DeployDetail,
 } from './types';
@@ -552,4 +554,25 @@ export function updateKaEndpoint(
 /** Idempotent — a no-op if already gone. */
 export function deleteKaEndpoint(id: string): Promise<{ ok: boolean }> {
   return postJSON(`/api/admin/ka-endpoints/${id}/delete`, {});
+}
+
+// --- S8 (app-ux-overhaul): admin-editable reviewer prompt template (persona/policy only) ---------
+
+/** The current custom persona/policy override (`custom: null` when nothing's saved) plus the
+ * hardcoded `default` persona text. The PROTECTED_CORE (injection defense + JSON output schema) is
+ * appended server-side and is never editable. */
+export function getPromptTemplate(): Promise<PromptTemplateConfig> {
+  return getJSON('/api/admin/prompt-template');
+}
+
+/** Save a new custom persona/policy template. The server REJECTS a template that breaks reviewer
+ * output parsing with HTTP 400 (surfaced as an `ApiError` — the message is the returned `detail`),
+ * so a bad edit never reaches the store. Takes effect on the NEXT review — no redeploy. */
+export function savePromptTemplate(templateText: string): Promise<{ custom: PromptTemplateCustom }> {
+  return postJSON('/api/admin/prompt-template', { template_text: templateText });
+}
+
+/** Revert to the hardcoded default persona. Idempotent — a no-op if nothing was saved. */
+export function resetPromptTemplate(): Promise<{ ok: boolean }> {
+  return postJSON('/api/admin/prompt-template/reset', {});
 }

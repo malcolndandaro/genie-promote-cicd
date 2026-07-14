@@ -466,6 +466,31 @@ def _ka_advisory_findings(ka_endpoints: list[dict] | None, ctx: dict, profile: s
     return findings
 
 
+_VALIDATION_FIXTURE_CTX = {
+    "tables": [], "instructions": ["Validação de template — smoke test, sem espaço real."],
+    "example_sqls": [], "benchmark_questions": [], "benchmark_sqls": [], "n_benchmark": 0, "joins": [],
+}
+
+
+def validate_persona_template(template_text: str, profile: str, client: WorkspaceClient | None = None) -> None:
+    """S8: the save-time guardrail GR2 calls for — runs ONE real test review (a tiny fixture
+    context, no real Genie Space needed since `build_review_prompt` only needs a `ctx` dict) with
+    the CANDIDATE persona template, and raises `ValueError` (-> 400 at the API layer, same
+    convention as every other store's input validation) if the raw response isn't even
+    parseable JSON. `PROTECTED_CORE` is still appended as always (this exercises the exact same
+    `build_review_prompt` path a real review would) — this only catches a persona edit that
+    derails the LLM badly enough to break output parsing, not a template that's merely a bad
+    idea stylistically."""
+    system, user = review_core.build_review_prompt(
+        _VALIDATION_FIXTURE_CTX, handbook_rules.RULES, persona_template=template_text)
+    sp = client or _client(profile)
+    raw = _claude(system, user, profile, client=sp)
+    if not review_core.raw_is_parseable(raw):
+        raise ValueError(
+            "este template fez o revisor responder com algo que não é JSON válido — "
+            "ajuste o texto e tente novamente.")
+
+
 def build_timeline(checks_ok: bool, gate: dict, eval_res: dict, approved: bool, deployed: bool) -> list[dict]:
     """The promotion status timeline the UI renders (S9)."""
     def st(done, fail=False, running=False):
@@ -555,7 +580,8 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
                  user_token: str | None = None,
                  access_spec_: "access_spec.AccessSpec | None" = None,
                  rule_overrides: list[dict] | None = None,
-                 ka_endpoints: list[dict] | None = None) -> dict:
+                 ka_endpoints: list[dict] | None = None,
+                 persona_template: str | None = None) -> dict:
     """The hero flow: export -> pre-render -> allowlist (ENV-01) + grant check (GRANT-01)
     -> agent review (EVAL-01 deterministic) -> eval gate. Deterministic findings own their
     rule_id (no double-count). Returns findings/gate/eval/allowlist_violations/timeline/prod_serialized.
@@ -572,6 +598,12 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     advisory finding (never a BLOCKER, D5) via `_ka_advisory_findings`; a query failure degrades
     to a quiet notice finding rather than breaking the review (GR1) — this never affects the
     gate the way `deterministic` findings do.
+
+    ``persona_template`` (S8, optional) is the admin-saved custom system-prompt persona/policy
+    text (`app/prompt_template_store.py`'s `PromptTemplateStore.get().template_text`), or `None`
+    when nothing's been saved — `review_core.build_review_prompt` falls back to
+    `DEFAULT_PERSONA` in that case. Either way, `PROTECTED_CORE` (the prompt-injection defense +
+    JSON output schema) is ALWAYS appended, never overridable.
 
     The in-app GRANT-01 preview only runs when an explicit, reachable prod target is
     configured (grant_profile arg or APP_PROD_PROFILE locally) — the prod catalog is
@@ -633,7 +665,8 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     effective = rules_config.effective_rules(rule_overrides)
     min_bench, eval01_severity = rules_config.eval01_config(rule_overrides)
     ctx = review_core.build_space_context(prod_space)
-    system, user = review_core.build_review_prompt(ctx, effective, deterministic)
+    system, user = review_core.build_review_prompt(ctx, effective, deterministic,
+                                                    persona_template=persona_template)
     # LLM reviewer = shared operation -> app SP / local profile (a serving scope isn't part of
     # OBO; the reviewer agent doesn't read the user's data, and it never runs against dev).
     sp = _client(profile)
@@ -710,6 +743,7 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                       access_spec_: "access_spec.AccessSpec | None" = None,
                       rule_overrides: list[dict] | None = None,
                       ka_endpoints: list[dict] | None = None,
+                      persona_template: str | None = None,
                       table_mapping: "dict[str, str] | None" = None) -> dict:
     """GH2 (+ F2 + G7): open (or update) a real promotion PR for a space and post the attributed
     review comment.
@@ -742,7 +776,7 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     """
     full = review_space(space_id, profile=profile, user_token=user_token, domain=domain,
                         access_spec_=access_spec_, rule_overrides=rule_overrides,
-                        ka_endpoints=ka_endpoints)
+                        ka_endpoints=ka_endpoints, persona_template=persona_template)
     review = {k: full[k] for k in REVIEW_FIELDS}
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the

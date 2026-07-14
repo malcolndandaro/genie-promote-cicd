@@ -319,3 +319,20 @@ export interface KaEndpoint {
   created_at: string;
   updated_at: string;
 }
+
+/** S8 (app-ux-overhaul): the admin-saved reviewer prompt override — the PERSONA/POLICY text that
+ * REPLACES `review_core.DEFAULT_PERSONA`. Only the persona is editable; the PROTECTED_CORE
+ * (prompt-injection defense + JSON output schema) is always appended server-side and is NOT here. */
+export interface PromptTemplateCustom {
+  template_text: string;
+  updated_by: string;
+  updated_at: string;
+}
+
+/** S8: `GET /admin/prompt-template`'s response — the current custom override (`null` when nothing
+ * is saved and the hardcoded default is in effect) alongside the hardcoded `default` persona text
+ * (so the Settings screen can pre-fill/edit from the default as a baseline and offer a reset). */
+export interface PromptTemplateConfig {
+  custom: PromptTemplateCustom | null;
+  default: string;
+}
