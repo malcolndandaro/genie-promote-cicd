@@ -7,7 +7,7 @@
   import PromotionDetail from './screens/PromotionDetail.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
   import FilaAprovacao from './screens/FilaAprovacao.svelte';
-  import ComingSoon from './screens/ComingSoon.svelte';
+  import RevisaoPromocoes from './screens/RevisaoPromocoes.svelte';
   import Rehidratar from './screens/Rehidratar.svelte';
   import Admin from './screens/Admin.svelte';
   import Auditoria from './screens/Auditoria.svelte';
@@ -56,7 +56,6 @@
   //
   // "Aprovações de acesso" (Approver) is shown for is_approver OR is_admin (S5's backend gate is
   // a superset for backward compat — an existing admin-only deployment keeps this capability).
-  // "Revisão de promoções" (Steward) still routes to a ComingSoon placeholder until S6 builds it.
   //
   // S3: "Minhas promoções" is gone as a nav item — its history list merged into "Meus espaços"
   // (D3). The `promocoes` route still exists for the `#/promocoes/:id` shareable deep-link
@@ -154,10 +153,7 @@
   {:else if router.route.id === 'aprovacoes'}
     <FilaAprovacao />
   {:else if router.route.id === 'revisao'}
-    <ComingSoon
-      title="Aguardando minha revisão"
-      description="Em construção (S6) — um painel com as promoções aguardando revisão do Steward, em todos os espaços."
-    />
+    <RevisaoPromocoes />
   {:else if router.route.id === 'rehidratar'}
     <Rehidratar devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'admin'}

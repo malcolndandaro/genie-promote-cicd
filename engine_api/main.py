@@ -1093,7 +1093,15 @@ def list_promotions(
     at promotion time, per ADR-0005, so this still matches the honest case while no longer trusting
     the header as an authorization input for a DIFFERENT caller's request).
     `scope=all` (cross-user governance view) is ROLE-GATED server-side: only a configured
-    Steward/Admin (by verified identity) gets it; anyone else is denied (403). Bot/SP owns the DB read."""
+    Steward/Admin (by verified identity) gets it; anyone else is denied (403). Bot/SP owns the DB read.
+
+    `scope=steward-queue` (S6, app-ux-overhaul): cross-user, further filtered to promotions
+    currently needing the Steward's OWN attention — phase `open`/`checks_running` (PR review not
+    yet merged) or `awaiting_approval` (the prod deploy gate). Excludes `checks_failed`
+    (the requester's problem to fix, nothing for the Steward to do until it passes),
+    `deploying` (gate already passed), and every terminal phase. Gated on `is_steward OR
+    is_admin` (S1's real Steward persona, superset with Admin for backward compat, mirroring
+    S5's Approver gate)."""
     store = _require_store()
     verified = _verified_email(x_forwarded_access_token, authorization)
     if scope == "mine":
@@ -1102,8 +1110,14 @@ def list_promotions(
         if not _is_admin(verified):
             raise HTTPException(status_code=403, detail="Apenas Stewards/Admins veem todas as promoções.")
         promotions = store.list_promotions(None)  # cross-user
+    elif scope == "steward-queue":
+        if not (_is_steward(verified) or _is_admin(verified)):
+            raise HTTPException(status_code=403,
+                                detail="Apenas Stewards/Admins veem a fila de revisão.")
+        promotions = [p for p in store.list_promotions(None)
+                     if p.current_phase in ("open", "checks_running", "awaiting_approval")]
     else:
-        raise HTTPException(status_code=400, detail="scope inválido; use 'mine' ou 'all'")
+        raise HTTPException(status_code=400, detail="scope inválido; use 'mine', 'all' ou 'steward-queue'")
     return {"promotions": [_promotion_summary(p) for p in promotions]}
 
 

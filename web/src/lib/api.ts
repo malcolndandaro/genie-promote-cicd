@@ -190,7 +190,9 @@ export interface PromotionDetail {
 }
 
 /** The caller's promotions, newest first (LB3 `scope=mine`; `scope=all` is role-gated in LB5). */
-export async function getPromotions(scope: 'mine' | 'all' = 'mine'): Promise<PromotionSummary[]> {
+export async function getPromotions(
+  scope: 'mine' | 'all' | 'steward-queue' = 'mine'
+): Promise<PromotionSummary[]> {
   const data = await getJSON<{ promotions: PromotionSummary[] }>(`/api/promotions?scope=${scope}`);
   return data.promotions ?? [];
 }

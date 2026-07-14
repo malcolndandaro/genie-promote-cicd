@@ -1265,6 +1265,61 @@ def test_scope_all_role_gated(monkeypatch, store):
                                "x-forwarded-email": "admin@x"}).status_code == 400
 
 
+# --- S6 (app-ux-overhaul): scope=steward-queue — cross-user, phase-filtered, is_steward-gated ----
+
+
+def _mk_promotion_with_phase(store, *, pr_number, resource_id="s1", phase, requester="ana@x"):
+    # The filter under test only looks at `current_phase` — the endpoint's own `terminal` field
+    # isn't part of its logic, so no need to force it here.
+    return store.create_promotion(
+        resource_id=resource_id, resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email=requester, pr_number=pr_number, pr_url=f"https://gh/pr/{pr_number}",
+        branch="promote/x", current_phase=phase, live_status={"phase": phase})
+
+
+def test_steward_queue_is_gated_on_is_steward_or_is_admin(monkeypatch, store):
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    monkeypatch.setenv("APP_STEWARDS", "pedro@x")
+    _verify_as(monkeypatch, {"tok-steward": "pedro@x", "tok-rando": "rando@x"})
+    _mk_promotion_with_phase(store, pr_number=30, phase="open")
+
+    ok = client.get("/api/promotions?scope=steward-queue",
+                    headers={"x-forwarded-access-token": "tok-steward"})
+    assert ok.status_code == 200
+    assert client.get("/api/promotions?scope=steward-queue",
+                      headers={"x-forwarded-access-token": "tok-rando"}).status_code == 403
+
+
+def test_steward_queue_filters_to_phases_needing_steward_attention(monkeypatch, store):
+    monkeypatch.setenv("APP_STEWARDS", "pedro@x")
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    _verify_as(monkeypatch, {"tok-steward": "pedro@x"})
+    _mk_promotion_with_phase(store, pr_number=31, phase="open")             # needs review -> IN
+    _mk_promotion_with_phase(store, pr_number=32, phase="checks_running")   # needs review -> IN
+    _mk_promotion_with_phase(store, pr_number=33, phase="awaiting_approval")  # needs deploy gate -> IN
+    _mk_promotion_with_phase(store, pr_number=34, phase="checks_failed")    # requester's problem -> OUT
+    _mk_promotion_with_phase(store, pr_number=35, phase="deploying")        # gate already passed -> OUT
+    _mk_promotion_with_phase(store, pr_number=36, phase="deployed")         # terminal -> OUT
+    _mk_promotion_with_phase(store, pr_number=37, phase="closed")           # terminal -> OUT
+
+    r = client.get("/api/promotions?scope=steward-queue",
+                   headers={"x-forwarded-access-token": "tok-steward"})
+    assert r.status_code == 200
+    assert {p["pr_number"] for p in r.json()["promotions"]} == {31, 32, 33}
+
+
+def test_steward_queue_is_cross_user_not_scoped_to_the_stewards_own_promotions(monkeypatch, store):
+    monkeypatch.setenv("APP_STEWARDS", "pedro@x")
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    _verify_as(monkeypatch, {"tok-steward": "pedro@x"})
+    _mk_promotion_with_phase(store, pr_number=38, phase="open", requester="ana@x")
+    _mk_promotion_with_phase(store, pr_number=39, phase="open", requester="bob@x")
+
+    r = client.get("/api/promotions?scope=steward-queue",
+                   headers={"x-forwarded-access-token": "tok-steward"})
+    assert {p["pr_number"] for p in r.json()["promotions"]} == {38, 39}
+
+
 def test_status_read_reconciles_and_caches(monkeypatch, store):
     # Persist a promotion (PR 6), then a status read must reconcile -> append GitHub events + cache.
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=6))
