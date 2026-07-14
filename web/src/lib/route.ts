@@ -11,6 +11,8 @@ export type RouteId =
   | 'espacos'
   | 'promocoes'
   | 'acesso'
+  | 'aprovacoes'
+  | 'revisao'
   | 'rehidratar'
   | 'admin'
   | 'configuracoes';
@@ -26,6 +28,8 @@ export const ROUTE_IDS: readonly RouteId[] = [
   'espacos',
   'promocoes',
   'acesso',
+  'aprovacoes',
+  'revisao',
   'rehidratar',
   'admin',
   'configuracoes',

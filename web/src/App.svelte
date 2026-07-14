@@ -1,11 +1,12 @@
 <script lang="ts">
   import AppShell from './lib/components/AppShell.svelte';
-  import type { NavItem } from './lib/components/Sidebar.svelte';
+  import type { NavSection } from './lib/components/Sidebar.svelte';
   import Topbar from './lib/components/Topbar.svelte';
   import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
+  import ComingSoon from './screens/ComingSoon.svelte';
   import Rehidratar from './screens/Rehidratar.svelte';
   import Admin from './screens/Admin.svelte';
   import Settings from './screens/Settings.svelte';
@@ -44,18 +45,47 @@
   // the exact target — running recover there would race it and could surface the WRONG promotion.
   if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  // The admin nav item is only OFFERED when who.is_admin — the real gate is server-side (every F4
-  // endpoint 403s a non-admin on the VERIFIED identity regardless), this is purely a UX affordance
-  // so a non-admin never sees an entry point to a screen that would just error for them.
-  const NAV_ITEMS: NavItem[] = $derived([
-    { id: 'inicio', label: 'Início', icon: 'home' },
-    { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
-    { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
-    { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
-    { id: 'rehidratar', label: 'Trazer de volta para o dev', icon: 'download' },
-    ...(who?.is_admin ? [{ id: 'admin' as const, label: 'Administração', icon: 'shield' as const }] : []),
+  // S2: persona-sectioned nav (PT1's winning Variant A — grouped sections, always expanded,
+  // union of capabilities per D1). Every section a caller's persona flags unlock is shown
+  // simultaneously; sections for personas they don't hold are simply absent, never an empty
+  // header. The real per-request gate is always server-side (every F4/F3/S-slice endpoint
+  // 403s on the VERIFIED identity regardless) — this is purely a UX affordance so a caller
+  // never sees an entry point to a screen that would just error for them.
+  //
+  // "Aprovações de acesso" (Approver) and "Revisão de promoções" (Steward) route to a
+  // ComingSoon placeholder until their real screens land (S5, S6 respectively) — this slice
+  // only builds the nav structure, not those screens.
+  const NAV_SECTIONS: NavSection[] = $derived([
+    {
+      title: 'Meu trabalho',
+      items: [
+        { id: 'inicio', label: 'Início', icon: 'home' },
+        { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
+        { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
+        { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
+        { id: 'rehidratar', label: 'Exportar Prod → Dev', icon: 'download' },
+      ],
+    },
+    ...(who?.is_approver
+      ? [{
+          title: 'Aprovações de acesso',
+          items: [{ id: 'aprovacoes' as const, label: 'Fila de aprovação', icon: 'check-circle' as const }],
+        }]
+      : []),
+    ...(who?.is_steward
+      ? [{
+          title: 'Revisão de promoções',
+          items: [{ id: 'revisao' as const, label: 'Aguardando minha revisão', icon: 'git-branch' as const }],
+        }]
+      : []),
     ...(who?.is_admin
-      ? [{ id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const }]
+      ? [{
+          title: 'Administração',
+          items: [
+            { id: 'admin' as const, label: 'Administração', icon: 'shield' as const },
+            { id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const },
+          ],
+        }]
       : []),
   ]);
 
@@ -64,7 +94,9 @@
     espacos: 'Meus espaços',
     promocoes: 'Minhas promoções',
     acesso: 'Acesso',
-    rehidratar: 'Trazer de volta para o dev',
+    aprovacoes: 'Aprovações de acesso',
+    revisao: 'Revisão de promoções',
+    rehidratar: 'Exportar Prod → Dev',
     admin: 'Administração',
     configuracoes: 'Configurações',
   };
@@ -84,7 +116,7 @@
   }
 </script>
 
-<AppShell navItems={NAV_ITEMS} route={router.route}>
+<AppShell sections={NAV_SECTIONS} route={router.route}>
   {#snippet header({ toggle, open })}
     <Topbar title={SECTION_TITLE[router.route.id]} {who} {open} onToggle={toggle} />
   {/snippet}
@@ -112,6 +144,16 @@
     />
   {:else if router.route.id === 'acesso'}
     <AcessoEspacos {who} />
+  {:else if router.route.id === 'aprovacoes'}
+    <ComingSoon
+      title="Fila de aprovação"
+      description="Em construção (S5) — por enquanto, a fila de aprovação de acesso continua em Acesso."
+    />
+  {:else if router.route.id === 'revisao'}
+    <ComingSoon
+      title="Aguardando minha revisão"
+      description="Em construção (S6) — um painel com as promoções aguardando revisão do Steward, em todos os espaços."
+    />
   {:else if router.route.id === 'rehidratar'}
     <Rehidratar devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'admin'}
