@@ -318,6 +318,52 @@ def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(st
     assert len(top1) == 1 and top1[0]["event_type"] == "pr_opened"
 
 
+def test_list_recent_audit_events_offset_pages_past_the_limit(store):
+    # S4 (app-ux-overhaul, GR4): offset-based pagination on top of the existing limit.
+    p = _mk(store, pr_number=301)
+    store.append_audit_event(p.id, "requested", actor_app_email="ana@acme.com")
+    for i in range(3):
+        store.append_audit_event(p.id, "re_reviewed", detail={"i": i})
+    page1 = store.list_recent_audit_events(limit=2, offset=0)
+    page2 = store.list_recent_audit_events(limit=2, offset=2)
+    assert len(page1) == 2 and len(page2) == 2
+    assert {r["seq"] for r in page1}.isdisjoint({r["seq"] for r in page2})
+
+
+def test_list_recent_audit_events_filters_by_resource_id(store):
+    p1 = _mk(store, pr_number=302, resource_id="space-A")
+    p2 = _mk(store, pr_number=303, resource_id="space-B")
+    store.append_audit_event(p1.id, "requested", actor_app_email="ana@acme.com")
+    store.append_audit_event(p2.id, "requested", actor_app_email="ana@acme.com")
+    rows = store.list_recent_audit_events(limit=200, resource_id="space-A")
+    assert len(rows) == 1 and rows[0]["promotion_id"] == p1.id
+
+
+def test_list_recent_audit_events_filters_by_actor_either_identity_field(store):
+    p1 = _mk(store, pr_number=304, requester="ana@acme.com")
+    p2 = _mk(store, pr_number=305, requester="bob@acme.com")
+    store.append_audit_event(p1.id, "requested", actor_app_email="ana@acme.com")
+    store.append_audit_event(p2.id, "requested", actor_app_email="bob@acme.com")
+    store.append_audit_event(p1.id, "pr_review_approved", actor_github_login="genie-promote-bot")
+
+    by_login = store.list_recent_audit_events(limit=200, actor="genie-promote-bot")
+    assert len(by_login) == 1 and by_login[0]["actor_github_login"] == "genie-promote-bot"
+
+    by_email = store.list_recent_audit_events(limit=200, actor="ana@acme.com")
+    assert len(by_email) == 1 and by_email[0]["actor_app_email"] == "ana@acme.com"
+
+
+def test_list_recent_audit_events_date_range(store, clock):
+    p = _mk(store, pr_number=306)
+    store.append_audit_event(p.id, "requested", actor_app_email="ana@acme.com")
+    all_rows = store.list_recent_audit_events(limit=200)
+    occurred_at = all_rows[0]["occurred_at"]
+
+    assert store.list_recent_audit_events(limit=200, after=occurred_at + timedelta(days=1)) == []
+    assert len(store.list_recent_audit_events(limit=200, before=occurred_at + timedelta(days=1))) == 1
+    assert len(store.list_recent_audit_events(limit=200, after=occurred_at - timedelta(days=1))) == 1
+
+
 # --- rehydrate_events: standalone audit, NO FK to a Promotion ----------------------------------
 
 

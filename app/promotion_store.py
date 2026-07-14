@@ -160,8 +160,14 @@ class StoreBackend(Protocol):
     def insert_audit_event(self, row: dict) -> Optional[int]: ...  # seq, or None if a dup milestone
     def list_audit_events(self, promotion_id: str) -> list[dict]: ...  # ordered by seq
     # Cross-Promotion audit (F4): all events joined with resource_id/resource_title, newest-first,
-    # bounded — ONE query (no per-Promotion N+1).
-    def list_recent_audit_events(self, limit: int) -> list[dict]: ...
+    # bounded — ONE query (no per-Promotion N+1). S4 (app-ux-overhaul): added offset (simple
+    # pagination — this app's audit volume doesn't warrant keyset/cursor pagination), a date
+    # range, and space/actor filters, all optional and independently combinable.
+    def list_recent_audit_events(
+        self, limit: int, *, offset: int = 0,
+        resource_id: Optional[str] = None, actor: Optional[str] = None,
+        after: Optional[datetime] = None, before: Optional[datetime] = None,
+    ) -> list[dict]: ...
     # Standalone rehydrate audit (F1 follow-up) — NO FK to promotions, see RehydrateEvent.
     def insert_rehydrate_event(self, row: dict) -> None: ...
     def list_rehydrate_events(self, resource_id: Optional[str], limit: int) -> list[dict]: ...  # newest first
@@ -291,12 +297,24 @@ class PromotionStore:
     def list_audit_events(self, promotion_id: str) -> list[AuditEvent]:
         return [_as(AuditEvent, r) for r in self._b.list_audit_events(promotion_id)]
 
-    def list_recent_audit_events(self, limit: int = 200) -> list[dict]:
+    def list_recent_audit_events(
+        self, limit: int = 200, *, offset: int = 0,
+        resource_id: Optional[str] = None, actor: Optional[str] = None,
+        after: Optional[datetime] = None, before: Optional[datetime] = None,
+    ) -> list[dict]:
         """Cross-Promotion audit (F4): every Promotion's audit events, newest-first, each joined with
         its Promotion's `resource_id`/`resource_title`, in ONE backend query (replaces the per-
         Promotion N+1). Returns plain dicts (not `AuditEvent`) because the resource fields live on
-        the Promotion, not the event."""
-        return self._b.list_recent_audit_events(limit)
+        the Promotion, not the event.
+
+        S4 (app-ux-overhaul, GR4): `offset` pages past `limit` (simple, not keyset — this app's
+        audit volume doesn't need cursor pagination); `resource_id`/`actor` filter to one space /
+        one actor (actor matches EITHER `actor_github_login` or `actor_app_email` — the standalone
+        Audit page reuses `AuditTrail.svelte`'s existing actor-display convention, so filtering
+        should match whichever identity the UI is showing); `after`/`before` bound the date range.
+        All filters are optional and independently combinable."""
+        return self._b.list_recent_audit_events(
+            limit, offset=offset, resource_id=resource_id, actor=actor, after=after, before=before)
 
     # -- standalone rehydrate audit (no source Promotion; see RehydrateEvent) ----
     def append_rehydrate_event(self, *, resource_id: str, resource_title: Optional[str],
@@ -404,16 +422,28 @@ class InMemoryBackend:
         rows = [dict(e) for e in self._events if e["promotion_id"] == promotion_id]
         return sorted(rows, key=lambda e: e["seq"])
 
-    def list_recent_audit_events(self, limit: int) -> list[dict]:
+    def list_recent_audit_events(
+        self, limit: int, *, offset: int = 0,
+        resource_id: Optional[str] = None, actor: Optional[str] = None,
+        after: Optional[datetime] = None, before: Optional[datetime] = None,
+    ) -> list[dict]:
         out = []
         for e in self._events:
             p = self._promotions.get(e["promotion_id"], {})
             out.append({**e, "resource_id": p.get("resource_id"),
                         "resource_title": p.get("resource_title")})
+        if resource_id is not None:
+            out = [e for e in out if e["resource_id"] == resource_id]
+        if actor is not None:
+            out = [e for e in out if e.get("actor_github_login") == actor or e.get("actor_app_email") == actor]
+        if after is not None:
+            out = [e for e in out if e["occurred_at"] >= after]
+        if before is not None:
+            out = [e for e in out if e["occurred_at"] <= before]
         # newest-first; (promotion_id, seq) are the stable tiebreakers so equal timestamps (a fixed
         # test clock) still order deterministically.
         out.sort(key=lambda e: (e["occurred_at"], e["promotion_id"], e["seq"]), reverse=True)
-        return out[: max(0, limit)]
+        return out[max(0, offset): max(0, offset) + max(0, limit)]
 
     def insert_rehydrate_event(self, row: dict) -> None:
         # NO FK check (unlike audit_events) — this table deliberately has no parent to require.
@@ -653,14 +683,36 @@ class PgBackend:
         return self._all(
             "SELECT * FROM audit_events WHERE promotion_id = %s ORDER BY seq", (promotion_id,))
 
-    def list_recent_audit_events(self, limit: int) -> list[dict]:
+    def list_recent_audit_events(
+        self, limit: int, *, offset: int = 0,
+        resource_id: Optional[str] = None, actor: Optional[str] = None,
+        after: Optional[datetime] = None, before: Optional[datetime] = None,
+    ) -> list[dict]:
         # ONE query (no per-Promotion N+1): join each event to its Promotion's resource fields,
-        # newest-first, bounded. (promotion_id, seq) break ties deterministically.
+        # newest-first, bounded. (promotion_id, seq) break ties deterministically. S4: optional
+        # space/actor/date-range filters, all parameterized (never string-interpolated).
+        where = []
+        args: list = []
+        if resource_id is not None:
+            where.append("p.resource_id = %s")
+            args.append(resource_id)
+        if actor is not None:
+            where.append("(ae.actor_github_login = %s OR ae.actor_app_email = %s)")
+            args.extend([actor, actor])
+        if after is not None:
+            where.append("ae.occurred_at >= %s")
+            args.append(after)
+        if before is not None:
+            where.append("ae.occurred_at <= %s")
+            args.append(before)
+        where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+        args.extend([max(0, limit), max(0, offset)])
         return self._all(
             "SELECT ae.*, p.resource_id, p.resource_title "
             "FROM audit_events ae JOIN promotions p ON ae.promotion_id = p.id "
+            f"{where_clause} "
             "ORDER BY ae.occurred_at DESC, ae.promotion_id DESC, ae.seq DESC "
-            "LIMIT %s", (max(0, limit),))
+            "LIMIT %s OFFSET %s", args)
 
     def insert_rehydrate_event(self, row: dict) -> None:
         self._insert("rehydrate_events", _REHYDRATE_COLS, row)

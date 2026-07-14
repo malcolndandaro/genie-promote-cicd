@@ -400,9 +400,27 @@ export async function getAdminAccessRequests(): Promise<AccessRequest[]> {
   return data.requests ?? [];
 }
 
+/** S4 (app-ux-overhaul, GR4): the standalone Audit page's combinable filters — space, actor
+ * (matches either the GitHub login or the display-only app email), and a date range — plus
+ * offset-based pagination on top of the existing `limit`. */
+export interface AdminAuditQuery {
+  limit?: number;
+  offset?: number;
+  resourceId?: string;
+  actor?: string;
+  after?: string; // ISO datetime
+  before?: string; // ISO datetime
+}
+
 /** The cross-Promotion audit trail ("who changed what, when"), newest first. */
-export async function getAdminAudit(limit = 200): Promise<AdminAuditRow[]> {
-  const data = await getJSON<{ audit: AdminAuditRow[] }>(`/api/admin/audit?limit=${limit}`);
+export async function getAdminAudit(query: AdminAuditQuery = {}): Promise<AdminAuditRow[]> {
+  const { limit = 200, offset = 0, resourceId, actor, after, before } = query;
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (resourceId) params.set('resource_id', resourceId);
+  if (actor) params.set('actor', actor);
+  if (after) params.set('after', after);
+  if (before) params.set('before', before);
+  const data = await getJSON<{ audit: AdminAuditRow[] }>(`/api/admin/audit?${params}`);
   return data.audit ?? [];
 }
 

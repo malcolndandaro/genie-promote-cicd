@@ -66,6 +66,23 @@ export function phaseChip(phase: string | null | undefined): { label: string; to
  * every filter). */
 export type StatusBucket = 'open' | 'merged' | 'failed' | 'deployed';
 
+/** The authoritative governance actor for an audit event: GitHub login when present, else the
+ * display-only app email (OBO), else "sistema". Shared by `AuditTrail.svelte` (per-promotion) and
+ * the standalone Audit page (S4/GR4, cross-promotion) so both render actors identically. */
+export interface ActorDisplay {
+  who: string;
+  kind: 'github' | 'app' | 'system';
+}
+
+export function actorDisplay(e: {
+  actor_github_login: string | null;
+  actor_app_email: string | null;
+}): ActorDisplay {
+  if (e.actor_github_login) return { who: e.actor_github_login, kind: 'github' };
+  if (e.actor_app_email) return { who: e.actor_app_email, kind: 'app' };
+  return { who: 'sistema', kind: 'system' };
+}
+
 export function statusBucket(phase: string | null | undefined): StatusBucket {
   switch (phase) {
     case 'deployed':

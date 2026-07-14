@@ -35,6 +35,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Callable
 
 from databricks.sdk.core import Config
@@ -1219,9 +1220,23 @@ def admin_access_requests(
     return {"requests": [_access_request_summary(r) for r in store.list_requests()]}
 
 
+def _parse_iso_dt(value: str | None, *, field: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field}: invalid ISO datetime {value!r}")
+
+
 @api.get("/admin/audit")
 def admin_audit(
     limit: int = 200,
+    offset: int = 0,
+    resource_id: str | None = None,
+    actor: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
@@ -1232,9 +1247,17 @@ def admin_audit(
     Promotion/resource the event belongs to, so an admin can trace an action back to its Promotion.
     `limit` bounds the response for a workspace with a long history (default 200, newest first —
     truncation drops the OLDEST events, never the most recent ones an admin is most likely to want).
+
+    S4 (app-ux-overhaul, GR4): `offset` pages past `limit` (offset-based — this app's audit
+    volume doesn't need keyset/cursor pagination); `resource_id` and `actor` filter to one space /
+    one actor (`actor` matches EITHER `actor_github_login` or `actor_app_email`); `after`/`before`
+    (ISO datetimes) bound the date range. All independently combinable, all optional — the
+    standalone Audit page's space/user filters + date range.
     """
     _require_admin(x_forwarded_access_token, authorization)
     store = _require_store()
+    after_dt = _parse_iso_dt(after, field="after")
+    before_dt = _parse_iso_dt(before, field="before")
 
     def _run() -> dict:
         # ONE joined query (store.list_recent_audit_events), newest-first + bounded — no per-Promotion
@@ -1245,7 +1268,9 @@ def admin_audit(
             "github_event_at": r["github_event_at"], "detail": r["detail"],
             "promotion_id": r["promotion_id"], "resource_id": r["resource_id"],
             "resource_title": r["resource_title"],
-        } for r in store.list_recent_audit_events(limit)]
+        } for r in store.list_recent_audit_events(
+            limit, offset=offset, resource_id=resource_id, actor=actor, after=after_dt, before=before_dt,
+        )]
         return {"audit": rows}
 
     return _engine_call("admin_audit", _run)
