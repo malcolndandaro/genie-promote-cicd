@@ -168,3 +168,140 @@ def test_rest_gate_uses_default_wait_seconds_when_not_specified(monkeypatch):
     api = _FakeGenieEvalAPI(_run("RUNNING", num_questions=2))
     d = eval_gate.run_eval_gate_rest("sp1", client=_client(api))  # no wait_seconds -> uses the default
     assert d["status"] == "advisory" and api.poll_calls == 0
+
+
+# --- W3: per-question results (real genie_list_eval_results/genie_get_eval_result_details) -----
+#
+# Verified live (read-only probe, dev demo space, run 01f17f81ac4d1417aff1941f4d72dead): a list
+# item's `question`/`result_id` + a per-result `genie_get_eval_result_details.assessment`
+# ('GOOD'/'BAD'/'NEEDS_REVIEW') — the fakes below mimic that exact shape.
+
+def _list_page(results, next_page_token=None):
+    return NS(eval_results=results, next_page_token=next_page_token)
+
+
+def _result(result_id, question):
+    return NS(result_id=result_id, question=question)
+
+
+def _details(assessment):
+    """`assessment` may be a plain string or an enum-like object exposing `.value` (mirrors the
+    real SDK's `GenieEvalAssessment`)."""
+    return NS(assessment=assessment)
+
+
+class _FakeGenieEvalAPIWithResults(_FakeGenieEvalAPI):
+    """Extends the counters-only fake with the per-question endpoints (W3). `pages` is a list of
+    `_list_page(...)`, consumed in order across successive `genie_list_eval_results` calls; `details`
+    maps `result_id -> _details(...)`."""
+
+    def __init__(self, created, pages=(), details=None, **kw):
+        super().__init__(created, **kw)
+        self._pages = list(pages)
+        self._details = details or {}
+        self.list_calls = 0
+        self.detail_calls = 0
+
+    def genie_list_eval_results(self, space_id, eval_run_id, *, page_size=None, page_token=None):
+        self.list_calls += 1
+        return self._pages.pop(0)
+
+    def genie_get_eval_result_details(self, space_id, eval_run_id, result_id):
+        self.detail_calls += 1
+        return self._details[result_id]
+
+
+def test_rest_gate_fetches_real_per_question_results():
+    api = _FakeGenieEvalAPIWithResults(
+        _run("DONE", num_correct=1, num_done=2, num_questions=2),
+        pages=[_list_page([_result("r1", "Quantos clientes?"), _result("r2", "Qual o volume?")])],
+        details={"r1": _details("GOOD"), "r2": _details("BAD")},
+    )
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api), threshold=0.8)
+    assert d["status"] == "block" and d["n"] == 2 and d["n_correct"] == 1 and d["n_needs_review"] == 0
+    assert d["run_id"] == "run1"
+    # failures first
+    assert [q["status"] for q in d["questions"]] == ["incorrect", "correct"]
+    assert d["questions"][0]["question"] == "Qual o volume?"
+
+
+def test_rest_gate_needs_review_question_counted_and_sorted_after_incorrect():
+    api = _FakeGenieEvalAPIWithResults(
+        _run("DONE", num_correct=1, num_done=3, num_needs_review=1, num_questions=3),
+        pages=[_list_page([_result("r1", "A?"), _result("r2", "B?"), _result("r3", "C?")])],
+        details={"r1": _details("GOOD"), "r2": _details("BAD"), "r3": _details("NEEDS_REVIEW")},
+    )
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api), threshold=0.8)
+    assert d["status"] == "block" and d["n_correct"] == 1 and d["n_needs_review"] == 1
+    assert [q["status"] for q in d["questions"]] == ["incorrect", "needs_review", "correct"]
+
+
+def test_rest_gate_pass_summary_mentions_n_and_rate():
+    api = _FakeGenieEvalAPIWithResults(
+        _run("DONE", num_correct=2, num_done=2, num_questions=2),
+        pages=[_list_page([_result("r1", "A?"), _result("r2", "B?")])],
+        details={"r1": _details("GOOD"), "r2": _details("GOOD")},
+    )
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api), threshold=0.8)
+    assert d["status"] == "pass"
+    assert "2" in d["summary"] and "acima do limiar" in d["summary"]
+
+
+def test_rest_gate_paginates_across_multiple_pages():
+    api = _FakeGenieEvalAPIWithResults(
+        _run("DONE", num_correct=2, num_done=2, num_questions=2),
+        pages=[
+            _list_page([_result("r1", "A?")], next_page_token="tok2"),
+            _list_page([_result("r2", "B?")]),
+        ],
+        details={"r1": _details("GOOD"), "r2": _details("GOOD")},
+    )
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api), threshold=0.8)
+    assert d["status"] == "pass" and d["n"] == 2 and api.list_calls == 2
+
+
+def test_rest_gate_assessment_enum_like_object_normalizes_via_value():
+    status = NS(value="BAD")  # mimics the real SDK's GenieEvalAssessment enum
+    api = _FakeGenieEvalAPIWithResults(
+        _run("DONE", num_correct=0, num_done=1, num_questions=1),
+        pages=[_list_page([_result("r1", "A?")])],
+        details={"r1": _details(status)},
+    )
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api), threshold=0.8)
+    assert d["questions"][0]["status"] == "incorrect"
+
+
+def test_rest_gate_results_fetch_failure_falls_back_to_counters_only():
+    # genie_list_eval_results raises -> degrades to the ORIGINAL synthetic-counters shape, no
+    # `questions` key, exactly like before W3.
+    class _BrokenList(_FakeGenieEvalAPIWithResults):
+        def genie_list_eval_results(self, *a, **kw):
+            raise RuntimeError("network blip")
+
+    api = _BrokenList(_run("DONE", num_correct=4, num_done=4, num_questions=4))
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api), threshold=0.8)
+    assert d["status"] == "pass" and d["n"] == 4
+    assert "questions" not in d
+
+
+def test_rest_gate_detail_lookup_failure_skips_that_question_not_whole_run():
+    class _OneBadDetail(_FakeGenieEvalAPIWithResults):
+        def genie_get_eval_result_details(self, space_id, eval_run_id, result_id):
+            if result_id == "r2":
+                raise RuntimeError("detail lookup failed")
+            return super().genie_get_eval_result_details(space_id, eval_run_id, result_id)
+
+    api = _OneBadDetail(
+        _run("DONE", num_correct=1, num_done=2, num_questions=2),
+        pages=[_list_page([_result("r1", "A?"), _result("r2", "B?")])],
+        details={"r1": _details("GOOD"), "r2": _details("BAD")},
+    )
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api), threshold=0.8)
+    # only r1's question made it through; r2's lookup failed and was skipped, not guessed.
+    assert d["n"] == 1 and d["questions"][0]["question"] == "A?"
+
+
+def test_rest_gate_no_benchmarks_advisory_shape_has_no_questions_key():
+    api = _FakeGenieEvalAPI(_run("DONE", num_correct=0, num_done=0, num_questions=0))
+    d = eval_gate.run_eval_gate_rest("sp1", client=_client(api))
+    assert d["status"] == "advisory" and "questions" not in d

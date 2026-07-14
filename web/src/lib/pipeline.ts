@@ -8,7 +8,7 @@
  * overrides labels + statuses.
  */
 import type { Review } from './types';
-import type { StepStatus, TimelineStep } from './types';
+import type { StepStatus, TimelineStep, EvalQuestion } from './types';
 import type { PromoteStatus } from './api';
 
 export const PIPELINE_STEPS: { key: string; label: string }[] = [
@@ -132,3 +132,18 @@ export function severityTone(severity: string): 'destructive' | 'warning' | 'neu
   if (severity === 'SUGGESTION') return 'warning';
   return 'neutral';
 }
+
+/** W3: glyph per eval per-question outcome — mirrors STATUS_GLYPH's role for the pipeline nodes,
+ * used by EvalResultsPanel's failures-first list (✗/⚠/✓, never color alone). */
+export const EVAL_QUESTION_GLYPH: Record<EvalQuestion['status'], string> = {
+  incorrect: '✗',
+  needs_review: '⚠',
+  correct: '✓',
+};
+
+/** PT label in words for the same outcome (WCAG 1.4.1 — color/glyph must not be the only signal). */
+export const EVAL_QUESTION_LABEL: Record<EvalQuestion['status'], string> = {
+  incorrect: 'incorreta',
+  needs_review: 'requer revisão',
+  correct: 'correta',
+};

@@ -964,6 +964,62 @@ def test_review_space_eval_degrades_when_dev_sp_not_configured(monkeypatch):
     assert result["gate"] is not None  # the rest of the review still completed normally
 
 
+# --- eval-run threshold threading (W3 follow-up): admin-configurable via EVAL-01's params -------
+
+def test_review_space_threads_admin_configured_eval_threshold_to_the_gate(monkeypatch):
+    """The EVAL-01 override's `eval_run_threshold` param must reach `run_eval_gate_rest` as
+    `threshold=` — resolved via `rules_config.eval_run_threshold`, the SAME override rows already
+    threaded for `effective_rules`/`eval01_config`."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    captured = {}
+
+    def fake_run_eval_gate_rest(space_id, *, client, threshold=0.8, **kw):
+        captured["threshold"] = threshold
+        return {"status": "pass", "summary": "ok"}
+
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
+
+    overrides = [{"rule_id": "EVAL-01", "enabled": True, "params": {"eval_run_threshold": 0.6}}]
+    app_logic.review_space("sp1", rule_overrides=overrides)
+    assert captured["threshold"] == 0.6
+
+
+def test_review_space_defaults_eval_threshold_when_no_override(monkeypatch):
+    """No `rule_overrides` (or none touching EVAL-01) -> the default 0.8, unchanged from before
+    this admin knob existed."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    captured = {}
+
+    def fake_run_eval_gate_rest(space_id, *, client, threshold=0.8, **kw):
+        captured["threshold"] = threshold
+        return {"status": "pass", "summary": "ok"}
+
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
+
+    app_logic.review_space("sp1")
+    assert captured["threshold"] == 0.8
+
+
+def test_review_space_eval_degrade_path_carries_the_effective_threshold(monkeypatch):
+    """Even when run_eval_gate_rest itself blows up (degrade-to-advisory path), the EFFECTIVE
+    (admin-configured) threshold — not the bare 0.8 default — must ride along on the advisory
+    payload, so the UI's rich panel shows the real configured value."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+
+    def _boom(*a, **k):
+        raise RuntimeError("eval-run API unreachable")
+
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", _boom)
+
+    overrides = [{"rule_id": "EVAL-01", "enabled": True, "params": {"eval_run_threshold": 0.6}}]
+    result = app_logic.review_space("sp1", rule_overrides=overrides)
+    assert result["eval"]["status"] == "advisory"
+    assert result["eval"]["threshold"] == 0.6
+
+
 def test_review_space_pii_interplay_flags_declared_access_to_masked_column(monkeypatch):
     """PII-01/02 interplay (F2 acceptance criteria): declaring access that reaches a column with a
     PII/bank-secrecy signal (CPF here) surfaces a grounded SUGGESTION so the Steward double-checks

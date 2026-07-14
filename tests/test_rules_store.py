@@ -137,6 +137,25 @@ def test_audit_history_survives_a_reset_who_changed_what_when(store):
     assert events[0].detail["params"] == {"min_benchmarks": 3}
 
 
+def test_eval_run_threshold_param_round_trips_and_is_audited_for_free(store):
+    # W3 follow-up: eval_run_threshold lives in the SAME opaque params jsonb as min_benchmarks —
+    # the store has no rule-specific knowledge of either key, so both the CRUD round-trip and the
+    # `rule_updated` audit event ("params" in `upsert`'s detail dict) cover the new key with zero
+    # store code changes; this just makes that coverage explicit for the new field.
+    override = store.upsert(rule_id="EVAL-01", actor_email="admin@x",
+                            params={"min_benchmarks": 5, "eval_run_threshold": 0.6})
+    assert override.params == {"min_benchmarks": 5, "eval_run_threshold": 0.6}
+
+    fetched = store.get("EVAL-01")
+    assert fetched.params == {"min_benchmarks": 5, "eval_run_threshold": 0.6}
+
+    as_dict = store.list_all_dicts()[0]
+    assert as_dict["params"] == {"min_benchmarks": 5, "eval_run_threshold": 0.6}
+
+    events = store.list_audit_events("EVAL-01")
+    assert events[-1].detail["params"] == {"min_benchmarks": 5, "eval_run_threshold": 0.6}
+
+
 def test_list_all_dicts_returns_plain_dicts_for_the_pure_engine_boundary(store):
     store.upsert(rule_id="ENV-01", actor_email="admin@x", enabled=False)
     rows = store.list_all_dicts()

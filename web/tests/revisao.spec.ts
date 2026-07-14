@@ -164,3 +164,67 @@ test('shows an error state with retry when /api/promote fails', async ({ page })
   await expect(page.getByText(/Não foi possível solicitar a promoção/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();
 });
+
+// --- W3: rich eval-run results panel --------------------------------------------------------
+
+test('a block eval state renders the panel with a failures-first question list + dev link', async ({
+  page,
+}) => {
+  const evalReview = {
+    ...review,
+    eval: {
+      status: 'block', pass_rate: 0.5, n: 4, n_correct: 2, n_needs_review: 1, threshold: 0.8,
+      run_id: 'run1',
+      summary:
+        '🔴 O Genie re-executou as 4 perguntas de benchmark e acertou 2 (50%) — abaixo do limiar de 80%.',
+      questions: [
+        { question: 'Qual o volume cancelado?', status: 'incorrect' },
+        { question: 'Quais cedentes têm mais recebíveis?', status: 'needs_review' },
+        { question: 'Qual a participação por status?', status: 'correct' },
+        { question: 'Quais cedentes estão no RJ?', status: 'correct' },
+      ],
+    },
+  };
+  await page.route('**/api/whoami', (route) =>
+    route.fulfill({
+      json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com', dev_host: 'dev.cloud.databricks.com' },
+    }),
+  );
+  await page.route('**/api/promote', (route) => route.fulfill({ json: { review: evalReview, pr: PR } }));
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+
+  await page.getByText('Ver resultados do eval (4)').click();
+  await expect(page.getByText(/O Genie re-executou as 4 perguntas/)).toBeVisible();
+
+  // Failures first: the incorrect question renders above the correct ones.
+  const items = page.locator('.eval-panel__item');
+  await expect(items).toHaveCount(4);
+  await expect(items.nth(0)).toContainText('Qual o volume cancelado?');
+  await expect(items.nth(0)).toHaveAttribute('data-status', 'incorrect');
+  await expect(items.nth(1)).toContainText('Quais cedentes têm mais recebíveis?');
+  await expect(items.nth(1)).toHaveAttribute('data-status', 'needs_review');
+
+  await expect(page.getByRole('link', { name: /Abrir benchmarks no dev/ })).toHaveAttribute(
+    'href',
+    'https://dev.cloud.databricks.com/genie/rooms/sp1',
+  );
+});
+
+test('an advisory eval state renders only the explainer + summary, no question list', async ({
+  page,
+}) => {
+  await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } })); // eval: advisory, no `questions`
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+
+  await page.getByText(/Ver resultados do eval/).click();
+  await expect(
+    page.getByText('Teste automático: o espaço responde corretamente às próprias perguntas de benchmark?'),
+  ).toBeVisible();
+  await expect(page.getByText(review.eval.summary)).toBeVisible();
+  await expect(page.locator('.eval-panel__item')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: /Abrir benchmarks no dev/ })).toHaveCount(0); // no dev_host mocked
+});

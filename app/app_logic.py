@@ -541,9 +541,12 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
 
     # G2: the EFFECTIVE rule set (hardcoded RULES + admin overrides/custom rules) grounds the
     # prompt; EVAL-01's threshold/severity backstop is resolved the same way (finalize_findings
-    # owns that check deterministically — see rules_config's docstring for why).
+    # owns that check deterministically — see rules_config's docstring for why). The eval-RUN
+    # pass-rate threshold (a distinct gate — see eval_run_threshold's docstring) is resolved from
+    # the same override row, then fed to run_eval_gate_rest below.
     effective = rules_config.effective_rules(rule_overrides)
     min_bench, eval01_severity = rules_config.eval01_config(rule_overrides)
+    eval_threshold = rules_config.eval_run_threshold(rule_overrides)
     ctx = review_core.build_space_context(prod_space)
     system, user = review_core.build_review_prompt(ctx, effective, deterministic)
     # LLM reviewer = shared operation -> app SP / local profile (a serving scope isn't part of
@@ -562,9 +565,9 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
         # cannot span workspaces once the app is prod-hosted, ADR-0006), or the given profile
         # directly for local/offline callers with no user_token.
         eval_client = _client(scope="dev-sp") if user_token else _client(profile)
-        eval_res = eval_gate.run_eval_gate_rest(space_id, client=eval_client)
+        eval_res = eval_gate.run_eval_gate_rest(space_id, client=eval_client, threshold=eval_threshold)
     except Exception as e:  # noqa: BLE001 — never break the review; degrade to advisory
-        eval_res = eval_gate.decide_eval(None, available=False,
+        eval_res = eval_gate.decide_eval(None, eval_threshold, available=False,
                                          reason=f"eval-run indisponível neste ambiente ({e})")
     return {
         "findings": findings, "gate": gate, "eval": eval_res,

@@ -104,6 +104,57 @@ def test_eval01_config_ignores_negative_min_benchmarks():
     assert n == 2
 
 
+# --- eval_run_threshold: the eval-run pass-rate gate's admin-configurable threshold (W3 follow-up) -
+
+
+def test_eval_run_threshold_defaults_when_no_override():
+    assert rc.eval_run_threshold(None) == 0.8
+    assert rc.eval_run_threshold([]) == 0.8
+
+
+def test_eval_run_threshold_defaults_when_no_eval01_row():
+    out = rc.eval_run_threshold([{"rule_id": "SQL-01", "enabled": False}])
+    assert out == 0.8
+
+
+def test_eval_run_threshold_reads_param():
+    out = rc.eval_run_threshold([{"rule_id": "EVAL-01", "enabled": True, "params": {"eval_run_threshold": 0.6}}])
+    assert out == 0.6
+
+
+def test_eval_run_threshold_ignores_malformed_value():
+    out = rc.eval_run_threshold(
+        [{"rule_id": "EVAL-01", "enabled": True, "params": {"eval_run_threshold": "not-a-number"}}])
+    assert out == 0.8
+
+
+def test_eval_run_threshold_rejects_out_of_range_value():
+    # both ends of [0, 1] — a > 1 or < 0 "fraction" is nonsensical, fall back rather than gate on it.
+    assert rc.eval_run_threshold([{"rule_id": "EVAL-01", "params": {"eval_run_threshold": 1.5}}]) == 0.8
+    assert rc.eval_run_threshold([{"rule_id": "EVAL-01", "params": {"eval_run_threshold": -0.1}}]) == 0.8
+
+
+def test_eval_run_threshold_boundary_values_are_accepted():
+    assert rc.eval_run_threshold([{"rule_id": "EVAL-01", "params": {"eval_run_threshold": 0.0}}]) == 0.0
+    assert rc.eval_run_threshold([{"rule_id": "EVAL-01", "params": {"eval_run_threshold": 1.0}}]) == 1.0
+
+
+def test_eval_run_threshold_is_read_even_when_the_override_is_disabled():
+    # Deliberately decoupled from `enabled` — disabling the static EVAL-01 benchmark-count check
+    # must not silently reset an admin's configured eval-run pass-rate threshold (see docstring).
+    out = rc.eval_run_threshold(
+        [{"rule_id": "EVAL-01", "enabled": False, "params": {"eval_run_threshold": 0.5}}])
+    assert out == 0.5
+
+
+def test_eval_run_threshold_coexists_with_min_benchmarks_in_the_same_params_dict():
+    overrides = [{"rule_id": "EVAL-01", "enabled": True,
+                  "params": {"min_benchmarks": 5, "eval_run_threshold": 0.9}}]
+    n, _ = rc.eval01_config(overrides)
+    assert n == 5
+    assert rc.eval_run_threshold(overrides) == 0.9
+
+
 # --- end-to-end: a custom rule reaches the reviewer prompt AND survives to findings when violated -
 # (G2 acceptance criterion: "regra custom criada aparece no prompt do reviewer e nos findings
 # quando violada"). The LLM call itself is out of scope here (no network) — this proves the two

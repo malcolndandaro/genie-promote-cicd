@@ -112,7 +112,13 @@
           {/if}
         </div>
       {/if}
-      <ReviewPanel review={promotion.review} {userEmail} liveStatus={promotion.liveStatus}>
+      <ReviewPanel
+        review={promotion.review}
+        {userEmail}
+        liveStatus={promotion.liveStatus}
+        {devHost}
+        devSpaceId={promotion.resource?.id ?? null}
+      >
         {#snippet approval()}
           {#if driftP}
             <div class="drift-section">

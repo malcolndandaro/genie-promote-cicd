@@ -22,6 +22,13 @@ Two gates share the same `decide_eval` verdict logic:
     `num_correct`/`num_done`/`num_needs_review`/`num_questions` — `num_done` was absent on
     in-flight (RUNNING) list entries but present once terminal, so the pass-rate is only computed
     at DONE, never inferred from a partial count.
+
+W3 (rich results panel): a DONE run's counters alone don't tell a business user WHICH question
+failed, so `run_eval_gate_rest` now also tries `genie_list_eval_results` + one
+`genie_get_eval_result_details` per question to attach real per-question outcomes (question text +
+correct/incorrect/needs_review) to the gate's verdict — see `_fetch_eval_questions` +
+`_decide_eval_with_questions`. Best-effort: any failure there degrades to the ORIGINAL
+counters-only shape, unchanged.
 """
 from __future__ import annotations
 
@@ -56,22 +63,86 @@ def _passed(item: dict) -> bool:
 
 def decide_eval(results, threshold: float = 0.8, available: bool = True, reason: str = "") -> dict:
     """Pure gate decision. `results` = per-question outcome dicts. available=False or empty
-    => advisory (non-blocking). pass-rate < threshold => block; else pass."""
+    => advisory (non-blocking). pass-rate < threshold => block; else pass.
+
+    The pass/block summary is written for the business user, not a log line (W3): it spells out
+    that Genie RE-RAN its own benchmark questions and how many it got right, so the "Eval-run
+    (block)" pipeline step is self-explanatory without opening this module. `n_correct`/
+    `n_needs_review`/`threshold` ride along on the returned dict so a caller with real per-question
+    detail (see `_decide_eval_with_questions`) can attach it without recomputing the boundary."""
     if not available:
-        return {"status": "advisory", "pass_rate": None, "n": 0,
+        return {"status": "advisory", "pass_rate": None, "n": 0, "threshold": threshold,
                 "summary": f"🟡 eval-run não executado ({reason}) — não bloqueia (degradação graciosa)."}
     items = [r for r in (results or []) if isinstance(r, dict)]
     n = len(items)
     if n == 0:
-        return {"status": "advisory", "pass_rate": None, "n": 0,
+        return {"status": "advisory", "pass_rate": None, "n": 0, "threshold": threshold,
                 "summary": "🟡 sem perguntas de benchmark — não bloqueia (autoria no Genie / EVAL-01)."}
     n_pass = sum(1 for it in items if _passed(it))
     rate = n_pass / n
+    pct, thr_pct = f"{rate:.0%}", f"{threshold:.0%}"
+    base = {"pass_rate": rate, "n": n, "n_correct": n_pass, "n_needs_review": 0, "threshold": threshold}
     if rate < threshold:
-        return {"status": "block", "pass_rate": rate, "n": n,
-                "summary": f"🔴 eval-run {n_pass}/{n} ({rate:.0%}) < limiar {threshold:.0%} — promoção bloqueada."}
-    return {"status": "pass", "pass_rate": rate, "n": n,
-            "summary": f"✅ eval-run {n_pass}/{n} ({rate:.0%}) >= limiar {threshold:.0%}."}
+        return {**base, "status": "block",
+                "summary": (f"🔴 O Genie re-executou as {n} perguntas de benchmark e acertou "
+                            f"{n_pass} ({pct}) — abaixo do limiar de {thr_pct}.")}
+    return {**base, "status": "pass",
+            "summary": (f"✅ O Genie re-executou as {n} perguntas de benchmark e acertou "
+                        f"{n_pass} ({pct}) — acima do limiar de {thr_pct}.")}
+
+
+# --- per-question detail (W3) --------------------------------------------------------------------
+#
+# `genie_list_eval_results` gives the question text + a `result_id` per benchmark question, but its
+# own `.status` is the run-membership status (DONE/RUNNING/...), NOT the GOOD/BAD/NEEDS_REVIEW
+# assessment — verified live (read-only probe, dev demo space, run `01f17f81ac4d1417aff1941f4d72dead`,
+# 24 questions): the list item's `status` was `'DONE'` even for a `BAD`-assessed question. The real
+# assessment only shows up per-result via `genie_get_eval_result_details.assessment`.
+
+_ASSESSMENT_STATUS = {"GOOD": "correct", "BAD": "incorrect", "NEEDS_REVIEW": "needs_review"}
+# Rendering order for the UI's per-question list: failures first, so a business user scanning the
+# panel sees what's WRONG before what's fine.
+_QUESTION_SORT_ORDER = {"incorrect": 0, "needs_review": 1, "correct": 2}
+_MAX_RESULT_PAGES = 20  # hard cap — never loop forever on a paging bug
+
+
+def _fetch_eval_questions(client, space_id: str, eval_run_id: str) -> list[dict]:
+    """Real per-question outcomes for a terminal (DONE) eval-run: one `genie_list_eval_results`
+    page per iteration (paginated — a 24-question run already needed 2 pages at the default page
+    size) plus one `genie_get_eval_result_details` call per result to get its actual assessment (no
+    batch endpoint). A result whose assessment can't be classified (lookup failure, unrecognized
+    value) is skipped rather than guessed — the caller falls back to synthetic counters if this
+    ends up empty. Returns ``[{"question": str|None, "status": "correct"|"incorrect"|"needs_review"}]``."""
+    out: list[dict] = []
+    page_token = None
+    for _ in range(_MAX_RESULT_PAGES):
+        resp = client.genie.genie_list_eval_results(space_id, eval_run_id, page_token=page_token)
+        for r in (resp.eval_results or []):
+            try:
+                details = client.genie.genie_get_eval_result_details(space_id, eval_run_id, r.result_id)
+                status = _ASSESSMENT_STATUS.get(_status_name(details.assessment))
+            except Exception:  # noqa: BLE001 — one bad detail lookup shouldn't drop the whole run
+                status = None
+            if status:
+                out.append({"question": r.question, "status": status})
+        page_token = getattr(resp, "next_page_token", None)
+        if not page_token:
+            break
+    return out
+
+
+def _decide_eval_with_questions(questions: list[dict], threshold: float) -> dict:
+    """Rich per-question eval decision (W3): reuses `decide_eval`'s pass/block boundary + PT copy
+    (via a synthetic passed-list, so there's still ONE place owning that decision), then attaches
+    the real per-question detail the UI renders — `n_needs_review` overridden with the real count
+    (decide_eval's boolean model always reports 0) and `questions` sorted failures-first."""
+    if not questions:
+        return decide_eval([], threshold)
+    synthetic = [{"passed": q["status"] == "correct"} for q in questions]
+    payload = decide_eval(synthetic, threshold)
+    payload["n_needs_review"] = sum(1 for q in questions if q["status"] == "needs_review")
+    payload["questions"] = sorted(questions, key=lambda q: _QUESTION_SORT_ORDER.get(q["status"], 3))
+    return payload
 
 
 def _genie(profile: str, *args: str) -> subprocess.CompletedProcess:
@@ -170,6 +241,21 @@ def run_eval_gate_rest(space_id: str, *, client, threshold: float = 0.8,
     n_done = run.num_done or 0
     if n_done == 0:
         return decide_eval([], threshold)  # -> "sem perguntas de benchmark" advisory
+
+    # W3: try the REAL per-question outcomes first (question text + correct/incorrect/needs_review)
+    # so the UI can render a "Ver resultados do eval" panel instead of a bare summary line. Never
+    # lets a results-fetch hiccup break the gate — any failure (including a fake/older client with
+    # no `genie_list_eval_results`) falls through to the counters-only shape below, unchanged.
+    try:
+        questions = _fetch_eval_questions(client, space_id, run.eval_run_id)
+        if not questions:
+            raise ValueError("sem resultados por pergunta")
+        payload = _decide_eval_with_questions(questions, threshold)
+        payload["run_id"] = run.eval_run_id
+        return payload
+    except Exception:  # noqa: BLE001 — graceful: degrade to the synthetic counters-only shape
+        pass
+
     n_correct = run.num_correct or 0
     synthetic = [{"passed": True}] * n_correct + [{"passed": False}] * max(n_done - n_correct, 0)
     return decide_eval(synthetic, threshold)
