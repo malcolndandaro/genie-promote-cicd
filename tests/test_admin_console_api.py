@@ -68,7 +68,8 @@ def _setup_admin(monkeypatch):
 
 # --- gating: every F4 endpoint is admin-only, server-side, via the VERIFIED identity ------------
 
-ADMIN_ENDPOINTS = ("/api/admin/inventory", "/api/admin/access-requests", "/api/admin/audit")
+ADMIN_ENDPOINTS = ("/api/admin/inventory", "/api/admin/access-requests", "/api/admin/audit",
+                  "/api/admin/rehydrate-events")
 
 
 @pytest.mark.parametrize("path", ADMIN_ENDPOINTS)
@@ -250,3 +251,41 @@ def test_admin_audit_requires_the_store(monkeypatch):
     _setup_admin(monkeypatch)
     engine_api.app.state.store = None
     assert client.get("/api/admin/audit", headers=ADMIN_HEADERS).status_code == 503
+
+
+# --- /api/admin/rehydrate-events: "Exportações para dev", newest first ----------------------------
+
+
+def test_admin_rehydrate_events_lists_newest_first(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    store.append_rehydrate_event(resource_id="s1", resource_title="Recebíveis", actor_email="ana@x",
+                                 mode="create", dev_space_id="dev-1", detail={"a": 1})
+    store.append_rehydrate_event(resource_id="s2", resource_title="Merchant", actor_email="bob@x",
+                                 mode="overwrite", dev_space_id="dev-2", detail={"a": 2})
+
+    body = client.get("/api/admin/rehydrate-events", headers=ADMIN_HEADERS).json()
+    rows = body["events"]
+    assert len(rows) == 2
+    assert rows[0]["resource_id"] == "s2" and rows[0]["mode"] == "overwrite"  # newest first
+    assert rows[0]["dev_space_id"] == "dev-2" and rows[0]["actor_email"] == "bob@x"
+    assert rows[1]["resource_id"] == "s1" and rows[1]["mode"] == "create"
+
+
+def test_admin_rehydrate_events_empty_when_none_recorded(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    assert client.get("/api/admin/rehydrate-events", headers=ADMIN_HEADERS).json()["events"] == []
+
+
+def test_admin_rehydrate_events_respects_limit(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    for i in range(3):
+        store.append_rehydrate_event(resource_id=f"s{i}", resource_title=None, actor_email="ana@x",
+                                     mode="create", dev_space_id=f"dev-{i}", detail=None)
+    body = client.get("/api/admin/rehydrate-events?limit=2", headers=ADMIN_HEADERS).json()
+    assert len(body["events"]) == 2
+
+
+def test_admin_rehydrate_events_requires_the_store(monkeypatch):
+    _setup_admin(monkeypatch)
+    engine_api.app.state.store = None
+    assert client.get("/api/admin/rehydrate-events", headers=ADMIN_HEADERS).status_code == 503

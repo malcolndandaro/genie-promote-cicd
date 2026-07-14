@@ -52,15 +52,18 @@ jobs:
         run: bash scripts/build_promote_app.sh
       - name: Deploy bundle to prod
         run: databricks bundle deploy -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
-      - name: Apply declared access (F2 — governed enforcement, prod SP, per-Space group)
-        # The ONLY place an AccessSpec sidecar (<slug>.access.json, F2) actually mutates prod: the
-        # per-Space group's membership + UC SELECT grants + Genie Space permissions. Runs AFTER the
-        # deploy (so each genie_spaces resource — and the Space it manages — already exists) and AS
-        # the prod SP (same identity/job as the deploy + GRANT-01) — never app-direct. A space with
-        # no AccessSpec sidecar is a no-op. apply_access.py resolves the deployed Space's live id by
-        # matching the <slug>.title sidecar via genie.list_spaces() (the id is NOT in bundle summary
-        # or the committed serialized_space) and FAILS the step if it can't — never warn-and-skip,
-        # which would silently leave declared access unapplied (defeats F2's governance).
+      - name: Apply declared access (F2 — governed enforcement, prod SP, direct-to-principal)
+        # The ONLY place an AccessSpec sidecar (<slug>.access.json, F2) actually mutates prod: UC
+        # SELECT grants + Genie Space permissions, applied DIRECTLY to each declared principal (no
+        # intermediate group — a per-Space group was tried and failed live: `w.groups.create` in a
+        # workspace context makes a WORKSPACE-LOCAL group, and UC grants only accept ACCOUNT-level
+        # principals). Runs AFTER the deploy (so each genie_spaces resource — and the Space it
+        # manages — already exists) and AS the prod SP (same identity/job as the deploy + GRANT-01)
+        # — never app-direct. A space with no AccessSpec sidecar is a no-op. apply_access.py
+        # resolves the deployed Space's live id by matching the <slug>.title sidecar via
+        # genie.list_spaces() (the id is NOT in bundle summary or the committed serialized_space)
+        # and FAILS the step if it can't (not found OR ambiguous) — never warn-and-skip or guess,
+        # which would silently leave declared access unapplied (or apply it to the wrong Space).
         run: |
           python3 -m pip install -q 'databricks-sdk>=0.111.0'
           for f in build/genie/*.serialized_space.json; do

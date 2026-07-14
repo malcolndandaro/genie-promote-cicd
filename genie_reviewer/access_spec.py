@@ -6,16 +6,20 @@ dropped (F2 acceptance criteria):
   1. **Genie Space permissions** — who may open/run the Space in the Genie UI (CAN_RUN / CAN_VIEW).
   2. **UC data grants** — who may SELECT the underlying tables the Space queries.
 
-Pure + serializable (no I/O): this module only defines the shape, JSON round-trip, and the derived
-per-Space GROUP name (GRANT-02: access is applied via one group per Space, never scattered
-per-user grants). It does NOT apply anything — see `scripts/apply_access.py` for the imperative,
-idempotent enforcement that runs in CI as the prod SP (the declaration here is app-direct; the
-enforcement is governed — F2 acceptance criteria).
+Pure + serializable (no I/O): this module only defines the shape and the JSON round-trip. It does
+NOT apply anything — see `scripts/apply_access.py` for the imperative, idempotent enforcement that
+runs in CI as the prod SP (the declaration here is app-direct; the enforcement is governed — F2
+acceptance criteria). `group_name_for`/`_GROUP_PREFIX` below are kept as a naming utility but are
+NO LONGER used by `apply_access.py` (changed 2026-07-14): access is granted DIRECTLY to each
+declared principal, not via an intermediate per-Space group — `w.groups.create` in a workspace
+context makes a WORKSPACE-LOCAL group, and UC grants only accept ACCOUNT-level principals (proven
+live). See `apply_access.py`'s module docstring for the full story.
 
 Declared principals can be individual users OR existing groups; either way `check_grants` (GRANT-01)
-verifies SELECT for every one of them, and the per-Space group is what's actually granted/added-to
-in prod (individuals declared here are added as MEMBERS of the per-Space group by the enforcement
-script, not granted directly).
+verifies SELECT for every one of them, and `apply_access.py` grants each one directly (a declared
+GROUP that turns out to be workspace-local is skipped for the UC grant — loudly, never silently —
+but still gets its Genie Space permission applied, since that ACL does accept workspace-local
+groups).
 """
 from __future__ import annotations
 

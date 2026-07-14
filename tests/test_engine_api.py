@@ -919,6 +919,89 @@ def test_promote_rerequest_adds_snapshot_and_re_reviewed_to_same_promotion(monke
     assert [e.event_type for e in store.list_audit_events(pid1)] == ["requested", "re_reviewed"]
 
 
+def _fake_request_promotion_echoing_access_spec(number: int):
+    """Mirrors `app_logic.request_promotion`'s real contract: the reviewed AccessSpec rides back on
+    `review["access_spec"]`, keyed off whatever `access_spec_` the caller threaded in."""
+    def fn(space_id, *a, access_spec_=None, **k):
+        review = {"gate": {"conclusion": "success", "summary": "ok"}, "findings": [],
+                 "eval": {"status": "pass", "summary": "n/a"}, "timeline": [],
+                 "access_spec": access_spec_.to_dict() if access_spec_
+                 else {"space_permissions": [], "uc_principals": []}}
+        return {"review": review, "pr": {"number": number, "url": f"https://gh/pr/{number}"}}
+    return fn
+
+
+def test_promote_rerequest_updates_the_stored_declarations(monkeypatch, store):
+    """Found #3: a re-request declaring a DIFFERENT resource_title/access_spec/table_mapping than
+    the first must refresh the stored Promotion row — otherwise the history/recovery view keeps
+    showing the FIRST request's now-stale declarations forever."""
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion",
+                        _fake_request_promotion_echoing_access_spec(7))
+    h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
+    pid = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis v1"},
+                      headers=h).json()["promotion_id"]
+    assert store.get_promotion(pid).resource_title == "Recebíveis v1"
+
+    r2 = client.post("/api/promote", json={
+        "space_id": "s1", "resource_title": "Recebíveis v2",
+        "access_spec": _ACCESS_SPEC_WIRE, "table_mapping": _TABLE_MAPPING_WIRE}, headers=h)
+    assert r2.json()["promotion_id"] == pid  # same Promotion (1:1 with the PR)
+
+    p = store.get_promotion(pid)
+    assert p.resource_title == "Recebíveis v2"
+    assert p.access_spec == _ACCESS_SPEC_WIRE
+    assert p.table_mapping == _TABLE_MAPPING_WIRE
+
+    # the Steward-facing recovery payload echoes the UPDATED declarations, not the first round's
+    detail = client.get(f"/api/promotions/{pid}",
+                        headers={"x-forwarded-access-token": "tok"}).json()
+    assert detail["promotion"]["resource_title"] == "Recebíveis v2"
+    assert detail["promotion"]["access_spec"] == _ACCESS_SPEC_WIRE
+    assert detail["promotion"]["table_mapping"] == _TABLE_MAPPING_WIRE
+
+
+def test_promote_rerequest_clearing_a_declaration_persists_none_not_the_stale_value(monkeypatch, store):
+    """Declare-latest-wins: a re-request that DROPS a previously-declared AccessSpec/table_mapping
+    must clear it on the stored Promotion, never keep echoing the first round's value."""
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion",
+                        _fake_request_promotion_echoing_access_spec(8))
+    h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
+    pid = client.post("/api/promote", json={"space_id": "s1", "access_spec": _ACCESS_SPEC_WIRE,
+                                             "table_mapping": _TABLE_MAPPING_WIRE},
+                      headers=h).json()["promotion_id"]
+    assert store.get_promotion(pid).access_spec == _ACCESS_SPEC_WIRE
+
+    client.post("/api/promote", json={"space_id": "s1"}, headers=h)  # re-request, nothing declared
+    p = store.get_promotion(pid)
+    # access_spec's source is the review's OWN echo, which — like the create path — always carries
+    # `spec.to_dict()` (never a bare None, even for an empty spec); the point is it's the FRESH
+    # empty shape, not the stale first-round declaration.
+    assert p.access_spec == {"space_permissions": [], "uc_principals": []}
+    assert p.access_spec != _ACCESS_SPEC_WIRE
+    # table_mapping's source is the request body directly (not echoed by the review), so an omitted
+    # one on re-request really is a bare None.
+    assert p.table_mapping is None
+
+
+def test_promote_rerequest_records_the_new_declarations_on_the_re_reviewed_audit_event(monkeypatch, store):
+    """The re_reviewed event's `detail` carries the declarations THIS request made (rather than a
+    distinct `declarations_updated` event type — see `_persist_promotion`'s docstring for why)."""
+    monkeypatch.setattr(engine_api.app_logic, "request_promotion",
+                        _fake_request_promotion_echoing_access_spec(9))
+    h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
+    pid = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
+    client.post("/api/promote", json={"space_id": "s1", "resource_title": "Novo nome",
+                                      "access_spec": _ACCESS_SPEC_WIRE}, headers=h)
+
+    events = store.list_audit_events(pid)
+    requested = next(e for e in events if e.event_type == "requested")
+    re_reviewed = next(e for e in events if e.event_type == "re_reviewed")
+    assert "resource_title" not in requested.detail  # unchanged shape for the ORIGINAL request
+    assert re_reviewed.detail["resource_title"] == "Novo nome"
+    assert re_reviewed.detail["access_spec"] == _ACCESS_SPEC_WIRE
+    assert re_reviewed.detail["table_mapping"] is None
+
+
 def test_list_promotions_scope_mine_filters_by_email(monkeypatch, store):
     _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-bob": "bob@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))

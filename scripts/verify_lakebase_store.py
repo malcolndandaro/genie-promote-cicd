@@ -89,6 +89,17 @@ def main() -> int:
         except DuplicatePRNumber:
             pass
 
+        # found #3: a re-request refreshes the declared resource_title/access_spec/table_mapping on
+        # the SAME Promotion row (rather than only ever setting them once, at creation).
+        store.update_declarations(
+            p.id, resource_title="Verify v2",
+            access_spec={"space_permissions": [], "uc_principals": [{"principal": "ana@acme.com", "is_group": False}]},
+            table_mapping={"dev_x.a.b": "prod_x.a.b"})
+        refreshed = store.get_promotion(p.id)
+        assert refreshed.resource_title == "Verify v2", "update_declarations: resource_title"
+        assert refreshed.access_spec["uc_principals"], "update_declarations: access_spec jsonb round-trips"
+        assert refreshed.table_mapping == {"dev_x.a.b": "prod_x.a.b"}, "update_declarations: table_mapping jsonb round-trips"
+
         s1 = store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="1 blocker",
                                    findings=[{"rule_id": "GRANT-01"}], eval={"status": "advisory"},
                                    timeline=[{"key": "review", "status": "fail"}])

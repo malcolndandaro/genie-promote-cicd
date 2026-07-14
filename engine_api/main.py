@@ -509,7 +509,17 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
     it + a `requested` audit event; re-requesting while the PR is open adds a NEW snapshot +
     `re_reviewed` to the SAME Promotion (no fragmentation). Every request appends a Review Snapshot
     (the reviewer result at that point in time) so recovery renders it WITHOUT re-running the LLM.
-    DB writes are the app SP's job (this runs server-side), preserving the OBO/SP split."""
+    DB writes are the app SP's job (this runs server-side), preserving the OBO/SP split.
+
+    Found #3: a re-request can change any of the three declarations (`resource_title`/`access_spec`/
+    `table_mapping`) — the Requester picked a different prod name, revised the AccessSpec, or edited
+    the table de-para — so a re-review must refresh them on the EXISTING Promotion row too, not just
+    at creation (`store.update_declarations`, replacing the `touch()`-only re-review path). The
+    audit trail records this the SAME way: rather than a distinct `declarations_updated` event type
+    (which would mean a THIRD event vocabulary + a new EVENT_TYPES/RECURRING_EVENTS entry for
+    something that only ever happens alongside a re-review, never alone), the re-request's OWN
+    `re_reviewed` event's `detail` is extended with the new declarations — one event per action,
+    fitting the existing "re_reviewed already recurs" convention instead of inventing a second one."""
     from promotion_store import DuplicatePRNumber
 
     review, pr = result["review"], result["pr"]
@@ -544,15 +554,23 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
         promotion_id, gate_conclusion=gate.get("conclusion"), gate_summary=gate.get("summary"),
         findings=review.get("findings") or [], eval=review.get("eval"),
         timeline=review.get("timeline") or [])
+    detail = {"pr_number": pr["number"], "pr_url": pr["url"]}
+    if event == "re_reviewed":
+        # The (possibly changed) declarations this SAME request carried — recorded on the event so
+        # the audit trail shows what a re-request declared, not just that one happened.
+        access_spec_ = review.get("access_spec") or None
+        table_mapping_ = body.table_mapping or None
+        detail.update(resource_title=body.resource_title, access_spec=access_spec_,
+                     table_mapping=table_mapping_)
+        store.update_declarations(
+            promotion_id, resource_title=body.resource_title, access_spec=access_spec_,
+            table_mapping=table_mapping_)
     # App-originated event. `actor_app_email` (display-only OBO email) is recorded on `requested`
-    # per ADR-0005; governance identities come from GitHub via reconcile (LB4). On a re-review the
-    # Promotion's updated_at is bumped so freshness reflects the activity before the next reconcile.
+    # per ADR-0005; governance identities come from GitHub via reconcile (LB4).
     store.append_audit_event(
         promotion_id, event,
         actor_app_email=requester_email if event == "requested" else None,
-        detail={"pr_number": pr["number"], "pr_url": pr["url"]})
-    if event == "re_reviewed":
-        store.touch(promotion_id)
+        detail=detail)
     return promotion_id
 
 
@@ -1149,6 +1167,33 @@ def admin_audit(
         return {"audit": rows}
 
     return _engine_call("admin_audit", _run)
+
+
+def _rehydrate_event_summary(e) -> dict:
+    return {"id": e.id, "resource_id": e.resource_id, "resource_title": e.resource_title,
+            "actor_email": e.actor_email, "mode": e.mode, "dev_space_id": e.dev_space_id,
+            "detail": e.detail, "created_at": e.created_at}
+
+
+@api.get("/admin/rehydrate-events")
+def admin_rehydrate_events(
+    limit: int = 200,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """US-36 — "Exportações para dev": every prod->dev rehydrate the app has performed, newest
+    first, bounded. `rehydrate.py` has captured these (LB4's standalone `rehydrate_events` table,
+    for a rehydrate with no linkable source Promotion — see `promotion_store.RehydrateEvent`) since
+    F1's follow-up, but until now nothing surfaced them: this is the read-only admin view over
+    `PromotionStore.list_rehydrate_events`. Admin-gated the SAME way as every other F4 endpoint
+    (`_require_admin` on the VERIFIED identity)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_store()
+
+    def _run() -> dict:
+        return {"events": [_rehydrate_event_summary(e) for e in store.list_rehydrate_events(limit=limit)]}
+
+    return _engine_call("admin_rehydrate_events", _run)
 
 
 # --- F5 Phase 1: configurable roles (Lakebase-backed) + READ-ONLY GitHub drift detection ---------

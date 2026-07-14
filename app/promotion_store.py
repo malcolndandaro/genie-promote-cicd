@@ -210,6 +210,22 @@ class PromotionStore:
         freshness/ordering reflect the activity even before the next reconcile."""
         self._b.update_promotion(promotion_id, {"updated_at": self._clock()})
 
+    def update_declarations(self, promotion_id: str, *, resource_title: Optional[str],
+                            access_spec: Optional[dict], table_mapping: Optional[dict]) -> None:
+        """Refresh the declared `resource_title`/`access_spec`/`table_mapping` on an EXISTING
+        Promotion (found #3): a re-request on the same open PR can change any of these three (a
+        different prod name, a revised AccessSpec, a new table de-para), but `create_promotion`
+        only sets them ONCE, at creation — without this, the stored Promotion kept showing the
+        FIRST request's declarations forever, stale against what the PR/sidecars actually now
+        carry. Called instead of (not in addition to) `touch()` on a re-request — it bumps
+        `updated_at` itself, same as `touch`/`update_cache` do. The new values REPLACE the old ones
+        outright (declare-latest-wins, not a merge): a re-request that drops an AccessSpec (e.g. the
+        Requester decided no principal is needed after all) must show that, not keep echoing a
+        stale one only the previous round declared."""
+        self._b.update_promotion(promotion_id, {
+            "resource_title": resource_title, "access_spec": access_spec,
+            "table_mapping": table_mapping, "updated_at": self._clock()})
+
     def get_promotion(self, promotion_id: str) -> Optional[Promotion]:
         row = self._b.get_promotion(promotion_id)
         return _as(Promotion, row)

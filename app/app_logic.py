@@ -624,8 +624,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
 
     ``access_spec_`` (F2, optional) is the Requester's declared `AccessSpec` — DECLARATION is
     app-direct (this function just writes it to a committed sidecar), but ENFORCEMENT (actually
-    applying the per-Space group's UC grants + Genie Space permissions) is NOT done here: it goes
-    through the governed pipeline (``scripts/apply_access.py``, run by CI/CD as the prod SP —
+    applying UC grants + Genie Space permissions directly to each declared principal) is NOT done
+    here: it goes through the governed pipeline (``scripts/apply_access.py``, run by CI/CD as the prod SP —
     mirrors GRANT-01's split between the app's PREVIEW check and CI's authoritative one). Named
     with a trailing underscore to avoid shadowing the ``access_spec`` module import.
 
@@ -672,8 +672,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     if not spec.is_empty():
         # The AccessSpec sidecar (F2): committed alongside the artifact so CI's render.sh copies it
         # forward, check_grants.py (GRANT-01) verifies every declared principal, and
-        # apply_access.py (governed enforcement) applies the per-Space group + grants + Space
-        # permissions — NEVER applied here (no app-direct prod mutation).
+        # apply_access.py (governed enforcement) applies UC grants + Space permissions directly to
+        # each declared principal — NEVER applied here (no app-direct prod mutation).
         extra[access_path_for(slug)] = json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n"
     else:
         remove.append(access_path_for(slug))
@@ -719,8 +719,8 @@ def _merge_access_spec(existing: "access_spec.AccessSpec", *, principal_email: s
                        want_space_permission: bool, space_permission_level: str,
                        want_uc_select: bool) -> "access_spec.AccessSpec":
     """Add ``principal_email`` to ``existing`` for whichever system(s) the request declared,
-    without dropping anything already there (F3 acceptance: approval only ever GROWS access,
-    mirrors `apply_access.reconcile_membership`'s "never removes a member" convention). Idempotent
+    without dropping anything already there (F3 acceptance: approval only ever GROWS access, same
+    "never remove a declared principal" convention F2's own enforcement follows). Idempotent
     on the principal: re-approving/re-applying the same request twice is a no-op diff."""
     space_perms = list(existing.space_permissions)
     if want_space_permission and not any(
