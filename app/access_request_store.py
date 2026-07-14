@@ -167,6 +167,11 @@ class AccessRequestStore:
         if approver_email.strip().lower() == req.requester_email.strip().lower():
             raise SelfApprovalError(
                 "segregação de funções: o solicitante não pode aprovar/negar a própria solicitação")
+        # S5 (app-ux-overhaul, D8): a denial without a reason defeats the whole point of adding
+        # denial-reason clarity — a required field, not an optional courtesy. Approving still
+        # needs no reason (only denial does). Server-enforced, not just a UI affordance.
+        if not approve and not (decision_note and decision_note.strip()):
+            raise ValueError("uma justificativa é obrigatória ao negar uma solicitação de acesso")
         now = self._clock()
         new_state = "approved" if approve else "denied"
         self._b.update_request(request_id, {

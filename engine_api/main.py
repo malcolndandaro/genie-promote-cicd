@@ -928,9 +928,12 @@ def list_access_requests(
         else:
             requests = store.list_requests(requester_email=verified)
     elif scope == "pending":
-        if not _is_admin(verified):
+        # S1/S5 (app-ux-overhaul): gated on the real Approver persona now, not just is_admin — an
+        # Admin retains this too (superset, backward compatible with pre-S1 behavior), but a
+        # dedicated Approver no longer needs the broader admin-console surface to see this queue.
+        if not (_is_approver(verified) or _is_admin(verified)):
             raise HTTPException(status_code=403,
-                                detail="Apenas Stewards/Admins veem a fila de aprovação.")
+                                detail="Apenas Approvers/Admins veem a fila de aprovação.")
         requests = store.list_requests(state="requested")
     else:
         raise HTTPException(status_code=400, detail="scope inválido; use 'mine' ou 'pending'")
@@ -974,7 +977,7 @@ def decide_access_request(
     authorization: str | None = Header(default=None),
 ) -> dict:
     """Approve or deny an access request. Approver authority is EXPLICIT: only a configured
-    Steward/Admin (by VERIFIED identity, A2) may decide at all — a random authenticated user
+    Approver/Admin (by VERIFIED identity, A2) may decide at all — a random authenticated user
     cannot self-serve their own approval by simply calling this endpoint. SoD is then enforced a
     SECOND time, server-side, inside the store itself (`AccessRequestStore.decide`): the approver's
     verified identity is compared against the REQUEST's OWN recorded `requester_email` (never a
@@ -999,9 +1002,11 @@ def decide_access_request(
         identity = authz.verify_identity(token, host=Config().host)
     except authz.AccessDenied:
         raise HTTPException(status_code=401, detail="Sessão expirada — recarregue para reautenticar.")
-    if not _is_admin(identity.user_name):
+    # S1/S5 (app-ux-overhaul): gated on the real Approver persona, not just is_admin (superset —
+    # an Admin can still decide, same as before S1).
+    if not (_is_approver(identity.user_name) or _is_admin(identity.user_name)):
         raise HTTPException(status_code=403,
-                            detail="Apenas Stewards/Admins aprovam ou negam solicitações de acesso.")
+                            detail="Apenas Approvers/Admins aprovam ou negam solicitações de acesso.")
     if store.get_request(request_id) is None:
         raise HTTPException(status_code=404, detail="solicitação de acesso não encontrada")
 

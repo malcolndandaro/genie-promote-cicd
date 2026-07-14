@@ -190,7 +190,7 @@ def test_admin_access_request_queue_shows_every_state(monkeypatch, store, access
     _setup_admin(monkeypatch)
     r1 = access_store.create_request(space_id="s1", space_title="A", requester_email="ana@x")
     r2 = access_store.create_request(space_id="s2", space_title="B", requester_email="bob@x")
-    access_store.decide(r2.id, approve=False, approver_email="admin@x")  # -> denied
+    access_store.decide(r2.id, approve=False, approver_email="admin@x", decision_note="fora do escopo")  # -> denied
     r3 = access_store.create_request(space_id="s3", space_title="C", requester_email="carol@x")
     access_store.decide(r3.id, approve=True, approver_email="admin@x")   # -> approved
     access_store.mark_applied(r3.id, actor_email="admin@x", pr_number=5, pr_url="https://gh/pr/5")

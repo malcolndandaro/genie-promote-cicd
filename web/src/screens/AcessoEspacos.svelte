@@ -1,27 +1,23 @@
 <script lang="ts">
   // F3 — self-service access requests: a user who lacks access to a prod Space can request it; a
-  // distinct Steward/Admin approves or denies; approval applies the grant via the GOVERNED path
-  // (F2's sidecar -> bot PR -> scripts/apply_access.py) — never an app-direct grant/permission call.
+  // distinct Approver approves or denies (their OWN "Aprovações de acesso" section —
+  // FilaAprovacao.svelte, S5); approval applies the grant via the GOVERNED path (F2's sidecar ->
+  // bot PR -> scripts/apply_access.py) — never an app-direct grant/permission call.
+  //
+  // S5 (app-ux-overhaul, D8): the approval queue moved OUT of this screen entirely (even for a
+  // caller who ALSO holds the Approver persona — that queue lives in ITS OWN section, per D1's
+  // "separate sections per persona, not merged"). This screen is the Business User's own view:
+  // request form + status of their own requests, now showing the denial reason (D8) when denied.
   import Card from '../lib/components/Card.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import Picker from '../lib/components/Picker.svelte';
-  import {
-    postAccessRequest,
-    getAccessRequests,
-    decideAccessRequest,
-    getProdSpaces,
-    ApiError,
-    isAuthError,
-  } from '../lib/api';
+  import { postAccessRequest, getAccessRequests, getProdSpaces, isAuthError } from '../lib/api';
   import type { PickerOption } from '../lib/picker';
-  import type { AccessRequest, AccessRequestState, Whoami } from '../lib/types';
+  import type { AccessRequest, AccessRequestState } from '../lib/types';
 
-  interface Props {
-    who: Whoami | null;
-  }
-  let { who }: Props = $props();
+  // No `who` prop needed anymore — this screen no longer branches on is_admin/is_approver.
 
   // --- request form -----------------------------------------------------------
   // G1: the requested Space is PICKED, from the PROD listing (`/api/prod-spaces`) — deliberately
@@ -67,37 +63,6 @@
 
   // --- requester status view ---------------------------------------------------
   let mineP = $state(getAccessRequests('mine'));
-
-  // --- approver queue (role-gated server-side; the tab is only OFFERED to an admin/steward) -----
-  // `who` arrives async (App.svelte awaits /api/whoami), so this starts null and the $effect below
-  // fetches once `who.is_admin` becomes true — never read `who` only at construction time.
-  let pendingP = $state<Promise<AccessRequest[]> | null>(null);
-  $effect(() => {
-    if (who?.is_admin && pendingP === null) pendingP = getAccessRequests('pending');
-  });
-
-  let decidingId = $state<string | null>(null);
-  let decideError = $state<string | null>(null);
-
-  async function decide(r: AccessRequest, approve: boolean): Promise<void> {
-    if (decidingId) return;
-    decidingId = r.id;
-    decideError = null;
-    try {
-      await decideAccessRequest(r.id, approve);
-      pendingP = getAccessRequests('pending');
-      mineP = getAccessRequests('mine'); // in case the approver is also viewing their own list
-    } catch (e) {
-      decideError =
-        e instanceof ApiError && e.status === 403
-          ? 'Segregação de funções: você não pode aprovar/negar sua própria solicitação.'
-          : e instanceof Error
-            ? e.message
-            : String(e);
-    } finally {
-      decidingId = null;
-    }
-  }
 
   // Applying the grant is SYNCHRONOUS with approval (decide -> apply_access_request -> mark_applied,
   // all in the one /decide call). So a request that stays `approved` (never reaching `applied`) means
@@ -187,6 +152,11 @@
                 <strong>{r.space_title ?? r.space_id}</strong>
                 <span class="muted text-xs">{accessSummary(r)}</span>
                 {#if r.note}<span class="muted text-xs">"{r.note}"</span>{/if}
+                <!-- D8: denial reason clarity — REQUIRED server-side (S5), so every denied
+                     request has one to show here. -->
+                {#if r.state === 'denied' && r.decision_note}
+                  <span class="muted text-xs req-row__reason">Motivo: "{r.decision_note}"</span>
+                {/if}
               </div>
               <div class="req-row__meta">
                 <Badge tone={STATE_TONE[r.state]}>{STATE_LABEL[r.state]}</Badge>
@@ -205,56 +175,6 @@
       </p>
     {/await}
   </Card>
-
-  {#if who?.is_admin}
-    <Card
-      title="Fila de aprovação"
-      subtitle="Solicitações aguardando decisão (Steward/Admin). Você não pode aprovar/negar sua própria solicitação."
-    >
-      {#if decideError}
-        <p class="error" role="alert">{decideError}</p>
-      {/if}
-      {#await pendingP}
-        <Skeleton height="3rem" />
-      {:then requests}
-        {#if !requests || requests.length === 0}
-          <p class="muted text-sm">Nenhuma solicitação pendente.</p>
-        {:else}
-          <ul class="req-list">
-            {#each requests as r (r.id)}
-              <li class="req-row">
-                <div class="req-row__main">
-                  <strong>{r.space_title ?? r.space_id}</strong>
-                  <span class="muted text-xs">solicitado por {r.requester_email}</span>
-                  <span class="muted text-xs">{accessSummary(r)}</span>
-                  {#if r.note}<span class="muted text-xs">"{r.note}"</span>{/if}
-                </div>
-                <div class="req-row__actions">
-                  <Button
-                    variant="primary"
-                    loading={decidingId === r.id}
-                    disabled={!!decidingId}
-                    onclick={() => decide(r, true)}
-                  >
-                    Aprovar
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={!!decidingId}
-                    onclick={() => decide(r, false)}
-                  >
-                    Negar
-                  </Button>
-                </div>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      {:catch err}
-        <p class="error" role="alert">Erro ao carregar a fila: {err instanceof Error ? err.message : String(err)}</p>
-      {/await}
-    </Card>
-  {/if}
 </div>
 
 <style>
@@ -324,15 +244,14 @@
     flex-direction: column;
     gap: 0.15rem;
   }
+  .req-row__reason {
+    font-style: italic;
+  }
   .req-row__meta {
     display: flex;
     align-items: center;
     gap: var(--space-2);
     flex-wrap: wrap;
-  }
-  .req-row__actions {
-    display: flex;
-    gap: var(--space-2);
   }
   .error {
     color: var(--destructive);

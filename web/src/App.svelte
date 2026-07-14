@@ -6,6 +6,7 @@
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import PromotionDetail from './screens/PromotionDetail.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
+  import FilaAprovacao from './screens/FilaAprovacao.svelte';
   import ComingSoon from './screens/ComingSoon.svelte';
   import Rehidratar from './screens/Rehidratar.svelte';
   import Admin from './screens/Admin.svelte';
@@ -53,9 +54,9 @@
   // 403s on the VERIFIED identity regardless) — this is purely a UX affordance so a caller
   // never sees an entry point to a screen that would just error for them.
   //
-  // "Aprovações de acesso" (Approver) and "Revisão de promoções" (Steward) route to a
-  // ComingSoon placeholder until their real screens land (S5, S6 respectively) — this slice
-  // only builds the nav structure, not those screens.
+  // "Aprovações de acesso" (Approver) is shown for is_approver OR is_admin (S5's backend gate is
+  // a superset for backward compat — an existing admin-only deployment keeps this capability).
+  // "Revisão de promoções" (Steward) still routes to a ComingSoon placeholder until S6 builds it.
   //
   // S3: "Minhas promoções" is gone as a nav item — its history list merged into "Meus espaços"
   // (D3). The `promocoes` route still exists for the `#/promocoes/:id` shareable deep-link
@@ -70,7 +71,7 @@
         { id: 'rehidratar', label: 'Exportar Prod → Dev', icon: 'download' },
       ],
     },
-    ...(who?.is_approver
+    ...(who?.is_approver || who?.is_admin
       ? [{
           title: 'Aprovações de acesso',
           items: [{ id: 'aprovacoes' as const, label: 'Fila de aprovação', icon: 'check-circle' as const }],
@@ -149,12 +150,9 @@
       onBack={() => router.navigate('espacos')}
     />
   {:else if router.route.id === 'acesso'}
-    <AcessoEspacos {who} />
+    <AcessoEspacos />
   {:else if router.route.id === 'aprovacoes'}
-    <ComingSoon
-      title="Fila de aprovação"
-      description="Em construção (S5) — por enquanto, a fila de aprovação de acesso continua em Acesso."
-    />
+    <FilaAprovacao />
   {:else if router.route.id === 'revisao'}
     <ComingSoon
       title="Aguardando minha revisão"
