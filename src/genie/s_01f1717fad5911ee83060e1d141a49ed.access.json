@@ -10,10 +10,6 @@
     {
       "principal": "malcoln.dandaro@databricks.com",
       "is_group": false
-    },
-    {
-      "principal": "pedro.perdomo@databricks.com",
-      "is_group": false
     }
   ]
 }
