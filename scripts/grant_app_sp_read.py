@@ -59,5 +59,16 @@ def main() -> int:
     return 0
 
 
+def _run() -> int:
+    """CLI wrapper: emit the failure as a ::error annotation so the app's deploy-detail panel
+    shows the real reason (see apply_access.py's identical wrapper)."""
+    from check_grants import _gh_escape
+    try:
+        return main()
+    except BaseException as e:  # noqa: BLE001
+        print(f"::error title=grant-app-sp::{_gh_escape(f'{type(e).__name__}: {e}')}")
+        raise
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run())

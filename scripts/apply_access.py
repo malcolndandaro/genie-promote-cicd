@@ -188,5 +188,18 @@ def main() -> int:
     return 0
 
 
+def _run() -> int:
+    """CLI wrapper: on ANY failure, ALSO emit a `::error::` workflow command so the reason becomes
+    a check-run ANNOTATION (found live: the app's deploy-detail panel could only show GitHub's
+    generic "Process completed with exit code 1." because this script's errors were bare
+    prints/tracebacks — same lesson as GRANT-01's annotations in check_grants.py)."""
+    from check_grants import _gh_escape  # same dir; reuse the escaping contract
+    try:
+        return main()
+    except BaseException as e:  # noqa: BLE001 — re-raised below; annotation-first
+        print(f"::error title=apply-access::{_gh_escape(f'{type(e).__name__}: {e}')}")
+        raise
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run())
