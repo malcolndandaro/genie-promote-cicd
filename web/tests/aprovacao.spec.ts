@@ -82,8 +82,10 @@ async function openFromHistory(
     r.fulfill({ json: { promotion: s, review, pr: PR, live_status: status, audit: [] } }));
   await page.route(`**/api/promote/${PR.number}/status`, (r) => r.fulfill({ json: status }));
   await page.goto('/');
-  await page.getByRole('link', { name: 'Minhas promoções' }).click();
+  await page.getByRole('link', { name: 'Meus espaços' }).click();
   await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();
+  // S3: history is nested under its space now — expand the row, then open the attempt.
+  await page.getByRole('button', { name: /Expandir histórico de/ }).click();
   await page.getByRole('button', { name: /Abrir/ }).click();
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 }

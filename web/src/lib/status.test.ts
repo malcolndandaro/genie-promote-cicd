@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { phaseChip, PHASE_LABEL, EVENT_LABEL } from './status';
+import { phaseChip, PHASE_LABEL, EVENT_LABEL, statusBucket } from './status';
 
 describe('phaseChip', () => {
   it('maps known phases to a PT label + semantic tone', () => {
@@ -37,5 +37,25 @@ describe('phaseChip', () => {
 describe('EVENT_LABEL', () => {
   it('has a PT label for the A3/F1 rehydrate audit event', () => {
     expect(EVENT_LABEL.rehydrated).toBe('Rehidratado para dev');
+  });
+});
+
+describe('statusBucket', () => {
+  it('maps each phase to one of the 4 filter buckets (S3/GR3)', () => {
+    expect(statusBucket('deployed')).toBe('deployed');
+    expect(statusBucket('merged')).toBe('merged');
+    expect(statusBucket('checks_failed')).toBe('failed');
+    expect(statusBucket('deploy_failed')).toBe('failed');
+    expect(statusBucket('closed')).toBe('failed');
+    expect(statusBucket('open')).toBe('open');
+    expect(statusBucket('checks_running')).toBe('open');
+    expect(statusBucket('awaiting_approval')).toBe('open');
+    expect(statusBucket('deploying')).toBe('open');
+  });
+
+  it('falls back to "open" for null/undefined/unknown phases — never dropped from every filter', () => {
+    expect(statusBucket(null)).toBe('open');
+    expect(statusBucket(undefined)).toBe('open');
+    expect(statusBucket('something_new')).toBe('open');
   });
 });

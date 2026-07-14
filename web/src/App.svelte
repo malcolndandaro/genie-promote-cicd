@@ -4,7 +4,7 @@
   import Topbar from './lib/components/Topbar.svelte';
   import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
-  import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
+  import PromotionDetail from './screens/PromotionDetail.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
   import ComingSoon from './screens/ComingSoon.svelte';
   import Rehidratar from './screens/Rehidratar.svelte';
@@ -55,13 +55,16 @@
   // "Aprovações de acesso" (Approver) and "Revisão de promoções" (Steward) route to a
   // ComingSoon placeholder until their real screens land (S5, S6 respectively) — this slice
   // only builds the nav structure, not those screens.
+  //
+  // S3: "Minhas promoções" is gone as a nav item — its history list merged into "Meus espaços"
+  // (D3). The `promocoes` route still exists for the `#/promocoes/:id` shareable deep-link
+  // (PromotionDetail), just with no nav entry pointing at it anymore.
   const NAV_SECTIONS: NavSection[] = $derived([
     {
       title: 'Meu trabalho',
       items: [
         { id: 'inicio', label: 'Início', icon: 'home' },
         { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
-        { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
         { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
         { id: 'rehidratar', label: 'Exportar Prod → Dev', icon: 'download' },
       ],
@@ -92,7 +95,7 @@
   const SECTION_TITLE: Record<RouteId, string> = {
     inicio: 'Início',
     espacos: 'Meus espaços',
-    promocoes: 'Minhas promoções',
+    promocoes: 'Detalhe da promoção',
     acesso: 'Acesso',
     aprovacoes: 'Aprovações de acesso',
     revisao: 'Revisão de promoções',
@@ -130,17 +133,17 @@
   {:else if router.route.id === 'espacos'}
     <MeusEspacos
       {promotion}
-      userEmail={who?.email ?? null}
+      {who}
       devHost={who?.dev_host ?? null}
       prodHost={who?.prod_host ?? null}
+      onOpenPromotion={openPromotion}
     />
   {:else if router.route.id === 'promocoes'}
-    <MinhasPromocoes
+    <PromotionDetail
       {who}
       {promotion}
-      onOpen={openPromotion}
       detailId={router.route.param}
-      onBack={() => router.navigate('promocoes')}
+      onBack={() => router.navigate('espacos')}
     />
   {:else if router.route.id === 'acesso'}
     <AcessoEspacos {who} />

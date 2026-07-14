@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 
-// LB5: the "Minhas promoções" history screen + role-gated scope toggle (admins see all).
+// LB5: the cross-user history + role-gated scope toggle (admins see all) — now living inside the
+// merged "Meus espaços" page (S3/D3) rather than a standalone "Minhas promoções" screen. History
+// is nested per-space: expand a space's row to see its attempts and open one.
 
 const review = {
   findings: [],
@@ -37,16 +39,18 @@ function routes(page, { isAdmin }: { isAdmin: boolean }) {
       deploy: { status: 'none', conclusion: null, waiting_approval: false, run_url: null }, pr_url: 'https://gh/pr/6', phase: 'checks_running' } }));
 }
 
-test('a non-admin sees only their promotions; opening a row shows the stored review (no re-run)', async ({ page }) => {
+test('a non-admin sees only their promotions; expanding a row and opening it shows the stored review (no re-run)', async ({ page }) => {
   let promoteCalled = false;
   await page.route('**/api/promote', (r) => { promoteCalled = true; r.fulfill({ status: 500, json: {} }); });
   routes(page, { isAdmin: false });
   await page.goto('/');
-  await page.getByRole('link', { name: 'Minhas promoções' }).click();
+  await page.getByRole('link', { name: 'Meus espaços' }).click();
 
   await expect(page.getByText('Recebíveis')).toBeVisible();
+  await expect(page.getByText('Cedentes')).toHaveCount(0); // scope=mine only
   await expect(page.getByText('Todas (Steward/Admin)')).toHaveCount(0); // no scope toggle for a non-admin
 
+  await page.getByRole('button', { name: /Expandir histórico de/ }).click();
   await page.getByRole('button', { name: /Abrir/ }).click();
   // Switches to the review view and renders the STORED snapshot — no reviewer re-run.
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
@@ -54,14 +58,24 @@ test('a non-admin sees only their promotions; opening a row shows the stored rev
   expect(promoteCalled).toBe(false);
 });
 
-test('an admin gets the scope toggle and can list all promotions', async ({ page }) => {
+test('an admin gets the scope toggle and can list all promotions, grouped by space', async ({ page }) => {
   routes(page, { isAdmin: true });
   await page.goto('/');
-  await page.getByRole('link', { name: 'Minhas promoções' }).click();
+  await page.getByRole('link', { name: 'Meus espaços' }).click();
 
   await expect(page.getByRole('button', { name: 'Todas (Steward/Admin)' })).toBeVisible();
   await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();
-  // The cross-user view shows another author's promotion too.
+  // The cross-user view groups another author's promotion under its OWN space row too.
   await expect(page.getByText('Cedentes')).toBeVisible();
   await expect(page.getByText('Recebíveis')).toBeVisible();
+});
+
+test('the open promotion on a space is visible on its row before expanding (D7)', async ({ page }) => {
+  routes(page, { isAdmin: false });
+  await page.goto('/');
+  await page.getByRole('link', { name: 'Meus espaços' }).click();
+
+  // "Recebíveis" has an open (non-terminal) promotion by ana — visible on the collapsed row.
+  await expect(page.getByText('Aguardando merge')).toBeVisible();
+  await expect(page.getByText('— ana@databricks.com')).toBeVisible();
 });

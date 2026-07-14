@@ -57,3 +57,26 @@ export function phaseChip(phase: string | null | undefined): { label: string; to
   if (!phase) return { label: '—', tone: 'neutral' };
   return { label: PHASE_LABEL[phase as PromotePhase] ?? phase, tone: phaseTone(phase as PromotePhase) };
 }
+
+/** S3 (merged "Meus espaços" page, GR3): the cross-space status filter's 4 buckets — open/
+ * merged/failed/deployed. `checks_failed`/`deploy_failed`/`closed` all read as "failed" for
+ * filtering purposes (didn't make it), even though `checks_failed` isn't always terminal (a
+ * fix can still be pushed) — the filter is about "does this need attention right now", not
+ * strict terminality. Unrecognized/null phases fall into "open" (never silently dropped from
+ * every filter). */
+export type StatusBucket = 'open' | 'merged' | 'failed' | 'deployed';
+
+export function statusBucket(phase: string | null | undefined): StatusBucket {
+  switch (phase) {
+    case 'deployed':
+      return 'deployed';
+    case 'checks_failed':
+    case 'deploy_failed':
+    case 'closed':
+      return 'failed';
+    case 'merged':
+      return 'merged';
+    default:
+      return 'open'; // open, checks_running, awaiting_approval, deploying, null/unknown
+  }
+}

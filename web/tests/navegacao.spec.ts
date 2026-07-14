@@ -2,6 +2,9 @@ import { test, expect } from '@playwright/test';
 
 // UI1: the production app shell — sidebar navigation, hash routing (deep-links + reload), the active
 // state, and the mobile drawer. /api/* are mocked the same way the other smokes mock them.
+//
+// S2 (persona-sectioned nav): the sidebar is now grouped sections, not a flat list — these tests
+// exercise the "Meu trabalho" section, which every caller holds regardless of persona.
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }),
@@ -9,14 +12,14 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/spaces', (r) =>
     r.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }),
   );
-  // Empty so recover-on-load is a no-op and the history screen shows its empty state.
+  // Empty so recover-on-load is a no-op and the merged espaços page shows its empty-history state.
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
 });
 
 test('lands on the default route with the sidebar nav and an active item', async ({ page }) => {
   await page.goto('/');
-  // The four primary destinations are present as nav links.
-  for (const label of ['Início', 'Meus espaços', 'Minhas promoções', 'Acesso']) {
+  // The Business User's "Meu trabalho" section destinations are present as nav links.
+  for (const label of ['Início', 'Meus espaços', 'Acesso', 'Exportar Prod → Dev']) {
     await expect(page.getByRole('link', { name: label })).toBeVisible();
   }
   // Default route is the home ("Início"), reflected in the URL and the active link.
@@ -32,15 +35,22 @@ test('sidebar navigation switches the screen AND the URL hash', async ({ page })
   await expect(page.getByText('Autoria no dev')).toBeVisible(); // the home's 3-step flow
   await expect(page.getByRole('link', { name: 'Início' })).toHaveAttribute('aria-current', 'page');
 
-  await page.getByRole('link', { name: 'Minhas promoções' }).click();
-  await expect(page).toHaveURL(/#\/promocoes$/);
-  await expect(page.getByText('Nenhuma promoção ainda')).toBeVisible();
+  await page.getByRole('link', { name: 'Meus espaços' }).click();
+  await expect(page).toHaveURL(/#\/espacos$/);
+  await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
 });
 
 test('a deep-linked hash lands on the right screen on load', async ({ page }) => {
+  await page.goto('/#/acesso');
+  await expect(page.getByRole('heading', { name: 'Solicitar acesso' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Acesso' })).toHaveAttribute('aria-current', 'page');
+});
+
+test('a bare #/promocoes (no id) redirects to Meus espaços — there is no standalone list anymore', async ({ page }) => {
   await page.goto('/#/promocoes');
-  await expect(page.getByText('Nenhuma promoção ainda')).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Minhas promoções' })).toHaveAttribute('aria-current', 'page');
+  await expect(page).toHaveURL(/#\/espacos$/);
+  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
 });
 
 test('an unknown hash falls back to the default screen', async ({ page }) => {
@@ -69,7 +79,7 @@ test('on a narrow viewport the sidebar collapses into a toggle/drawer', async ({
 
   // Reopen, then navigating from the drawer routes AND closes the drawer (scrim gone).
   await menu.click();
-  await page.getByRole('link', { name: 'Minhas promoções' }).click();
-  await expect(page).toHaveURL(/#\/promocoes$/);
+  await page.getByRole('link', { name: 'Meus espaços' }).click();
+  await expect(page).toHaveURL(/#\/espacos$/);
   await expect(page.getByRole('button', { name: 'Fechar menu' })).toHaveCount(0);
 });
