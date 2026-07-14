@@ -2,6 +2,7 @@
   import { fly } from 'svelte/transition';
   import Badge from './Badge.svelte';
   import Pipeline from './Pipeline.svelte';
+  import EvalResultsPanel from './EvalResultsPanel.svelte';
   import { severityTone, buildPromotionSteps } from '../pipeline';
   import type { Review } from '../types';
 
@@ -11,11 +12,15 @@
     /** Live PR/CI/deploy status (GH3/GH5) — drives the git steps (pr_review/merge/approval/deploy)
      * of the pipeline. Null until the first poll lands; reflects GitHub, never asserts. */
     liveStatus?: import('../api').PromoteStatus | null;
+    /** W3: the dev workspace host + the promotion's dev Space id — threaded down to
+     * EvalResultsPanel's "Abrir benchmarks no dev" deep-link. */
+    devHost?: string | null;
+    devSpaceId?: string | null;
     /** Optional supplementary content rendered below the review (currently: the Steward's F5
      * drift callout — the approval action itself lives in the PR banner, see PromotionReview). */
     approval?: import('svelte').Snippet;
   }
-  let { review, userEmail, liveStatus = null, approval }: Props = $props();
+  let { review, userEmail, liveStatus = null, devHost = null, devSpaceId = null, approval }: Props = $props();
 
   let failed = $derived(review.gate.conclusion === 'failure');
   // Findings have no stable id; the list never reorders, so a rule_id+index key is unique & safe.
@@ -105,7 +110,7 @@
     </section>
   {/if}
 
-  <p class="muted text-xs">eval-run: {review.eval.summary}</p>
+  <EvalResultsPanel evalResult={review.eval} {devHost} {devSpaceId} />
 
   {#if approval}
     <div class="approval">{@render approval()}</div>

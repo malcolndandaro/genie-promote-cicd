@@ -104,6 +104,33 @@ test('editing EVAL-01\'s minimum benchmarks threshold persists', async ({ page }
   await expect(page.locator('li').filter({ hasText: 'EVAL-01' }).getByLabel('Mín. benchmarks')).toHaveValue('5');
 });
 
+test('editing EVAL-01\'s eval-run threshold (%) persists as a fraction, alongside min_benchmarks', async ({
+  page,
+}) => {
+  mockAdminScreen(page);
+  await page.goto('/#/configuracoes');
+
+  const evalRow = page.locator('li').filter({ hasText: 'EVAL-01' });
+  const thresholdInput = evalRow.getByLabel('Limiar do eval-run (%)');
+  await expect(thresholdInput).toHaveValue('80'); // default 0.8 -> 80%
+  await thresholdInput.fill('60');
+  await thresholdInput.blur();
+
+  // Survives a refresh, AND doesn't wipe out min_benchmarks (same params jsonb, must be merged).
+  await rulesCard(page).getByRole('button', { name: 'Atualizar' }).click();
+  const refreshedRow = page.locator('li').filter({ hasText: 'EVAL-01' });
+  await expect(refreshedRow.getByLabel('Limiar do eval-run (%)')).toHaveValue('60');
+  await expect(refreshedRow.getByLabel('Mín. benchmarks')).toHaveValue('2');
+
+  // Editing min_benchmarks afterwards must likewise NOT wipe out the threshold just set.
+  await refreshedRow.getByLabel('Mín. benchmarks').fill('4');
+  await refreshedRow.getByLabel('Mín. benchmarks').blur();
+  await rulesCard(page).getByRole('button', { name: 'Atualizar' }).click();
+  const finalRow = page.locator('li').filter({ hasText: 'EVAL-01' });
+  await expect(finalRow.getByLabel('Mín. benchmarks')).toHaveValue('4');
+  await expect(finalRow.getByLabel('Limiar do eval-run (%)')).toHaveValue('60');
+});
+
 test('a rule with an override can be reset back to default', async ({ page }) => {
   mockAdminScreen(page, [
     { rule_id: 'ENV-01', is_custom: false, enabled: false, severity: null, params: null,

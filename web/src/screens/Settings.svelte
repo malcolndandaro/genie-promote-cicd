@@ -146,12 +146,30 @@
     );
   }
 
-  function setMinBenchmarks(override: { enabled: boolean; severity: RuleSeverity | null } | undefined, value: number): void {
+  // Both EVAL-01 knobs (min_benchmarks + eval_run_threshold) live in the SAME override params
+  // jsonb — a plain `params: { onlyThisKey }` write would silently WIPE the other one out (the
+  // store replaces the whole column, it doesn't merge), so every write here spreads the existing
+  // `override?.params` first and overrides just its own key.
+  type EvalOverride = { enabled: boolean; severity: RuleSeverity | null; params: Record<string, unknown> | null };
+
+  function setMinBenchmarks(override: EvalOverride | undefined, value: number): void {
     if (!Number.isFinite(value) || value < 0) return;
     void withRuleMutation('EVAL-01', () =>
       upsertRule({
         ruleId: 'EVAL-01', enabled: override?.enabled ?? true, severity: override?.severity ?? undefined,
-        params: { min_benchmarks: Math.trunc(value) },
+        params: { ...override?.params, min_benchmarks: Math.trunc(value) },
+      }),
+    );
+  }
+
+  // W3 follow-up: the eval-run pass-rate threshold, edited as a 0-100 percent, stored as a 0-1
+  // fraction (`rules_config.eval_run_threshold`) — mirrors `setMinBenchmarks` exactly.
+  function setEvalThreshold(override: EvalOverride | undefined, pct: number): void {
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return;
+    void withRuleMutation('EVAL-01', () =>
+      upsertRule({
+        ruleId: 'EVAL-01', enabled: override?.enabled ?? true, severity: override?.severity ?? undefined,
+        params: { ...override?.params, eval_run_threshold: pct / 100 },
       }),
     );
   }
@@ -300,6 +318,9 @@
             {@const severity = override?.severity ?? rule.severity_hint}
             {@const minBenchmarks = (override?.params?.min_benchmarks as number | undefined)
               ?? (rule.params?.min_benchmarks as number | undefined) ?? 2}
+            {@const evalThresholdPct = Math.round((
+              (override?.params?.eval_run_threshold as number | undefined)
+              ?? (rule.params?.eval_run_threshold as number | undefined) ?? 0.8) * 100)}
             <li class="row rule-row" class:rule-row--disabled={!enabled}>
               <div class="row__main">
                 <strong>{rule.rule_id}</strong>
@@ -339,6 +360,18 @@
                       value={minBenchmarks}
                       disabled={mutatingRuleId === rule.rule_id}
                       onchange={(e) => setMinBenchmarks(override, Number(e.currentTarget.value))}
+                    />
+                  </label>
+                  <label class="field field--inline">
+                    <span class="field__label">Limiar do eval-run (%)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      class="field__input field__input--narrow"
+                      value={evalThresholdPct}
+                      disabled={mutatingRuleId === rule.rule_id}
+                      onchange={(e) => setEvalThreshold(override, Number(e.currentTarget.value))}
                     />
                   </label>
                 {/if}

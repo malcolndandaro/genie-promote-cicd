@@ -89,3 +89,32 @@ def eval01_config(overrides: list[dict] | None = None, *,
     if n < 0:
         n = default_min_benchmark
     return n, severity
+
+
+def eval_run_threshold(overrides: list[dict] | None = None, *, default: float = 0.8) -> float:
+    """W3 follow-up: the eval-run pass-rate threshold `eval_gate.decide_eval`/`run_eval_gate_rest`
+    gate on — admin-configurable via the SAME EVAL-01 override row `min_benchmarks` already lives
+    in (`params["eval_run_threshold"]`, a fraction 0..1; the Regras UI renders/collects it as a
+    0-100 percent and divides by 100 before writing).
+
+    Deliberately NOT gated on the override's `enabled` flag (unlike `eval01_config`): `enabled`
+    there means "the static >= N benchmarks BLOCKER check is on/off" — a distinct gate from the
+    eval-run pass-rate threshold, which still applies to a real eval-run regardless of whether that
+    static check fires. Reading `params` independent of `enabled` avoids the surprise of an admin
+    disabling the benchmark-COUNT check and silently losing their configured pass-rate threshold too.
+
+    No override / no `EVAL-01` row / a missing, unparsable, or out-of-[0,1] value all fall back to
+    `default` (0.8) — byte-identical to the hardcoded behavior before this existed."""
+    by_id = {o["rule_id"]: o for o in (overrides or [])}
+    ov = by_id.get("EVAL-01")
+    if ov is None:
+        return default
+    params = ov.get("params") or {}
+    v = params.get("eval_run_threshold", default)
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return default
+    if not (0.0 <= v <= 1.0):
+        return default
+    return v

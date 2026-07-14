@@ -64,11 +64,28 @@ export interface Gate {
   summary: string;
 }
 
+/** W3: one benchmark question's re-run outcome, as classified from Genie's real
+ * `GenieEvalAssessment` (GOOD/BAD/NEEDS_REVIEW) — see `genie_reviewer.eval_gate._fetch_eval_questions`.
+ * `question` is `null` only in the (rare) case the SDK omitted the question text. */
+export interface EvalQuestion {
+  question: string | null;
+  status: 'correct' | 'incorrect' | 'needs_review';
+}
+
 export interface EvalResult {
   status: string;
   summary: string;
   pass_rate?: number | null;
   n?: number;
+  /** W3: present once a real per-question fetch succeeded (absent for advisory, and for the
+   * counters-only fallback when that fetch fails — the panel then shows just the explainer +
+   * summary, no list). Already sorted failures-first by the backend. */
+  questions?: EvalQuestion[];
+  n_correct?: number;
+  n_needs_review?: number;
+  threshold?: number;
+  /** The eval-run id (W3), when a real run backs this result — no UI use yet beyond debugging. */
+  run_id?: string;
 }
 
 /** Promotion-pipeline step status as emitted by `app_logic.build_timeline`. */
