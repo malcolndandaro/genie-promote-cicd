@@ -260,6 +260,21 @@ def list_prod_spaces(profile: str | None = None, *, client: WorkspaceClient | No
     return [{"space_id": s.space_id, "title": s.title or "(sem título)"} for s in (resp.spaces or [])]
 
 
+def list_serving_endpoints(profile: str | None = None, *, client: WorkspaceClient | None = None) -> list[dict]:
+    """S7a (app-ux-overhaul): every model-serving endpoint in the workspace (name only) — the
+    live list the KA-endpoint registration admin UI picks from (RS1: never type an endpoint
+    name/id, matching this app's established never-type-an-ID picker convention). A Knowledge
+    Assistant endpoint IS a serving endpoint (RS1), so no separate KA-specific listing API is
+    needed — the admin just picks the right one by name from this same list.
+
+    Admin-only (gated at the API layer on `_is_admin`), same prod-local, no-caching pattern as
+    `list_prod_spaces` — called fresh on every invocation so the picker always reflects what's
+    actually deployable right now."""
+    w = client or _client(profile)
+    resp = w.serving_endpoints.list()
+    return [{"name": e.name} for e in (resp or []) if e.name]
+
+
 def list_principals(query: str = "", *, profile: str | None = None, client: WorkspaceClient | None = None,
                     user_token: str | None = None, kind: str = "all", limit: int = 25) -> list[dict]:
     """G1: users + groups of the workspace directory (SCIM ``w.users.list``/``w.groups.list``) —

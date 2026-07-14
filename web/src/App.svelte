@@ -11,6 +11,7 @@
   import Rehidratar from './screens/Rehidratar.svelte';
   import Admin from './screens/Admin.svelte';
   import Auditoria from './screens/Auditoria.svelte';
+  import AssistenteConhecimento from './screens/AssistenteConhecimento.svelte';
   import Settings from './screens/Settings.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
@@ -88,6 +89,7 @@
           items: [
             { id: 'admin' as const, label: 'Administração', icon: 'shield' as const },
             { id: 'auditoria' as const, label: 'Auditoria', icon: 'grid' as const },
+            { id: 'assistente-conhecimento' as const, label: 'Assistente de Conhecimento', icon: 'external' as const },
             { id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const },
           ],
         }]
@@ -104,6 +106,7 @@
     rehidratar: 'Exportar Prod → Dev',
     admin: 'Administração',
     auditoria: 'Auditoria',
+    'assistente-conhecimento': 'Assistente de Conhecimento',
     configuracoes: 'Configurações',
   };
 
@@ -160,6 +163,8 @@
     <Admin devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'auditoria'}
     <Auditoria />
+  {:else if router.route.id === 'assistente-conhecimento'}
+    <AssistenteConhecimento />
   {:else if router.route.id === 'configuracoes'}
     <Settings />
   {/if}

@@ -16,6 +16,7 @@ export type RouteId =
   | 'rehidratar'
   | 'admin'
   | 'auditoria'
+  | 'assistente-conhecimento'
   | 'configuracoes';
 
 export interface Route {
@@ -34,6 +35,7 @@ export const ROUTE_IDS: readonly RouteId[] = [
   'rehidratar',
   'admin',
   'auditoria',
+  'assistente-conhecimento',
   'configuracoes',
 ];
 

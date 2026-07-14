@@ -59,6 +59,7 @@ import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
 import roles_store  # noqa: E402  (F5 — configurable roles store, store-over-env precedence)
 import rules_store  # noqa: E402  (G2 — admin-configurable reviewer rules, safe hardcoded fallback)
+import ka_endpoints_store  # noqa: E402  (S7a — admin registry of Knowledge Assistant endpoints)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 import github_drift  # noqa: E402  (F5 — READ-ONLY GitHub gate drift detection)
 import handbook_rules  # noqa: E402  (G2 — the hardcoded rule_ids a plain override must reference)
@@ -95,6 +96,12 @@ async def _lifespan(app: FastAPI):
     app.state.rules_store = rules_store.build_store_from_env()
     logger.info("Rules store: %s",
                 "initialized (migrations applied)" if app.state.rules_store else "absent (no PGHOST — local/test)")
+    # S7a (app-ux-overhaul): the admin registry of Knowledge Assistant endpoints — same
+    # hard-dependency contract. An absent/empty store just means no KA endpoints are configured
+    # (the reviewer has none to consult, D5's additive-only design degrades to a no-op).
+    app.state.ka_endpoints_store = ka_endpoints_store.build_store_from_env()
+    logger.info("KA endpoints store: %s",
+                "initialized (migrations applied)" if app.state.ka_endpoints_store else "absent (no PGHOST — local/test)")
     reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
@@ -113,6 +120,8 @@ async def _lifespan(app: FastAPI):
             app.state.roles_store.close()
         if app.state.rules_store is not None:
             app.state.rules_store.close()
+        if app.state.ka_endpoints_store is not None:
+            app.state.ka_endpoints_store.close()
 
 
 def _start_scheduled_reconciler(store):
@@ -159,6 +168,7 @@ app.state.store = None
 app.state.access_store = None  # F3
 app.state.roles_store = None  # F5
 app.state.rules_store = None  # G2
+app.state.ka_endpoints_store = None  # S7a
 api = APIRouter()
 
 
@@ -1564,6 +1574,122 @@ def reset_rule(
     verified = _require_admin(x_forwarded_access_token, authorization)
     store = _require_rules_store()
     store.reset(body.rule_id, actor_email=verified)
+    return {"ok": True}
+
+
+# --- S7a (app-ux-overhaul): admin registry of Knowledge Assistant endpoints (D5, GR1) --------------
+#
+# Admin-gated the same way as the rules CRUD above. `serving-endpoints` is the never-type-an-ID
+# picker source (RS1: a KA endpoint IS a serving endpoint); the ka-endpoints CRUD below is what
+# Settings' new "Assistente de Conhecimento" section calls. S7b (a later slice) is what actually
+# QUERIES an enabled, in-scope endpoint during a real review — this is registration only.
+
+
+def _ka_store():
+    return getattr(app.state, "ka_endpoints_store", None)
+
+
+def _require_ka_store():
+    store = _ka_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+def _ka_endpoint_summary(e) -> dict:
+    return {"id": e.id, "name": e.name, "serving_endpoint_name": e.serving_endpoint_name,
+            "is_global": e.is_global, "scope_space_ids": e.scope_space_ids, "enabled": e.enabled,
+            "created_by": e.created_by, "created_at": e.created_at, "updated_at": e.updated_at}
+
+
+@api.get("/admin/serving-endpoints")
+def list_serving_endpoints_admin(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The live list of serving endpoints the KA-registration picker offers — never a typed
+    endpoint name (RS1's never-type-an-ID convention)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    return _engine_call("list_serving_endpoints", lambda: {"endpoints": app_logic.list_serving_endpoints()})
+
+
+@api.get("/admin/ka-endpoints")
+def list_ka_endpoints(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    return {"endpoints": [_ka_endpoint_summary(e) for e in store.list_all()]}
+
+
+class KaEndpointCreateIn(BaseModel):
+    name: str
+    serving_endpoint_name: str
+    is_global: bool = False
+    scope_space_ids: list[str] = []
+    enabled: bool = True
+
+
+@api.post("/admin/ka-endpoints")
+def create_ka_endpoint(
+    body: KaEndpointCreateIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Register a KA endpoint — scoped to specific Genie Space ids, or `is_global` (applies to
+    every space, always). Audited (`ka_endpoint_created`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    try:
+        e = store.create(
+            name=body.name, serving_endpoint_name=body.serving_endpoint_name,
+            is_global=body.is_global, scope_space_ids=body.scope_space_ids,
+            enabled=body.enabled, actor_email=verified)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    return {"endpoint": _ka_endpoint_summary(e)}
+
+
+class KaEndpointUpdateIn(BaseModel):
+    name: str | None = None
+    serving_endpoint_name: str | None = None
+    is_global: bool | None = None
+    scope_space_ids: list[str] | None = None
+    enabled: bool | None = None
+
+
+@api.post("/admin/ka-endpoints/{endpoint_id}")
+def update_ka_endpoint(
+    endpoint_id: str,
+    body: KaEndpointUpdateIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Partial update (only fields explicitly passed change) — e.g. toggling `enabled`, or
+    re-scoping an endpoint. Audited (`ka_endpoint_updated`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    try:
+        e = store.update(
+            endpoint_id, name=body.name, serving_endpoint_name=body.serving_endpoint_name,
+            is_global=body.is_global, scope_space_ids=body.scope_space_ids,
+            enabled=body.enabled, actor_email=verified)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    return {"endpoint": _ka_endpoint_summary(e)}
+
+
+@api.post("/admin/ka-endpoints/{endpoint_id}/delete")
+def delete_ka_endpoint(
+    endpoint_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Idempotent — a no-op (200, not 404) if already gone. Audited (`ka_endpoint_deleted`)."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    store.delete(endpoint_id, actor_email=verified)
     return {"ok": True}
 
 
