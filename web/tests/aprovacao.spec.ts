@@ -1,8 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// SoD approval view (SV4/GH4), now IDENTITY-DERIVED (no manual persona toggle):
+// SoD approval, now IDENTITY-DERIVED (no manual persona toggle) and surfaced as a compact button
+// in the PR banner (the old standalone "Aprovação do Steward" section was removed as UI noise):
 //  - the requester only ever waits for the Steward (even if they're also a Steward — it's "mine");
-//  - the Steward, opening SOMEONE ELSE'S promotion from "Todas", gets the "Aprovar no GitHub" link.
+//    they see NOTHING new — the pipeline's own "Aprovação do Steward (deploy)" step already
+//    conveys the waiting state.
+//  - the Steward, opening SOMEONE ELSE'S promotion from "Todas", gets the "Aprovar no GitHub" link
+//    in the PR banner (next to "Ver no GitHub").
 // The real SoD is always the GitHub Environment gate (prevent_self_review).
 
 const PR = { number: 42, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/42' };
@@ -59,7 +63,7 @@ async function requestAsAuthor(page: Page, review: unknown, viewer = 'malcoln@da
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
   // G3: choosing the space from Home lands on the confirmation panel in "Meus espaços" — confirm it.
   await page.getByRole('button', { name: 'Confirmar promoção' }).click();
-  await expect(page.getByRole('heading', { name: 'Aprovação do Steward' })).toBeVisible();
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 }
 
 // The Steward (or any viewer) opening SOMEONE ELSE'S promotion from the "Todas" history.
@@ -81,19 +85,20 @@ async function openFromHistory(
   await page.getByRole('link', { name: 'Minhas promoções' }).click();
   await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();
   await page.getByRole('button', { name: /Abrir/ }).click();
-  await expect(page.getByRole('heading', { name: 'Aprovação do Steward' })).toBeVisible();
+  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 }
 
 test('the requester only ever waits for the Steward (cannot approve their own)', async ({ page }) => {
   await requestAsAuthor(page, cleanReview);
-  await expect(page.getByText(/não pode aprovar a própria promoção/)).toBeVisible();
+  // No standalone SoD explainer anymore — the pipeline's own step already conveys the wait.
+  await expect(page.getByText('Aprovação do Steward (deploy)')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
 test('a Steward who is also the requester of their own space cannot self-approve (SoD)', async ({ page }) => {
   // The steward (pedro) requests their OWN promotion -> "mine" -> only the waiting view, no link.
   await requestAsAuthor(page, cleanReview, 'pedro@databricks.com');
-  await expect(page.getByText(/não pode aprovar a própria promoção/)).toBeVisible();
+  await expect(page.getByText('Aprovação do Steward (deploy)')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
@@ -102,7 +107,6 @@ test('a non-Steward admin opening another user\'s promotion sees no approve affo
     viewer: 'malcoln@databricks.com', isAdmin: true, requester: 'ana@databricks.com',
     review: cleanReview, status: deployStatus('awaiting_approval'),
   });
-  await expect(page.getByText('Apenas o Steward aprova esta promoção.')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
@@ -121,16 +125,18 @@ test('the Steward is blocked from approving while a BLOCKER finding stands', asy
     viewer: 'pedro@databricks.com', isAdmin: true, requester: 'malcoln@databricks.com',
     review: blockerReview, status: deployStatus('awaiting_approval'),
   });
-  await expect(page.getByText(/bloqueada por achados BLOCKER/)).toBeVisible();
+  // The gate summary already conveys the block; the button simply never renders (canApprove: false).
+  await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
-test('the Steward view reflects a completed deploy with the approver login', async ({ page }) => {
+test('the Steward view reflects a completed deploy (no approve link)', async ({ page }) => {
   await openFromHistory(page, {
     viewer: 'pedro@databricks.com', isAdmin: true, requester: 'malcoln@databricks.com',
     review: cleanReview, status: deployStatus('deployed', { approver: 'pedro-gh' }),
   });
-  await expect(page.getByText(/Implantado em produção — aprovado por pedro-gh/)).toBeVisible();
+  // The PR banner's phase badge already reflects the deployed state.
+  await expect(page.getByText('Implantado em produção')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
@@ -139,6 +145,6 @@ test('the Steward view reflects a failed deploy (no approve link)', async ({ pag
     viewer: 'pedro@databricks.com', isAdmin: true, requester: 'malcoln@databricks.com',
     review: cleanReview, status: deployStatus('deploy_failed'),
   });
-  await expect(page.getByText(/Falha no deploy de produção/)).toBeVisible();
+  await expect(page.getByText('Falha no deploy')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
