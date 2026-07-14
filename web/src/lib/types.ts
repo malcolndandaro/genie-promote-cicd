@@ -9,6 +9,12 @@ export interface Whoami {
   email: string | null;
   steward: string | null;
   is_admin: boolean;
+  /** S1 (app-ux-overhaul persona model): whether the verified caller holds the Steward persona.
+   * Additive to `is_admin`/`is_approver` — a caller can hold several personas at once. */
+  is_steward: boolean;
+  /** S1: whether the verified caller holds the Approver persona (access-request approval,
+   * distinct from `is_admin`'s broader admin-console gate). */
+  is_approver: boolean;
   /** The source/CI repo the header's GitHub link points to (config-driven; the SPA falls back to a
    * default if absent). */
   repo_url?: string | null;

@@ -40,9 +40,9 @@ from typing import Callable, Optional, Protocol
 
 # A role is one of these three. "steward" is the SoD approver (mirrors APP_STEWARD, singular by
 # convention today but modeled as a role so multiple stewards are representable); "admin" mirrors
-# APP_ADMINS (sees ALL promotions/console); "approver" is reserved for a future finer-grained role
-# (F3's access-request approval today piggybacks on "admin") — included now so the schema doesn't
-# need a migration when that distinction is actually needed.
+# APP_ADMINS (sees ALL promotions/console); "approver" (S1, app-ux-overhaul persona model) gates
+# F3's access-request approval specifically — a distinct persona from admin, per D1's decision to
+# keep it separate rather than fold it in (see `engine_api/main.py`'s `_approver_emails`).
 ROLES = ("steward", "admin", "approver")
 
 # The roles that grant admin-console/gate access (`_admin_emails` unions these). Removing the LAST

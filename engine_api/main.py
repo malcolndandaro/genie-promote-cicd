@@ -271,7 +271,12 @@ def _admin_emails() -> frozenset[str]:
     an existing env-only deployment keeps working unchanged, and changing an approver in-app takes
     effect with NO redeploy once at least one role has been configured. Fails closed either way: an
     empty store AND empty/unset env vars yields an EMPTY set (`roles_store.effective_emails`'s own
-    contract), never "everyone" and never a silently-open gate. NO hardcoded identities (ADR-0004)."""
+    contract), never "everyone" and never a silently-open gate. NO hardcoded identities (ADR-0004).
+
+    Deliberately does NOT union in `approver` (S1/D1 of the app-ux-overhaul persona model):
+    Approver is a distinct persona gating access-request approval specifically, not blanket
+    admin-console/cross-promotion power — folding it in here would silently re-collapse the two
+    personas the wayfinder map explicitly decided to keep separate."""
     store = _roles_store()
     env_fallback = _env_emails("APP_ADMINS", "APP_STEWARDS", "APP_STEWARD")
     if store is None:
@@ -279,6 +284,20 @@ def _admin_emails() -> frozenset[str]:
     admins = store.effective_emails("admin", env_fallback=env_fallback)
     stewards = store.effective_emails("steward", env_fallback=env_fallback)
     return admins | stewards
+
+
+def _approver_emails() -> frozenset[str]:
+    """The effective set of Approver emails (S1: the app-ux-overhaul persona model) — gates
+    access-request approval specifically (F3's `decide` endpoint, wired in a later slice), never
+    the broader admin surface `_admin_emails` gates. Same store-over-env precedence as
+    `_steward_emails`/`_admin_emails`: the roles store is authoritative once it holds ANY role
+    rows at all; `APP_APPROVERS` (comma-separated) is the bootstrap fallback for a fresh/
+    unconfigured store. Fails closed: empty store AND empty/unset env yields an EMPTY set."""
+    store = _roles_store()
+    env_fallback = _env_emails("APP_APPROVERS")
+    if store is None:
+        return env_fallback
+    return store.effective_emails("approver", env_fallback=env_fallback)
 
 
 def _verified_email(x_forwarded_access_token: str | None, authorization: str | None) -> str | None:
@@ -309,6 +328,21 @@ def _verified_email(x_forwarded_access_token: str | None, authorization: str | N
 
 def _is_admin(email: str | None) -> bool:
     return bool(email) and email.strip().lower() in _admin_emails()
+
+
+def _is_steward(email: str | None) -> bool:
+    """Whether the VERIFIED caller holds the Steward persona (S1) — distinct from `_is_admin`'s
+    admin-console gate, and from the legacy `steward` display field (a single representative
+    email for the SV4 self-review UI). A caller can hold Steward alongside other personas
+    (union of capabilities, D1) — this is additive, never exclusive."""
+    return bool(email) and email.strip().lower() in _steward_emails()
+
+
+def _is_approver(email: str | None) -> bool:
+    """Whether the VERIFIED caller holds the Approver persona (S1) — gates access-request
+    approval specifically (a later slice wires this into F3's `decide` endpoint), never the
+    broader admin surface. Additive: a caller can hold Approver alongside Steward/Admin/neither."""
+    return bool(email) and email.strip().lower() in _approver_emails()
 
 
 def _steward_display() -> str | None:
@@ -355,10 +389,18 @@ def whoami(
     against this workspace), so it's read from `Config().host` and stripped of a trailing slash to
     match `dev_host`'s bare-URL shape; exposed purely so the SPA can build an "Abrir Genie em
     produção" deep-link once a promotion reaches `deployed` (see `_with_prod_space_id`).
+
+    `is_steward`/`is_approver` (S1, app-ux-overhaul persona model): whether the caller's OWN
+    verified identity holds those personas, additive to `is_admin` — a caller can hold any
+    combination (union of capabilities, D1), computed the exact same way as `is_admin` (the
+    request's verified identity against a store-backed, fail-closed effective-email set, never
+    the display-only `x-forwarded-email`). Business User isn't a stored role at all — every
+    caller implicitly holds it, so there's no `is_business_user` flag to compute.
     """
     verified = _verified_email(x_forwarded_access_token, authorization)
     return {"email": x_forwarded_email, "steward": _steward_display(),
-            "is_admin": _is_admin(verified), "repo_url": _repo_url(),
+            "is_admin": _is_admin(verified), "is_steward": _is_steward(verified),
+            "is_approver": _is_approver(verified), "repo_url": _repo_url(),
             "dev_host": os.environ.get("APP_DEV_HOST"),
             "prod_host": (Config().host or "").rstrip("/") or None}
 
