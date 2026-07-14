@@ -303,3 +303,22 @@ def test_main_workspace_local_group_declared_alongside_a_user_still_grants_the_u
     assert apply_access.main() == 0
     granted = {c["changes"][0]["principal"] for c in w.grants.calls if c["securable_type"] == "schema"}
     assert granted == {"ana@x.com"}
+
+
+def test_run_emits_error_annotation_on_failure(monkeypatch, capsys):
+    """The CLI wrapper turns ANY failure into a ::error annotation (found live: the app's
+    deploy-detail panel only saw GitHub's generic exit-code line for this step's errors)."""
+    import apply_access
+
+    def boom() -> int:
+        raise RuntimeError("User does not have MANAGE on Catalog 'prod_recebiveis'")
+
+    monkeypatch.setattr(apply_access, "main", boom)
+    try:
+        apply_access._run()
+        raise AssertionError("should have re-raised")
+    except RuntimeError:
+        pass
+    out = capsys.readouterr().out
+    assert "::error title=apply-access::" in out
+    assert "MANAGE on Catalog" in out

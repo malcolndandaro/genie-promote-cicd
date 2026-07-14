@@ -38,8 +38,11 @@ else
 fi
 
 # ---- 2. least-privilege grants (use applicationId for UC) -------------------
+# MANAGE: the pipeline's apply_access step GRANTs USE/SELECT to declared principals on this
+# catalog's securables — granting to others requires MANAGE on the catalog (found live 2026-07-14:
+# PermissionDenied without it; workspace-admin does NOT imply UC MANAGE).
 databricks grants update catalog "$DOMAIN_CATALOG" -p "$PROD_PROFILE" \
-  --json "{\"changes\":[{\"principal\":\"$SP_APP_ID\",\"add\":[\"USE_CATALOG\",\"USE_SCHEMA\",\"CREATE_SCHEMA\"]}]}"
+  --json "{\"changes\":[{\"principal\":\"$SP_APP_ID\",\"add\":[\"USE_CATALOG\",\"USE_SCHEMA\",\"CREATE_SCHEMA\",\"MANAGE\"]}]}"
 # Warehouse CAN_USE — additive update (set-permissions would REPLACE the whole ACL). M2.
 databricks warehouses update-permissions "$PROD_WAREHOUSE_ID" -p "$PROD_PROFILE" \
   --json "{\"access_control_list\":[{\"service_principal_name\":\"$SP_APP_ID\",\"permission_level\":\"CAN_USE\"}]}"
