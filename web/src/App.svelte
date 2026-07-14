@@ -110,7 +110,7 @@
   {:else if router.route.id === 'rehidratar'}
     <Rehidratar devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'admin'}
-    <Admin />
+    <Admin devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'configuracoes'}
     <Settings />
   {/if}

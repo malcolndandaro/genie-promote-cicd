@@ -14,6 +14,7 @@ import type {
   InventorySpace,
   OrphanedPromotion,
   AdminAuditRow,
+  RehydrateEventRow,
   RoleName,
   RolesList,
   DriftReport,
@@ -399,6 +400,12 @@ export async function getAdminAccessRequests(): Promise<AccessRequest[]> {
 export async function getAdminAudit(limit = 200): Promise<AdminAuditRow[]> {
   const data = await getJSON<{ audit: AdminAuditRow[] }>(`/api/admin/audit?limit=${limit}`);
   return data.audit ?? [];
+}
+
+/** Every prod->dev rehydrate ("Exportações para dev") the app has performed, newest first. */
+export async function getAdminRehydrateEvents(limit = 200): Promise<RehydrateEventRow[]> {
+  const data = await getJSON<{ events: RehydrateEventRow[] }>(`/api/admin/rehydrate-events?limit=${limit}`);
+  return data.events ?? [];
 }
 
 // --- F5 Phase 1: configurable roles + READ-ONLY GitHub drift detection (server-gated to admins) --

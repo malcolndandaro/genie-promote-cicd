@@ -7,18 +7,26 @@ touches prod permissions/grants, same split as `check_grants.py`/GRANT-01).
 
 Idempotent + imperative (mirrors `src/setup/seed_recebiveis.py`'s CREATE-IF-NOT-EXISTS style),
 deliberately NOT a declarative DABs grants resource — a redeploy must be a safe no-op, not a
-`SCHEMA_ALREADY_EXISTS`-style failure (GRANT-02 + the F2 acceptance criteria).
+`SCHEMA_ALREADY_EXISTS`-style failure (the F2 acceptance criteria).
 
-Access is applied via ONE per-Space GROUP (`access_spec.group_name_for(slug)`), never scattered
-per-user grants (GRANT-02):
-  1. get-or-create the account-level group (idempotent: `w.groups.list(filter=...)` first).
-  2. reconcile membership: add any declared principal (user OR group) not already a member; a
-     principal that is itself declared as a group is added as a nested group member so its own
-     members inherit access transitively (Databricks SCIM groups nest).
-  3. GRANT SELECT (+ USE_CATALOG/USE_SCHEMA, additive) on every data_source table's catalog/schema
-     to the per-Space group — idempotent (`GRANT` is a no-op if already held).
-  4. apply the Genie Space permission entries (CAN_RUN/CAN_VIEW) — additive
-     (`w.permissions.update`, not `.set`, so an existing ACL entry for someone else is preserved).
+DESIGN (changed 2026-07-14, live prod failure — see the git history for the prior per-Space-group
+version): access is applied DIRECTLY to each declared principal, never via an intermediate group.
+  1. GRANT SELECT (+ USE_CATALOG/USE_SCHEMA, additive) on every data_source table's catalog/schema
+     to EACH declared principal — idempotent (`GRANT` is a no-op if already held). A declared GROUP
+     is verified live and SKIPPED (loud warning, never a crash) if it isn't UC-grantable.
+  2. apply the Genie Space permission entries (CAN_RUN/CAN_VIEW) directly to each declared
+     principal — additive (`w.permissions.update`, not `.set`, so an existing ACL entry for
+     someone else is preserved).
+
+WHY NOT a per-Space group (the prior design): `w.groups.create` in a workspace context creates a
+WORKSPACE-LOCAL group, and UC grants only accept ACCOUNT-level principals — proven live
+(`NotFound: Could not find principal with name grp_genie_s_...`) on a real prod deploy. The CI SP
+is workspace admin, not account admin, so it cannot create an account-level group to route grants
+through. Direct-to-principal grants sidestep the problem entirely: an individual user/SP is always
+account-level (always grantable); a declared GROUP might itself be workspace-local (e.g. the
+built-in `users`), in which case its UC grant is skipped — with a loud PT warning, never silently
+— while its Genie Space permission (a workspace-level ACL, which DOES accept workspace-local
+groups) is still applied.
 
 Usage:
     python3 scripts/apply_access.py <rendered_space.json> <access_sidecar.json> <space_id>
@@ -33,12 +41,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "genie_reviewer"))
 import access_spec  # noqa: E402
+import grant_check  # noqa: E402
 
 from databricks.sdk import WorkspaceClient  # noqa: E402
 from databricks.sdk.service.catalog import PermissionsChange, Privilege  # noqa: E402
-from databricks.sdk.service.iam import (  # noqa: E402
-    AccessControlRequest, Patch, PatchOp, PatchSchema, PermissionLevel,
-)
+from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel  # noqa: E402
 
 
 def _table_containers(space: dict) -> set[tuple[str, str]]:
@@ -52,96 +59,68 @@ def _table_containers(space: dict) -> set[tuple[str, str]]:
     return out
 
 
-def get_or_create_group(w: WorkspaceClient, display_name: str):
-    """Idempotent get-or-create of the per-Space account group (GRANT-02)."""
-    existing = list(w.groups.list(filter=f'displayName eq "{display_name}"'))
-    if existing:
-        return existing[0]
-    print(f"creating group {display_name}")
-    return w.groups.create(display_name=display_name)
+def _group_resource_type(w: WorkspaceClient, display_name: str) -> "str | None":
+    """Live SCIM lookup of a group's `meta.resourceType` (`"Group"` = account, `"WorkspaceGroup"` =
+    workspace-local) — `None` if the group can't be found at all. Thin wrapper around the SDK; the
+    grantability DECISION itself is the pure `grant_check.is_uc_grantable_group` (mirrors
+    `check_grants.py`'s identical helper, kept separate — this script has no import on that one)."""
+    found = list(w.groups.list(filter=f'displayName eq "{display_name}"'))
+    if not found:
+        return None
+    return getattr(getattr(found[0], "meta", None), "resource_type", None)
 
 
-def _resolve_principal_id(w: WorkspaceClient, principal: access_spec.Principal) -> str:
-    """Resolve a declared principal (user email OR group displayName) to its numeric Databricks id.
-    A SCIM group member's `value` MUST be the principal's id — NOT its name/email (a name is either
-    rejected by the SCIM API or silently references nobody, so the grant never takes effect). Fail
-    loud if unresolved: a silent skip would report success while granting access to no one."""
-    if principal.is_group:
-        found = list(w.groups.list(filter=f'displayName eq "{principal.name}"'))
-        if found and found[0].id:
-            return found[0].id
-    else:
-        found = list(w.users.list(filter=f'userName eq "{principal.name}"'))
-        if found and found[0].id:
-            return found[0].id
-    raise ValueError(
-        f"apply_access: could not resolve {'group' if principal.is_group else 'user'} "
-        f"'{principal.name}' to a Databricks id — refusing to write a bogus group membership")
-
-
-def reconcile_membership(w: WorkspaceClient, group, principals: list[access_spec.Principal]) -> None:
-    """Add any declared principal not already a member, referencing each by its numeric id (SCIM
-    member `value` must be an id, not a name). Idempotent on the member-id SET — re-running with the
-    same AccessSpec is a no-op. Never REMOVES a member — F2 only grows access via this path;
-    revocation is a separate, explicit governed change (out of scope here, same as GRANT-02).
-
-    Adds are issued as ONE `groups.patch` call PER principal (not batched) so a failure is
-    attributable: if adding one principal raises, the exception names exactly that principal —
-    the other adds already succeeded aren't rolled back or hidden behind a bundled error."""
-    current_ids = {m.value for m in (group.members or []) if getattr(m, "value", None)}
-    to_add: list[tuple[access_spec.Principal, str]] = []
+def apply_uc_grants(w: WorkspaceClient, principals: list[access_spec.Principal],
+                    containers: set[tuple[str, str]]) -> None:
+    """GRANT USE_CATALOG/USE_SCHEMA/SELECT on each table's (catalog, schema) DIRECTLY to each
+    declared principal. Idempotent: re-applying an already-held grant is a no-op (mirrors
+    seed_recebiveis.py). A declared GROUP that UC grants would reject (workspace-local — verified
+    live via `_group_resource_type` + `grant_check.is_uc_grantable_group`) is SKIPPED with a loud
+    PT warning line, never a crash: its Genie Space permission (applied separately, see
+    `apply_space_permissions`) still goes through, so the principal isn't silently locked out of
+    the Space entirely, just this one grant. An individual user/SP is always account-level and is
+    never skipped."""
+    grantable: list[str] = []
     for p in principals:
-        pid = _resolve_principal_id(w, p)  # raises (fail-loud) if a declared principal can't resolve
-        if pid not in current_ids:
-            to_add.append((p, pid))
-    if not to_add:
-        print(f"group {group.display_name}: membership already up to date ({len(current_ids)} member(s))")
+        if p.is_group and not grant_check.is_uc_grantable_group(_group_resource_type(w, p.name), p.name):
+            print(f"::warning title=apply-access::'{p.name}' é um grupo local do workspace — "
+                  f"grant UC pulado; permissão do Space aplicada")
+            continue
+        grantable.append(p.name)
+    if not grantable:
         return
-    for p, pid in to_add:
-        kind = "group" if p.is_group else "user/service-principal"
-        try:
-            # SCIM member ref = numeric id, not name; typed Patch (NOT a raw dict — the SDK calls
-            # `.as_dict()` on each operation before serializing, which raises AttributeError on a dict).
-            w.groups.patch(
-                group.id,
-                operations=[Patch(op=PatchOp.ADD, value={"members": [{"value": pid}]})],
-                schemas=[PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
-            )
-        except Exception as exc:  # noqa: BLE001 - re-raised below with the failing principal attributed
-            raise RuntimeError(
-                f"apply_access: failed to add {kind} '{p.name}' (id={pid}) to group "
-                f"'{group.display_name}': {exc}") from exc
-        print(f"group {group.display_name}: added {kind} '{p.name}' (id={pid})")
-
-
-def apply_uc_grants(w: WorkspaceClient, group_name: str, containers: set[tuple[str, str]]) -> None:
-    """GRANT USE_CATALOG/USE_SCHEMA/SELECT on each table's (catalog, schema) to the per-Space group.
-    Idempotent: re-applying an already-held grant is a no-op (mirrors seed_recebiveis.py)."""
     for catalog, schema in sorted(containers):
-        # Typed PermissionsChange (NOT a raw dict — grants.update calls `.as_dict()` on each change
-        # before serializing, which raises AttributeError on a dict, same class of bug as groups.patch).
-        w.grants.update(
-            securable_type="catalog", full_name=catalog,
-            changes=[PermissionsChange(principal=group_name, add=[Privilege.USE_CATALOG])])
-        w.grants.update(
-            securable_type="schema", full_name=f"{catalog}.{schema}",
-            changes=[PermissionsChange(principal=group_name, add=[Privilege.USE_SCHEMA, Privilege.SELECT])])
-        print(f"granted USE_SCHEMA+SELECT on {catalog}.{schema} to {group_name}")
+        for name in grantable:
+            # Typed PermissionsChange (NOT a raw dict — grants.update calls `.as_dict()` on each
+            # change before serializing, which raises AttributeError on a dict).
+            w.grants.update(
+                securable_type="catalog", full_name=catalog,
+                changes=[PermissionsChange(principal=name, add=[Privilege.USE_CATALOG])])
+            w.grants.update(
+                securable_type="schema", full_name=f"{catalog}.{schema}",
+                changes=[PermissionsChange(principal=name, add=[Privilege.USE_SCHEMA, Privilege.SELECT])])
+        print(f"granted USE_CATALOG+USE_SCHEMA+SELECT on {catalog}.{schema} to {len(grantable)} principal(s)")
 
 
 def resolve_space_id(w: WorkspaceClient, title: str) -> str:
     """Resolve the deployed PROD Genie Space id by matching its title (deterministic per slug — set
     by the promotion's .title sidecar / the genie_spaces resource). The live id is assigned by Genie
     at deploy and is NOT in the committed serialized_space, and `bundle summary` does NOT expose it
-    for a genie_spaces resource — so match on title (same pattern app_logic.list_spaces uses). Fail
-    LOUD if not found: a warn-and-skip would silently never apply declared access (defeats F2)."""
+    for a genie_spaces resource either (verified live, 2026-07-14: its resource entry carries only
+    file_path/title/warehouse_id/serialized_space, no id) — so match on title (same pattern
+    app_logic.list_spaces uses). Fails LOUD both when NOT FOUND and on an AMBIGUOUS match (more than
+    one deployed Space sharing the title): a warn-and-skip, or a silent pick of the first match,
+    would risk applying access to the WRONG Space — never guess which one was meant."""
     if not title:
         raise ValueError("apply_access: no title provided — cannot resolve the deployed Space id")
-    for s in (w.genie.list_spaces().spaces or []):
-        if (s.title or "") == title:
-            return s.space_id
-    raise ValueError(f"apply_access: no deployed Genie Space found with title {title!r} "
-                     f"— cannot apply declared access")
+    matches = [s.space_id for s in (w.genie.list_spaces().spaces or []) if (s.title or "") == title]
+    if not matches:
+        raise ValueError(f"apply_access: no deployed Genie Space found with title {title!r} "
+                         f"— cannot apply declared access")
+    if len(matches) > 1:
+        raise ValueError(f"apply_access: {len(matches)} deployed Genie Spaces share the title "
+                         f"{title!r} (ids={matches}) — refusing to guess which one to apply access to")
+    return matches[0]
 
 
 def apply_space_permissions(w: WorkspaceClient, space_id: str,
@@ -150,8 +129,7 @@ def apply_space_permissions(w: WorkspaceClient, space_id: str,
     (CAN_RUN/CAN_VIEW), applied directly to that user/group, NOT collapsed onto a single group at
     the max level (which would silently upgrade a CAN_VIEW principal to CAN_RUN). Uses
     `permissions.update` (additive) with one ACL entry per principal — never `.set` (which would
-    REPLACE the whole ACL and could drop an existing owner/CAN_MANAGE entry). (The per-Space GROUP
-    still carries the UC SELECT data grants — GRANT-02 is about table grants, not the Space ACL.)"""
+    REPLACE the whole ACL and could drop an existing owner/CAN_MANAGE entry)."""
     if not entries:
         return
     acl = []
@@ -187,10 +165,8 @@ def main() -> int:
         space = json.load(fh)
 
     slug = os.path.basename(sidecar_path).removesuffix(".access.json")
-    group_name = access_spec.group_name_for(slug)
 
     w = WorkspaceClient()  # CI: prod SP via env; local: DATABRICKS_CONFIG_PROFILE
-    group = get_or_create_group(w, group_name)
     all_principals = [
         *(sp.principal for sp in spec.space_permissions),
         *spec.uc_principals,
@@ -200,16 +176,15 @@ def main() -> int:
     seen: dict[str, access_spec.Principal] = {}
     for p in all_principals:
         seen.setdefault(p.name, p)
-    reconcile_membership(w, group, list(seen.values()))
-    apply_uc_grants(w, group_name, _table_containers(space))
+    apply_uc_grants(w, list(seen.values()), _table_containers(space))
     if spec.space_permissions:
         # Only resolve the Space id when Space permissions are declared (UC-only specs never touch
         # the Space ACL). Fail loud if the deployed Space can't be found (never warn-and-skip).
         space_id = resolve_space_id(w, title)
         apply_space_permissions(w, space_id, list(spec.space_permissions))
-        print(f"apply_access: done for space='{title}' (id={space_id}) slug={slug} group={group_name}")
+        print(f"apply_access: done for space='{title}' (id={space_id}) slug={slug}")
     else:
-        print(f"apply_access: UC grants only (no Space permissions) for slug={slug} group={group_name}")
+        print(f"apply_access: UC grants only (no Space permissions) for slug={slug}")
     return 0
 
 

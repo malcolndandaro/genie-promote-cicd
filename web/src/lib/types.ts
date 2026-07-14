@@ -206,6 +206,21 @@ export interface AdminAuditRow {
   resource_title: string | null;
 }
 
+/** F1 follow-up: one prod->dev rehydrate event ("Exportações para dev") — captured whenever the
+ * app (re-)creates a dev Space from a prod one, whether or not that prod Space went through this
+ * app's own promotion flow (most prod Spaces have no Promotion row at all; see
+ * `promotion_store.RehydrateEvent`). */
+export interface RehydrateEventRow {
+  id: string;
+  resource_id: string;
+  resource_title: string | null;
+  actor_email: string;
+  mode: 'create' | 'overwrite';
+  dev_space_id: string | null;
+  detail: Record<string, unknown> | null;
+  created_at: string;
+}
+
 /** F5 Phase 1: a configurable role — who is Steward/Admin/approver, in-app (Lakebase-backed), plus
  * the email<->GitHub-username mapping used by drift detection. */
 export type RoleName = 'steward' | 'admin' | 'approver';

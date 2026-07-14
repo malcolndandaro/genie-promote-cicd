@@ -257,6 +257,47 @@ def test_table_mapping_survives_a_re_review_snapshot_without_being_overwritten(s
     assert store.get_promotion(p.id).table_mapping == _TABLE_MAPPING
 
 
+def test_update_declarations_refreshes_resource_title_access_spec_and_table_mapping(store):
+    """Found #3: a re-request can change any of the three declarations on an EXISTING Promotion —
+    unlike `create_promotion`, which only ever sets them once. `update_declarations` replaces all
+    three outright (no merge), same as a re-request's own semantics: whatever the LATEST request
+    declared is what's stored."""
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis v1",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        access_spec=_ACCESS_SPEC)
+    new_spec = {"space_permissions": [], "uc_principals": [{"principal": "bob@acme.com", "is_group": False}]}
+    store.update_declarations(p.id, resource_title="Recebíveis v2", access_spec=new_spec,
+                              table_mapping=_TABLE_MAPPING)
+    got = store.get_promotion(p.id)
+    assert got.resource_title == "Recebíveis v2"
+    assert got.access_spec == new_spec  # the FIRST round's _ACCESS_SPEC is gone, not merged into
+    assert got.table_mapping == _TABLE_MAPPING
+
+
+def test_update_declarations_can_clear_a_previously_declared_access_spec(store):
+    """Declare-latest-wins: a re-request with NO AccessSpec/table_mapping clears the previously
+    -declared ones outright — it must not keep echoing a stale value only a prior round declared."""
+    p = store.create_promotion(
+        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
+        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        branch="promote/recebiveis", current_phase="open", live_status=None,
+        access_spec=_ACCESS_SPEC, table_mapping=_TABLE_MAPPING)
+    store.update_declarations(p.id, resource_title=None, access_spec=None, table_mapping=None)
+    got = store.get_promotion(p.id)
+    assert got.resource_title is None
+    assert got.access_spec is None
+    assert got.table_mapping is None
+
+
+def test_update_declarations_bumps_updated_at(store, clock):
+    p = _mk(store)
+    before = store.get_promotion(p.id).updated_at
+    store.update_declarations(p.id, resource_title="x", access_spec=None, table_mapping=None)
+    assert store.get_promotion(p.id).updated_at > before
+
+
 def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(store):
     # F4 review should-fix: the cross-Promotion audit is ONE joined query, newest-first, bounded.
     p1 = _mk(store, pr_number=201, resource_id="space-A")

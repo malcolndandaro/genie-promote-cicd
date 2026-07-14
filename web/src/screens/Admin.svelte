@@ -8,19 +8,31 @@
   import Badge from '../lib/components/Badge.svelte';
   import StatusChip from '../lib/components/StatusChip.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
-  import { getAdminInventory, getAdminAudit, getAdminAccessRequests, ApiError, isAuthError } from '../lib/api';
+  import {
+    getAdminInventory, getAdminAudit, getAdminAccessRequests, getAdminRehydrateEvents,
+    ApiError, isAuthError,
+  } from '../lib/api';
   import { EVENT_LABEL } from '../lib/status';
+  import { genieSpaceUrl } from '../lib/links';
   import type { AccessRequestState } from '../lib/types';
+
+  /** The dev workspace host (`/api/whoami.dev_host`) — threaded down so "Abrir no dev" can link
+   * straight to the exported Space when the dev workspace is configured. */
+  let { devHost = null }: { devHost?: string | null } = $props();
 
   let inventoryP = $state(getAdminInventory());
   let accessP = $state(getAdminAccessRequests());
   let auditP = $state(getAdminAudit());
+  let rehydrateP = $state(getAdminRehydrateEvents());
 
   function refresh(): void {
     inventoryP = getAdminInventory();
     accessP = getAdminAccessRequests();
     auditP = getAdminAudit();
+    rehydrateP = getAdminRehydrateEvents();
   }
+
+  const MODE_LABEL: Record<string, string> = { create: 'Criado', overwrite: 'Sobrescrito' };
 
   function errorText(err: unknown): string {
     if (isAuthError(err)) {
@@ -179,6 +191,44 @@
       <p class="error" role="alert">{errorText(err)}</p>
     {/await}
   </Card>
+
+  <Card
+    title="Exportações para dev"
+    subtitle="Todo Space prod→dev exportado (rehidratado) por este app, mais recente primeiro."
+  >
+    {#await rehydrateP}
+      <Skeleton height="3rem" />
+      <Skeleton height="3rem" width="70%" />
+    {:then rows}
+      {#if rows.length === 0}
+        <p class="muted text-sm">Nenhuma exportação para dev ainda.</p>
+      {:else}
+        <ul class="row-list">
+          {#each rows as e (e.id)}
+            <li class="row">
+              <div class="row__main">
+                <strong>{e.resource_title ?? e.resource_id}</strong>
+                <span class="muted text-xs">exportado por {e.actor_email}</span>
+              </div>
+              <div class="row__meta">
+                <Badge tone={e.mode === 'overwrite' ? 'warning' : 'neutral'}>{MODE_LABEL[e.mode] ?? e.mode}</Badge>
+                {#if e.dev_space_id && devHost}
+                  <a class="dev-link" href={genieSpaceUrl(devHost, e.dev_space_id)} target="_blank" rel="noopener noreferrer">
+                    Abrir no dev ↗
+                  </a>
+                {:else if e.dev_space_id}
+                  <span class="muted text-xs">{e.dev_space_id}</span>
+                {/if}
+                <time class="muted text-xs">{when(e.created_at)}</time>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {:catch err}
+      <p class="error" role="alert">{errorText(err)}</p>
+    {/await}
+  </Card>
 </div>
 
 <style>
@@ -209,6 +259,11 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+  .dev-link {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--accent-hover);
   }
   .row {
     display: flex;
