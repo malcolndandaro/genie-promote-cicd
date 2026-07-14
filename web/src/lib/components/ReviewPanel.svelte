@@ -11,7 +11,8 @@
     /** Live PR/CI/deploy status (GH3/GH5) — drives the git steps (pr_review/merge/approval/deploy)
      * of the pipeline. Null until the first poll lands; reflects GitHub, never asserts. */
     liveStatus?: import('../api').PromoteStatus | null;
-    /** Optional steward-approval section rendered below the review (SV4/GH4). */
+    /** Optional supplementary content rendered below the review (currently: the Steward's F5
+     * drift callout — the approval action itself lives in the PR banner, see PromotionReview). */
     approval?: import('svelte').Snippet;
   }
   let { review, userEmail, liveStatus = null, approval }: Props = $props();
@@ -30,18 +31,6 @@
 </script>
 
 <div class="review">
-  <!-- AI-trust: who it ran as + that findings are AI-generated. -->
-  <div class="ai-trust">
-    <div class="ai-trust__row">
-      <Badge tone="accent">{userEmail ?? 'usuário autenticado'}</Badge>
-      <span class="muted text-sm">Achados gerados por IA — verifique antes de aprovar.</span>
-    </div>
-    <p class="muted text-xs">
-      Leitura dos espaços executa como você (OBO); o revisor (LLM) e a checagem de grants executam
-      como o service principal do app.
-    </p>
-  </div>
-
   <!-- Pipeline timeline (real per-step verdicts from the server; advances on approval). -->
   <section>
     <h3 class="review__heading">Pipeline de promoção</h3>
@@ -131,21 +120,6 @@
     margin-top: var(--space-5);
     padding-top: var(--space-5);
     border-top: 1px solid var(--border);
-  }
-  .ai-trust {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
-    background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-    border-radius: var(--radius-sm);
-  }
-  .ai-trust__row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
   }
   .review__heading {
     font-size: 0.95rem;

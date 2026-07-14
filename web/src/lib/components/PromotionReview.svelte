@@ -4,7 +4,6 @@
   import Badge from './Badge.svelte';
   import Pipeline from './Pipeline.svelte';
   import ReviewPanel from './ReviewPanel.svelte';
-  import ApprovalSection from './ApprovalSection.svelte';
   import AuditTrail from './AuditTrail.svelte';
   import RehydrateAction from './RehydrateAction.svelte';
   import DriftPanel from './DriftPanel.svelte';
@@ -32,6 +31,16 @@
   let prodGenieUrl = $derived(
     promotion.liveStatus?.phase === 'deployed' && promotion.liveStatus?.prod_space_id && prodHost
       ? genieSpaceUrl(prodHost, promotion.liveStatus.prod_space_id)
+      : null,
+  );
+
+  // UI cleanup: the Steward's approve deep-link, relocated from the removed ApprovalSection into
+  // the PR banner. Only THIS viewer's approval affordance (promotion.svelte.ts's `approval` getter
+  // — never the author, never while a BLOCKER stands) AND only once the GitHub gate is actually
+  // waiting (never guess a run_url from a partial status).
+  let approveUrl = $derived(
+    promotion.approval.canApprove && promotion.liveStatus?.phase === 'awaiting_approval'
+      ? promotion.liveStatus?.deploy?.run_url ?? null
       : null,
   );
 
@@ -91,6 +100,11 @@
           <a class="pr-banner__link" href={promotion.pr.url} target="_blank" rel="noopener noreferrer">
             Ver no GitHub ↗
           </a>
+          {#if approveUrl}
+            <a class="pr-banner__approve" href={approveUrl} target="_blank" rel="noopener noreferrer">
+              Aprovar no GitHub ↗
+            </a>
+          {/if}
           {#if prodGenieUrl}
             <a class="pr-banner__link" href={prodGenieUrl} target="_blank" rel="noopener noreferrer">
               Abrir Genie em produção ↗
@@ -116,7 +130,6 @@
               {/await}
             </div>
           {/if}
-          <ApprovalSection {promotion} />
         {/snippet}
       </ReviewPanel>
       {#if promotion.promotionId}
@@ -185,6 +198,23 @@
     font-weight: 600;
     color: var(--accent-hover);
     white-space: nowrap;
+  }
+  .pr-banner__approve {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.85rem;
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+    color: var(--accent-foreground);
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color 0.15s ease;
+  }
+  .pr-banner__approve:hover {
+    background: var(--accent-hover);
   }
   .running-heading {
     display: flex;

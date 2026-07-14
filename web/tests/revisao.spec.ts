@@ -35,7 +35,7 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test('promoting renders the review (finding + AI-trust + pipeline + gate) and the PR link', async ({
+test('promoting renders the review (finding + pipeline + gate) and the PR link', async ({
   page,
 }) => {
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
@@ -54,9 +54,7 @@ test('promoting renders the review (finding + AI-trust + pipeline + gate) and th
   await expect(page.getByText(/Adicione uma 3ª pergunta/)).toBeVisible();
   await expect(page.getByText(/Genie Promotion Handbook/)).toBeVisible();
 
-  // AI-trust + a representative pipeline step + the gate.
-  await expect(page.getByText('Achados gerados por IA — verifique antes de aprovar.')).toBeVisible();
-  await expect(page.getByText(/Leitura dos espaços executa como você \(OBO\)/)).toBeVisible();
+  // A representative pipeline step + the gate.
   await expect(page.getByText('Revisão do agente (Genie Reviewer)')).toBeVisible();
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
 });
