@@ -1,0 +1,77 @@
+name: ci
+
+# S9b (repo split): the ENGINE repo's own CI. After the split this repo holds only the app/engine
+# + pipeline LOGIC (no promotable content — that moved to genie-spaces-content, which runs the
+# per-promotion GRANT-01 governance gate + the governed deploy). This workflow is the engine's
+# deployability floor: every PR must keep the unit suite green, render cleanly, and produce a bundle
+# that validates against prod — because every content-repo promotion checks THIS repo out at `main`
+# and overlays its content on top, so a broken engine `main` would break all downstream promotions.
+#
+# Deliberately STANDALONE (no content overlay): render.sh emits empty genie_spaces + omits the
+# dashboard/setup when src/ is absent (the app repo's real state), and `bundle validate -t prod`
+# still resolves. No deploy, no content, no GRANT-01 (those are content-repo concerns).
+#
+# runs-on: self-hosted — this bundle's prod target eagerly resolves prod credentials during
+# `bundle validate` (proven: it round-trips SCIM), and the workspace enforces IP access lists that
+# block hosted runners. The app repo keeps its own `cerc-mac` runner for exactly this.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+env:
+  DATABRICKS_BUNDLE_ENGINE: direct
+
+jobs:
+  # Job name kept as "bundle validate (prod)" so the existing branch-protection required check on
+  # `main` stays satisfied without reconfiguration (the old pr-checks.yml used the same name).
+  validate:
+    name: bundle validate (prod)
+    runs-on: self-hosted   # workspace IP-ACL blocks hosted runners; prod creds needed for validate
+    if: vars.DATABRICKS_PROD_HOST != ''
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_PROD_HOST }}
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_PROD_SP_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_PROD_SP_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+        with:
+          version: 1.4.0
+      - name: Unit tests (engine + engine API)
+        run: |
+          python3 -m pip install -q 'databricks-sdk>=0.111.0' fastapi uvicorn httpx pytest
+          python3 -m pytest tests/ -q
+      - name: Pre-render + identifier allowlist (standalone — no content, emits empty resources)
+        run: bash scripts/render.sh prod
+      - name: Stub the app source dir (ADR-0006/A1 — promote_app targets prod)
+        # `bundle validate -t prod` only needs build/promote_app to EXIST (an empty dir validates
+        # with a warning, no error). Deliberately do NOT run build_promote_app.sh here — the heavy
+        # Svelte build belongs in the content repo's deploy.yml; the svelte-check job below covers
+        # SPA type-safety without a full build depending on npm-registry reachability.
+        run: mkdir -p build/promote_app
+      - name: Validate bundle (prod target)
+        run: databricks bundle validate -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
+
+  # Svelte SPA type-check — cheap, hosted-runner-friendly (no workspace access needed), so it runs
+  # in parallel and catches SPA regressions the Python suite can't. Not a required check unless the
+  # user promotes it; kept separate so an npm hiccup never blocks the deployability floor above.
+  svelte-check:
+    name: svelte-check (SPA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install + type-check the SPA
+        working-directory: web
+        run: |
+          npm install
+          npm run check
