@@ -59,25 +59,24 @@ jobs:
       - name: Validate bundle (prod target)
         run: databricks bundle validate -t prod --var "warehouse_id=${{ vars.DATABRICKS_PROD_WAREHOUSE_ID }}"
 
-  # Svelte SPA type-check — cheap, hosted-runner-friendly (no workspace access needed), so it runs
-  # in parallel and catches SPA regressions the Python suite can't. Not a required check unless the
-  # user promotes it; kept separate so an npm hiccup never blocks the deployability floor above.
+  # Svelte SPA type-check — catches SPA regressions the Python suite can't. Kept a SEPARATE job from
+  # the deployability floor above so a flaky/failed SPA check never blocks `bundle validate (prod)`
+  # (only that job is a required check). Shares the single self-hosted runner, so it serializes after
+  # validate — acceptable for a type-check.
   svelte-check:
     name: svelte-check (SPA)
-    runs-on: ubuntu-latest
+    # Runs on the SAME self-hosted runner that already builds this SPA in build_promote_app.sh
+    # (npm install + npm run build). GitHub's HOSTED runners repeatedly hit npm's "Exit handler
+    # never called!" hang (~8-min block on registry connectivity — a known npm/runner infra flake,
+    # reproduced with both `npm install` and `npm ci`), while this runner installs the SPA reliably
+    # every deploy. Reusing it removes the flake AND the cross-network dependency. svelte-check is
+    # NOT a required check (only `bundle validate (prod)` gates merges), so it can never block a merge.
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'          # 20 is deprecated on the runners; 22 is the current LTS
-          cache: npm
-          cache-dependency-path: web/package-lock.json
       - name: Install + type-check the SPA
         working-directory: web
-        # `npm ci` (deterministic, from package-lock.json) instead of `npm install`: the latter's
-        # dependency resolution crashed the hosted runner once ("Exit handler never called!" — a known
-        # flaky npm-internal failure that left svelte-check uninstalled -> "svelte-check: not found").
-        # `npm ci` installs the exact lockfile, is built for CI, and is far more reliable.
+        timeout-minutes: 6
         run: |
-          npm ci
+          npm ci --no-audit --no-fund
           npm run check
