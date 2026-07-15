@@ -20,8 +20,8 @@ test('a skip-to-content link focuses the main region (keyboard a11y)', async ({ 
 
 test('navigating moves focus to the main content region', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('link', { name: 'Minhas promoções' }).click();
-  await expect(page).toHaveURL(/#\/promocoes$/);
+  await page.getByRole('link', { name: 'Meus espaços' }).click();
+  await expect(page).toHaveURL(/#\/espacos$/);
   await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('conteudo');
 });
 

@@ -1,20 +1,12 @@
 <script lang="ts">
   import Badge from './Badge.svelte';
-  import { EVENT_LABEL } from '../status';
+  import { EVENT_LABEL, actorDisplay } from '../status';
   import type { AuditEvent } from '../api';
 
   interface Props {
     events: AuditEvent[];
   }
   let { events }: Props = $props();
-
-  // The authoritative governance actor is the GitHub login; the OBO email is display-only (and only
-  // present on `requested`). Show GitHub identity when we have it, else the app email, else system.
-  function actor(e: AuditEvent): { who: string; kind: 'github' | 'app' | 'system' } {
-    if (e.actor_github_login) return { who: e.actor_github_login, kind: 'github' };
-    if (e.actor_app_email) return { who: e.actor_app_email, kind: 'app' };
-    return { who: 'sistema', kind: 'system' };
-  }
 
   function when(e: AuditEvent): string {
     const iso = e.github_event_at ?? e.occurred_at;
@@ -30,7 +22,7 @@
   {:else}
     <ol class="audit__list">
       {#each events as e (e.seq)}
-        {@const a = actor(e)}
+        {@const a = actorDisplay(e)}
         <li class="audit__item">
           <span class="audit__dot" aria-hidden="true"></span>
           <div class="audit__body">

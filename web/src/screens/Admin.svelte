@@ -1,18 +1,21 @@
 <script lang="ts">
-  // F4 — admin console: a live prod inventory, the access-request queue (all states), and a
-  // cross-Promotion audit view ("who changed what, when"). Every call here hits a server endpoint
-  // gated on the A2-hardened VERIFIED identity (never the display-only x-forwarded-email header) —
-  // this screen is only ever RENDERED for who?.is_admin (App.svelte), but the real gate is server-
-  // side: a non-admin hitting these endpoints directly still gets a 403, surfaced below as an error.
+  // F4 — admin console: a live prod inventory and the access-request queue (all states). Every
+  // call here hits a server endpoint gated on the A2-hardened VERIFIED identity (never the
+  // display-only x-forwarded-email header) — this screen is only ever RENDERED for who?.is_admin
+  // (App.svelte), but the real gate is server-side: a non-admin hitting these endpoints directly
+  // still gets a 403, surfaced below as an error.
+  //
+  // S4 (app-ux-overhaul): the cross-Promotion audit view moved OUT of this screen into its own
+  // standalone "Auditoria" page (Auditoria.svelte) — it had grown into a de-facto second concern
+  // bundled onto the general admin console (GR4).
   import Card from '../lib/components/Card.svelte';
   import Badge from '../lib/components/Badge.svelte';
   import StatusChip from '../lib/components/StatusChip.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import {
-    getAdminInventory, getAdminAudit, getAdminAccessRequests, getAdminRehydrateEvents,
+    getAdminInventory, getAdminAccessRequests, getAdminRehydrateEvents,
     ApiError, isAuthError,
   } from '../lib/api';
-  import { EVENT_LABEL } from '../lib/status';
   import { genieSpaceUrl } from '../lib/links';
   import type { AccessRequestState } from '../lib/types';
 
@@ -22,13 +25,11 @@
 
   let inventoryP = $state(getAdminInventory());
   let accessP = $state(getAdminAccessRequests());
-  let auditP = $state(getAdminAudit());
   let rehydrateP = $state(getAdminRehydrateEvents());
 
   function refresh(): void {
     inventoryP = getAdminInventory();
     accessP = getAdminAccessRequests();
-    auditP = getAdminAudit();
     rehydrateP = getAdminRehydrateEvents();
   }
 
@@ -156,36 +157,6 @@
             </li>
           {/each}
         </ul>
-      {/if}
-    {:catch err}
-      <p class="error" role="alert">{errorText(err)}</p>
-    {/await}
-  </Card>
-
-  <Card title="Auditoria entre promoções" subtitle="Quem mudou o quê, quando — todas as promoções, mais recentes primeiro.">
-    {#await auditP}
-      <Skeleton height="3rem" />
-      <Skeleton height="3rem" width="70%" />
-    {:then rows}
-      {#if rows.length === 0}
-        <p class="muted text-sm">Nenhum evento de auditoria ainda.</p>
-      {:else}
-        <ol class="row-list">
-          {#each rows as e (e.seq + e.promotion_id)}
-            <li class="row">
-              <div class="row__main">
-                <strong>{EVENT_LABEL[e.event_type] ?? e.event_type}</strong>
-                <span class="muted text-xs">{e.resource_title ?? e.resource_id}</span>
-              </div>
-              <div class="row__meta">
-                <Badge tone={e.actor_github_login ? 'accent' : 'neutral'}>
-                  {e.actor_github_login ?? e.actor_app_email ?? 'sistema'}
-                </Badge>
-                <time class="muted text-xs">{when(e.github_event_at ?? e.occurred_at)}</time>
-              </div>
-            </li>
-          {/each}
-        </ol>
       {/if}
     {:catch err}
       <p class="error" role="alert">{errorText(err)}</p>

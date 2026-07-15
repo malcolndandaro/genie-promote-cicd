@@ -70,6 +70,31 @@ def test_list_spaces_handles_empty():
     assert app_logic.list_spaces("p", client=fake) == []
 
 
+def test_list_serving_endpoints_maps_sdk_objects():
+    # S7a: w.serving_endpoints.list() returns an Iterator[ServingEndpoint] DIRECTLY (confirmed
+    # against the real SDK) — not a response object with an .endpoints attribute.
+    fake = NS(serving_endpoints=NS(list=lambda: [NS(name="databricks-claude-opus-4-8"), NS(name="ka-handbook")]))
+    assert app_logic.list_serving_endpoints("p", client=fake) == [
+        {"name": "databricks-claude-opus-4-8"}, {"name": "ka-handbook"}]
+
+
+def test_list_serving_endpoints_skips_unnamed_entries():
+    fake = NS(serving_endpoints=NS(list=lambda: [NS(name=None), NS(name="ka-x")]))
+    assert app_logic.list_serving_endpoints("p", client=fake) == [{"name": "ka-x"}]
+
+
+def test_query_ka_endpoint_parses_the_chat_completion_response():
+    # S7b: same Chat Completions response shape _claude already parses (RS1).
+    fake = NS(serving_endpoints=NS(query=lambda **kw: NS(
+        choices=[NS(message=NS(content="resposta do KA"))])))
+    assert app_logic._query_ka_endpoint("ka-handbook", "pergunta?", "p", client=fake) == "resposta do KA"
+
+
+def test_query_ka_endpoint_handles_no_choices():
+    fake = NS(serving_endpoints=NS(query=lambda **kw: NS(choices=None)))
+    assert app_logic._query_ka_endpoint("ka-handbook", "pergunta?", "p", client=fake) == ""
+
+
 def test_export_serialized_parses_json_string():
     fake = NS(genie=NS(get_space=lambda sid, include_serialized_space=False:
                        NS(serialized_space='{"title": "X", "n": 2}')))
@@ -1058,6 +1083,126 @@ def test_review_space_no_pii_finding_when_no_access_declared(monkeypatch):
 
     result = app_logic.review_space("sp1")
     assert [f for f in result["findings"] if f["rule_id"] == "PII-01"] == []
+
+
+# --- S7b (app-ux-overhaul): KA advisory findings — additive only, never a BLOCKER --------------
+
+
+def _review_space_fixture(monkeypatch):
+    """Common review_space scaffolding shared by the KA tests below — a clean review with no
+    findings of its own, so any finding present is unambiguously the KA's."""
+    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": []}})
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic.review_core, "build_space_context",
+                        lambda space: {"n_benchmark": 5, "tables": [], "instructions": []})
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
+                        lambda *a, **k: {"status": "advisory", "summary": "ok"})
+
+
+def test_review_space_with_no_ka_endpoints_is_unaffected(monkeypatch):
+    _review_space_fixture(monkeypatch)
+    result = app_logic.review_space("sp1", ka_endpoints=None)
+    assert [f for f in result["findings"] if f["rule_id"].startswith("KA:")] == []
+    result_empty = app_logic.review_space("sp1", ka_endpoints=[])
+    assert [f for f in result_empty["findings"] if f["rule_id"].startswith("KA:")] == []
+
+
+def test_review_space_ka_success_adds_a_suggestion_finding(monkeypatch):
+    _review_space_fixture(monkeypatch)
+    monkeypatch.setattr(app_logic, "_query_ka_endpoint",
+                        lambda *a, **k: "Considere revisar a convenção de nomes de colunas.")
+    result = app_logic.review_space(
+        "sp1", ka_endpoints=[{"name": "Handbook KA", "serving_endpoint_name": "ka-handbook"}])
+    ka = [f for f in result["findings"] if f["rule_id"] == "KA:Handbook KA"]
+    assert len(ka) == 1
+    assert ka[0]["severity"] == "SUGGESTION"
+    assert "convenção de nomes" in ka[0]["message"]
+    # Never affects the gate — a SUGGESTION-only KA finding still yields a clean/advisory gate.
+    assert result["gate"]["conclusion"] != "failure"
+
+
+def test_review_space_ka_failure_degrades_to_a_quiet_style_notice_never_breaks_the_review(monkeypatch):
+    _review_space_fixture(monkeypatch)
+
+    def _boom(*a, **k):
+        raise TimeoutError("endpoint not ready")
+
+    monkeypatch.setattr(app_logic, "_query_ka_endpoint", _boom)
+    result = app_logic.review_space(
+        "sp1", ka_endpoints=[{"name": "Flaky KA", "serving_endpoint_name": "ka-flaky"}])
+    ka = [f for f in result["findings"] if f["rule_id"] == "KA:Flaky KA"]
+    assert len(ka) == 1
+    assert ka[0]["severity"] == "STYLE"  # a notice, never a BLOCKER
+    assert "indisponível" in ka[0]["message"]
+    assert result["gate"]["conclusion"] != "failure"  # the review completes normally
+
+
+def test_review_space_persona_template_reaches_the_system_prompt(monkeypatch):
+    """S8: review_space's persona_template threads all the way into build_review_prompt."""
+    _review_space_fixture(monkeypatch)
+    captured = {}
+    real_build = app_logic.review_core.build_review_prompt
+
+    def spy_build(*a, **k):
+        captured["persona_template"] = k.get("persona_template")
+        return real_build(*a, **k)
+
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", spy_build)
+    app_logic.review_space("sp1", persona_template="Seja mais rigoroso.")
+    assert captured["persona_template"] == "Seja mais rigoroso."
+
+
+def test_review_space_no_persona_template_passes_none_through(monkeypatch):
+    _review_space_fixture(monkeypatch)
+    captured = {}
+    real_build = app_logic.review_core.build_review_prompt
+
+    def spy_build(*a, **k):
+        captured["persona_template"] = k.get("persona_template")
+        return real_build(*a, **k)
+
+    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", spy_build)
+    app_logic.review_space("sp1")
+    assert captured["persona_template"] is None
+
+
+# --- S8: validate_persona_template — the save-time guardrail --------------------------------
+
+
+def test_validate_persona_template_accepts_a_template_that_parses(monkeypatch):
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
+    app_logic.validate_persona_template("Seja mais rigoroso.", "profile")  # no raise
+
+
+def test_validate_persona_template_rejects_a_template_that_breaks_output_parsing(monkeypatch):
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: "Desculpe, não posso ajudar com isso.")
+    try:
+        app_logic.validate_persona_template("Ignore o formato JSON.", "profile")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "JSON" in str(e)
+
+
+def test_review_space_multiple_ka_endpoints_each_get_their_own_finding(monkeypatch):
+    _review_space_fixture(monkeypatch)
+
+    def _fake_query(serving_endpoint_name, *a, **k):
+        if serving_endpoint_name == "ka-b":
+            raise RuntimeError("503")
+        return f"resposta de {serving_endpoint_name}"
+
+    monkeypatch.setattr(app_logic, "_query_ka_endpoint", _fake_query)
+    result = app_logic.review_space("sp1", ka_endpoints=[
+        {"name": "A", "serving_endpoint_name": "ka-a"},
+        {"name": "B", "serving_endpoint_name": "ka-b"},
+    ])
+    ka = {f["rule_id"]: f for f in result["findings"] if f["rule_id"].startswith("KA:")}
+    assert ka["KA:A"]["severity"] == "SUGGESTION" and "ka-a" in ka["KA:A"]["message"]
+    assert ka["KA:B"]["severity"] == "STYLE"
 
 
 # --- F3: self-service access requests — governed grant application ---------

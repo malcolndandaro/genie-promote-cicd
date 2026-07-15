@@ -18,8 +18,12 @@ describe('parseHash', () => {
     expect(parseHash('#/espacos')).toEqual({ id: 'espacos' });
     expect(parseHash('#/promocoes')).toEqual({ id: 'promocoes' });
     expect(parseHash('#/acesso')).toEqual({ id: 'acesso' });
+    expect(parseHash('#/aprovacoes')).toEqual({ id: 'aprovacoes' });
+    expect(parseHash('#/revisao')).toEqual({ id: 'revisao' });
     expect(parseHash('#/rehidratar')).toEqual({ id: 'rehidratar' });
     expect(parseHash('#/admin')).toEqual({ id: 'admin' });
+    expect(parseHash('#/auditoria')).toEqual({ id: 'auditoria' });
+    expect(parseHash('#/assistente-conhecimento')).toEqual({ id: 'assistente-conhecimento' });
     expect(parseHash('#/configuracoes')).toEqual({ id: 'configuracoes' });
   });
 
@@ -64,8 +68,12 @@ describe('round-trip', () => {
     { id: 'promocoes' },
     { id: 'promocoes', param: 'p-9' },
     { id: 'acesso' },
+    { id: 'aprovacoes' },
+    { id: 'revisao' },
     { id: 'rehidratar' },
     { id: 'admin' },
+    { id: 'auditoria' },
+    { id: 'assistente-conhecimento' },
     { id: 'configuracoes' },
   ];
   it('parseHash(formatHash(r)) === r for every route', () => {

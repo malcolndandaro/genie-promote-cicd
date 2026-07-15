@@ -21,6 +21,9 @@ import type {
   Principal,
   RulesList,
   RuleSeverity,
+  KaEndpoint,
+  PromptTemplateConfig,
+  PromptTemplateCustom,
   CheckDetail,
   DeployDetail,
 } from './types';
@@ -190,7 +193,9 @@ export interface PromotionDetail {
 }
 
 /** The caller's promotions, newest first (LB3 `scope=mine`; `scope=all` is role-gated in LB5). */
-export async function getPromotions(scope: 'mine' | 'all' = 'mine'): Promise<PromotionSummary[]> {
+export async function getPromotions(
+  scope: 'mine' | 'all' | 'steward-queue' = 'mine'
+): Promise<PromotionSummary[]> {
   const data = await getJSON<{ promotions: PromotionSummary[] }>(`/api/promotions?scope=${scope}`);
   return data.promotions ?? [];
 }
@@ -400,9 +405,27 @@ export async function getAdminAccessRequests(): Promise<AccessRequest[]> {
   return data.requests ?? [];
 }
 
+/** S4 (app-ux-overhaul, GR4): the standalone Audit page's combinable filters — space, actor
+ * (matches either the GitHub login or the display-only app email), and a date range — plus
+ * offset-based pagination on top of the existing `limit`. */
+export interface AdminAuditQuery {
+  limit?: number;
+  offset?: number;
+  resourceId?: string;
+  actor?: string;
+  after?: string; // ISO datetime
+  before?: string; // ISO datetime
+}
+
 /** The cross-Promotion audit trail ("who changed what, when"), newest first. */
-export async function getAdminAudit(limit = 200): Promise<AdminAuditRow[]> {
-  const data = await getJSON<{ audit: AdminAuditRow[] }>(`/api/admin/audit?limit=${limit}`);
+export async function getAdminAudit(query: AdminAuditQuery = {}): Promise<AdminAuditRow[]> {
+  const { limit = 200, offset = 0, resourceId, actor, after, before } = query;
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (resourceId) params.set('resource_id', resourceId);
+  if (actor) params.set('actor', actor);
+  if (after) params.set('after', after);
+  if (before) params.set('before', before);
+  const data = await getJSON<{ audit: AdminAuditRow[] }>(`/api/admin/audit?${params}`);
   return data.audit ?? [];
 }
 
@@ -484,4 +507,72 @@ export function upsertRule(opts: {
  * no-op if there was nothing to reset. */
 export function resetRule(ruleId: string): Promise<{ ok: boolean }> {
   return postJSON('/api/admin/rules/reset', { rule_id: ruleId });
+}
+
+// --- S7a (app-ux-overhaul): admin registry of Knowledge Assistant endpoints ----------------------
+
+/** The live list of serving endpoints — the never-type-an-ID picker source for KA registration
+ * (RS1: a KA endpoint IS a serving endpoint). */
+export async function getServingEndpoints(): Promise<{ name: string }[]> {
+  const data = await getJSON<{ endpoints: { name: string }[] }>('/api/admin/serving-endpoints');
+  return data.endpoints ?? [];
+}
+
+export async function getKaEndpoints(): Promise<KaEndpoint[]> {
+  const data = await getJSON<{ endpoints: KaEndpoint[] }>('/api/admin/ka-endpoints');
+  return data.endpoints ?? [];
+}
+
+export function createKaEndpoint(opts: {
+  name: string;
+  servingEndpointName: string;
+  isGlobal: boolean;
+  scopeSpaceIds: string[];
+  enabled?: boolean;
+}): Promise<{ endpoint: KaEndpoint }> {
+  return postJSON('/api/admin/ka-endpoints', {
+    name: opts.name,
+    serving_endpoint_name: opts.servingEndpointName,
+    is_global: opts.isGlobal,
+    scope_space_ids: opts.scopeSpaceIds,
+    enabled: opts.enabled ?? true,
+  });
+}
+
+/** Partial update — only the fields passed here change. */
+export function updateKaEndpoint(
+  id: string,
+  fields: { enabled?: boolean; isGlobal?: boolean; scopeSpaceIds?: string[] }
+): Promise<{ endpoint: KaEndpoint }> {
+  return postJSON(`/api/admin/ka-endpoints/${id}`, {
+    enabled: fields.enabled,
+    is_global: fields.isGlobal,
+    scope_space_ids: fields.scopeSpaceIds,
+  });
+}
+
+/** Idempotent — a no-op if already gone. */
+export function deleteKaEndpoint(id: string): Promise<{ ok: boolean }> {
+  return postJSON(`/api/admin/ka-endpoints/${id}/delete`, {});
+}
+
+// --- S8 (app-ux-overhaul): admin-editable reviewer prompt template (persona/policy only) ---------
+
+/** The current custom persona/policy override (`custom: null` when nothing's saved) plus the
+ * hardcoded `default` persona text. The PROTECTED_CORE (injection defense + JSON output schema) is
+ * appended server-side and is never editable. */
+export function getPromptTemplate(): Promise<PromptTemplateConfig> {
+  return getJSON('/api/admin/prompt-template');
+}
+
+/** Save a new custom persona/policy template. The server REJECTS a template that breaks reviewer
+ * output parsing with HTTP 400 (surfaced as an `ApiError` — the message is the returned `detail`),
+ * so a bad edit never reaches the store. Takes effect on the NEXT review — no redeploy. */
+export function savePromptTemplate(templateText: string): Promise<{ custom: PromptTemplateCustom }> {
+  return postJSON('/api/admin/prompt-template', { template_text: templateText });
+}
+
+/** Revert to the hardcoded default persona. Idempotent — a no-op if nothing was saved. */
+export function resetPromptTemplate(): Promise<{ ok: boolean }> {
+  return postJSON('/api/admin/prompt-template/reset', {});
 }

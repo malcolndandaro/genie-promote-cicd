@@ -1,18 +1,19 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import Sidebar from './Sidebar.svelte';
-  import type { NavItem } from './Sidebar.svelte';
+  import type { NavSection } from './Sidebar.svelte';
   import type { Route } from '../route';
 
   interface Props {
-    navItems: NavItem[];
+    /** Persona-grouped nav sections (S2) — replaces the old flat `navItems` list. */
+    sections: NavSection[];
     route: Route;
     /** The top bar. Receives `toggle` (open/close the drawer) + `open` (so the hamburger can expose
      * `aria-expanded`). */
     header: Snippet<[{ toggle: () => void; open: boolean }]>;
     children: Snippet;
   }
-  let { navItems, route, header, children }: Props = $props();
+  let { sections, route, header, children }: Props = $props();
 
   // The shell owns the mobile drawer state; the rail is always visible on desktop.
   let mobileOpen = $state(false);
@@ -68,7 +69,7 @@
 <a class="skip-link" href="#conteudo" onclick={skipToContent}>Ir para o conteúdo</a>
 
 <div class="shell">
-  <Sidebar {navItems} activeId={route.id} {mobileOpen} onNavigate={close} />
+  <Sidebar {sections} activeId={route.id} {mobileOpen} onNavigate={close} />
 
   {#if mobileOpen}
     <button type="button" class="shell__scrim" aria-label="Fechar menu" onclick={close}></button>

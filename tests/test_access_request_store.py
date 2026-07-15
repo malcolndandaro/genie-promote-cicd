@@ -109,9 +109,26 @@ def test_distinct_approver_can_approve(store):
 
 def test_distinct_approver_can_deny(store):
     r = _mk(store, requester="ana@acme.com")
-    decided = store.decide(r.id, approve=False, approver_email="pedro@acme.com")
+    decided = store.decide(r.id, approve=False, approver_email="pedro@acme.com", decision_note="fora do orçamento")
     assert decided.state == "denied"
     assert [e.event_type for e in store.list_audit_events(r.id)] == ["requested", "denied"]
+
+
+# --- S5 (app-ux-overhaul, D8): a denial REQUIRES a reason; approval does not -------------------
+
+
+def test_deny_without_a_reason_is_rejected(store):
+    r = _mk(store, requester="ana@acme.com")
+    with pytest.raises(ValueError):
+        store.decide(r.id, approve=False, approver_email="pedro@acme.com")
+    with pytest.raises(ValueError):
+        store.decide(r.id, approve=False, approver_email="pedro@acme.com", decision_note="   ")  # whitespace-only
+
+
+def test_approve_without_a_reason_is_fine(store):
+    r = _mk(store, requester="ana@acme.com")
+    decided = store.decide(r.id, approve=True, approver_email="pedro@acme.com")
+    assert decided.state == "approved"
 
 
 # --- state machine: requested -> approved|denied -> applied ---
@@ -128,7 +145,7 @@ def test_cannot_decide_a_request_twice(store):
 
 def test_cannot_decide_a_denied_request(store):
     r = _mk(store)
-    store.decide(r.id, approve=False, approver_email="pedro@x")
+    store.decide(r.id, approve=False, approver_email="pedro@x", decision_note="não autorizado")
     with pytest.raises(InvalidTransition):
         store.decide(r.id, approve=True, approver_email="pedro@x")
 

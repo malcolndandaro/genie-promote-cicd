@@ -85,7 +85,7 @@ test('a COLD-LOAD of #/promocoes/:id opens the detail without re-running the rev
   await page.goto('/#/promocoes/promo-1'); // deep-link straight to the detail (recover path on load)
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   await expect(page.getByText('🟢 Pronto para promoção.')).toBeVisible();
-  await expect(page.getByRole('button', { name: '← Voltar para as promoções' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '← Voltar para meus espaços' })).toBeVisible();
   expect(promoteCalled).toBe(false);
 });
 
@@ -121,6 +121,6 @@ test('a recent promotion deep-links to its detail without re-running the reviewe
   await expect(page).toHaveURL(/#\/promocoes\/promo-1$/);
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   await expect(page.getByText('🟢 Pronto para promoção.')).toBeVisible();
-  await expect(page.getByRole('button', { name: '← Voltar para as promoções' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '← Voltar para meus espaços' })).toBeVisible();
   expect(promoteCalled).toBe(false);
 });

@@ -9,6 +9,12 @@ export interface Whoami {
   email: string | null;
   steward: string | null;
   is_admin: boolean;
+  /** S1 (app-ux-overhaul persona model): whether the verified caller holds the Steward persona.
+   * Additive to `is_admin`/`is_approver` — a caller can hold several personas at once. */
+  is_steward: boolean;
+  /** S1: whether the verified caller holds the Approver persona (access-request approval,
+   * distinct from `is_admin`'s broader admin-console gate). */
+  is_approver: boolean;
   /** The source/CI repo the header's GitHub link points to (config-driven; the SPA falls back to a
    * default if absent). */
   repo_url?: string | null;
@@ -314,4 +320,36 @@ export interface RulesList {
   effective: EffectiveRule[];
   overrides: RuleOverride[];
   hardcoded: EffectiveRule[];
+}
+
+/** S7a (app-ux-overhaul, D5/GR1): a registered Knowledge Assistant endpoint — additive advisory
+ * source for the reviewer, never a replacement for the rules above. Either `is_global` (applies
+ * to every space, always) or scoped to specific `scope_space_ids` — never both, never neither. */
+export interface KaEndpoint {
+  id: string;
+  name: string;
+  serving_endpoint_name: string;
+  is_global: boolean;
+  scope_space_ids: string[];
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** S8 (app-ux-overhaul): the admin-saved reviewer prompt override — the PERSONA/POLICY text that
+ * REPLACES `review_core.DEFAULT_PERSONA`. Only the persona is editable; the PROTECTED_CORE
+ * (prompt-injection defense + JSON output schema) is always appended server-side and is NOT here. */
+export interface PromptTemplateCustom {
+  template_text: string;
+  updated_by: string;
+  updated_at: string;
+}
+
+/** S8: `GET /admin/prompt-template`'s response — the current custom override (`null` when nothing
+ * is saved and the hardcoded default is in effect) alongside the hardcoded `default` persona text
+ * (so the Settings screen can pre-fill/edit from the default as a baseline and offer a reset). */
+export interface PromptTemplateConfig {
+  custom: PromptTemplateCustom | null;
+  default: string;
 }

@@ -81,8 +81,11 @@ def test_check_flags_unrelated_foreign_catalog():
 
 
 def test_real_fixture_round_trips_clean():
+    # Vendored fixture (S9b repo split): the promotable content moved to the content repo, so this
+    # unit test no longer reads ../src/genie/* (absent from a standalone app-repo checkout). A byte
+    # copy lives under tests/fixtures/ so the test is self-contained regardless of the split.
     src = os.path.join(
-        os.path.dirname(__file__), "..", "src", "genie", "receivables.serialized_space.json"
+        os.path.dirname(__file__), "fixtures", "receivables.serialized_space.json"
     )
     raw = open(src, encoding="utf-8").read()
     rendered = pre_render.rebind(raw, "dev", "prod", "recebiveis")

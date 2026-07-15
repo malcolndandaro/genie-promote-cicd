@@ -190,7 +190,7 @@ def test_admin_access_request_queue_shows_every_state(monkeypatch, store, access
     _setup_admin(monkeypatch)
     r1 = access_store.create_request(space_id="s1", space_title="A", requester_email="ana@x")
     r2 = access_store.create_request(space_id="s2", space_title="B", requester_email="bob@x")
-    access_store.decide(r2.id, approve=False, approver_email="admin@x")  # -> denied
+    access_store.decide(r2.id, approve=False, approver_email="admin@x", decision_note="fora do escopo")  # -> denied
     r3 = access_store.create_request(space_id="s3", space_title="C", requester_email="carol@x")
     access_store.decide(r3.id, approve=True, approver_email="admin@x")   # -> approved
     access_store.mark_applied(r3.id, actor_email="admin@x", pr_number=5, pr_url="https://gh/pr/5")
@@ -251,6 +251,75 @@ def test_admin_audit_requires_the_store(monkeypatch):
     _setup_admin(monkeypatch)
     engine_api.app.state.store = None
     assert client.get("/api/admin/audit", headers=ADMIN_HEADERS).status_code == 503
+
+
+# --- S4 (app-ux-overhaul, GR4): offset pagination + space/actor/date-range filters ----------------
+
+
+def test_admin_audit_offset_pages_past_the_limit(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    ana_headers = {"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}
+    pid = _promote(monkeypatch, space_id="s1", number=1, requester_headers=ana_headers)
+    for i in range(3):
+        store.append_audit_event(pid, "re_reviewed", detail={"i": i})
+    # 4 events total (1 requested + 3 re_reviewed), newest first.
+    page1 = client.get("/api/admin/audit?limit=2&offset=0", headers=ADMIN_HEADERS).json()["audit"]
+    page2 = client.get("/api/admin/audit?limit=2&offset=2", headers=ADMIN_HEADERS).json()["audit"]
+    assert len(page1) == 2 and len(page2) == 2
+    assert {r["seq"] for r in page1}.isdisjoint({r["seq"] for r in page2})  # no overlap, no gap
+    assert page1[-1]["occurred_at"] >= page2[0]["occurred_at"]  # page1 is strictly newer
+
+
+def test_admin_audit_filters_by_resource_id(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    ana_headers = {"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}
+    _promote(monkeypatch, space_id="s1", number=1, requester_headers=ana_headers, title="Recebíveis")
+    _promote(monkeypatch, space_id="s2", number=2, requester_headers=ana_headers, title="Merchant")
+    body = client.get("/api/admin/audit?resource_id=s1", headers=ADMIN_HEADERS).json()
+    assert len(body["audit"]) == 1
+    assert body["audit"][0]["resource_id"] == "s1"
+
+
+def test_admin_audit_filters_by_actor_matching_either_identity_field(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    ana_headers = {"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}
+    pid1 = _promote(monkeypatch, space_id="s1", number=1, requester_headers=ana_headers)
+    _promote(monkeypatch, space_id="s2", number=2, requester_headers=ana_headers)
+    store.append_audit_event(pid1, "pr_review_approved", actor_github_login="PSPedro176", detail={})
+
+    by_github = client.get("/api/admin/audit?actor=PSPedro176", headers=ADMIN_HEADERS).json()["audit"]
+    assert len(by_github) == 1 and by_github[0]["actor_github_login"] == "PSPedro176"
+
+    by_app_email = client.get("/api/admin/audit?actor=ana@x", headers=ADMIN_HEADERS).json()["audit"]
+    assert len(by_app_email) == 2  # both `requested` events attributed to ana's OBO email
+    assert all(r["actor_app_email"] == "ana@x" for r in by_app_email)
+
+
+def test_admin_audit_date_range_filters(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    ana_headers = {"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}
+    pid = _promote(monkeypatch, space_id="s1", number=1, requester_headers=ana_headers)
+    all_rows = client.get("/api/admin/audit", headers=ADMIN_HEADERS).json()["audit"]
+    occurred_at = all_rows[0]["occurred_at"]
+
+    # `after` a point strictly past every event -> empty. Passed via `params=` (not f-string
+    # interpolation) so the `+` in the ISO timezone offset gets percent-encoded, not misread as
+    # a space in the query string.
+    from datetime import datetime, timedelta
+    future = (datetime.fromisoformat(occurred_at) + timedelta(days=1)).isoformat()
+    r = client.get("/api/admin/audit", params={"after": future}, headers=ADMIN_HEADERS)
+    assert r.json()["audit"] == []
+
+    # `before` a point strictly past every event -> everything.
+    body = client.get("/api/admin/audit", params={"before": future}, headers=ADMIN_HEADERS).json()
+    assert len(body["audit"]) == 1
+    assert body["audit"][0]["promotion_id"] == pid
+
+
+def test_admin_audit_rejects_an_invalid_date(monkeypatch, store, access_store):
+    _setup_admin(monkeypatch)
+    r = client.get("/api/admin/audit?after=not-a-date", headers=ADMIN_HEADERS)
+    assert r.status_code == 400
 
 
 # --- /api/admin/rehydrate-events: "Exportações para dev", newest first ----------------------------

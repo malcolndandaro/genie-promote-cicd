@@ -35,6 +35,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Callable
 
 from databricks.sdk.core import Config
@@ -58,9 +59,12 @@ import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
 import roles_store  # noqa: E402  (F5 — configurable roles store, store-over-env precedence)
 import rules_store  # noqa: E402  (G2 — admin-configurable reviewer rules, safe hardcoded fallback)
+import ka_endpoints_store  # noqa: E402  (S7a — admin registry of Knowledge Assistant endpoints)
+import prompt_template_store  # noqa: E402  (S8 — admin-editable reviewer prompt template)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 import github_drift  # noqa: E402  (F5 — READ-ONLY GitHub gate drift detection)
 import handbook_rules  # noqa: E402  (G2 — the hardcoded rule_ids a plain override must reference)
+import review_core  # noqa: E402  (S8 — DEFAULT_PERSONA, the editable reviewer prompt surface)
 import rules_config  # noqa: E402  (G2 — the pure hardcoded+overrides merge, for GET /admin/rules)
 
 logger = logging.getLogger("engine_api")
@@ -94,6 +98,18 @@ async def _lifespan(app: FastAPI):
     app.state.rules_store = rules_store.build_store_from_env()
     logger.info("Rules store: %s",
                 "initialized (migrations applied)" if app.state.rules_store else "absent (no PGHOST — local/test)")
+    # S7a (app-ux-overhaul): the admin registry of Knowledge Assistant endpoints — same
+    # hard-dependency contract. An absent/empty store just means no KA endpoints are configured
+    # (the reviewer has none to consult, D5's additive-only design degrades to a no-op).
+    app.state.ka_endpoints_store = ka_endpoints_store.build_store_from_env()
+    logger.info("KA endpoints store: %s",
+                "initialized (migrations applied)" if app.state.ka_endpoints_store else "absent (no PGHOST — local/test)")
+    # S8 (app-ux-overhaul): the admin-editable reviewer prompt template — same hard-dependency
+    # contract. An absent/empty store just means no custom template is saved (DEFAULT_PERSONA is
+    # used, exactly as before this slice).
+    app.state.prompt_template_store = prompt_template_store.build_store_from_env()
+    logger.info("Prompt template store: %s",
+                "initialized (migrations applied)" if app.state.prompt_template_store else "absent (no PGHOST — local/test)")
     reconciler = _start_scheduled_reconciler(app.state.store)  # LB6 — None when disabled/no store
     try:
         yield
@@ -112,6 +128,10 @@ async def _lifespan(app: FastAPI):
             app.state.roles_store.close()
         if app.state.rules_store is not None:
             app.state.rules_store.close()
+        if app.state.ka_endpoints_store is not None:
+            app.state.ka_endpoints_store.close()
+        if app.state.prompt_template_store is not None:
+            app.state.prompt_template_store.close()
 
 
 def _start_scheduled_reconciler(store):
@@ -158,6 +178,8 @@ app.state.store = None
 app.state.access_store = None  # F3
 app.state.roles_store = None  # F5
 app.state.rules_store = None  # G2
+app.state.ka_endpoints_store = None  # S7a
+app.state.prompt_template_store = None  # S8
 api = APIRouter()
 
 
@@ -271,7 +293,12 @@ def _admin_emails() -> frozenset[str]:
     an existing env-only deployment keeps working unchanged, and changing an approver in-app takes
     effect with NO redeploy once at least one role has been configured. Fails closed either way: an
     empty store AND empty/unset env vars yields an EMPTY set (`roles_store.effective_emails`'s own
-    contract), never "everyone" and never a silently-open gate. NO hardcoded identities (ADR-0004)."""
+    contract), never "everyone" and never a silently-open gate. NO hardcoded identities (ADR-0004).
+
+    Deliberately does NOT union in `approver` (S1/D1 of the app-ux-overhaul persona model):
+    Approver is a distinct persona gating access-request approval specifically, not blanket
+    admin-console/cross-promotion power — folding it in here would silently re-collapse the two
+    personas the wayfinder map explicitly decided to keep separate."""
     store = _roles_store()
     env_fallback = _env_emails("APP_ADMINS", "APP_STEWARDS", "APP_STEWARD")
     if store is None:
@@ -279,6 +306,20 @@ def _admin_emails() -> frozenset[str]:
     admins = store.effective_emails("admin", env_fallback=env_fallback)
     stewards = store.effective_emails("steward", env_fallback=env_fallback)
     return admins | stewards
+
+
+def _approver_emails() -> frozenset[str]:
+    """The effective set of Approver emails (S1: the app-ux-overhaul persona model) — gates
+    access-request approval specifically (F3's `decide` endpoint, wired in a later slice), never
+    the broader admin surface `_admin_emails` gates. Same store-over-env precedence as
+    `_steward_emails`/`_admin_emails`: the roles store is authoritative once it holds ANY role
+    rows at all; `APP_APPROVERS` (comma-separated) is the bootstrap fallback for a fresh/
+    unconfigured store. Fails closed: empty store AND empty/unset env yields an EMPTY set."""
+    store = _roles_store()
+    env_fallback = _env_emails("APP_APPROVERS")
+    if store is None:
+        return env_fallback
+    return store.effective_emails("approver", env_fallback=env_fallback)
 
 
 def _verified_email(x_forwarded_access_token: str | None, authorization: str | None) -> str | None:
@@ -309,6 +350,21 @@ def _verified_email(x_forwarded_access_token: str | None, authorization: str | N
 
 def _is_admin(email: str | None) -> bool:
     return bool(email) and email.strip().lower() in _admin_emails()
+
+
+def _is_steward(email: str | None) -> bool:
+    """Whether the VERIFIED caller holds the Steward persona (S1) — distinct from `_is_admin`'s
+    admin-console gate, and from the legacy `steward` display field (a single representative
+    email for the SV4 self-review UI). A caller can hold Steward alongside other personas
+    (union of capabilities, D1) — this is additive, never exclusive."""
+    return bool(email) and email.strip().lower() in _steward_emails()
+
+
+def _is_approver(email: str | None) -> bool:
+    """Whether the VERIFIED caller holds the Approver persona (S1) — gates access-request
+    approval specifically (a later slice wires this into F3's `decide` endpoint), never the
+    broader admin surface. Additive: a caller can hold Approver alongside Steward/Admin/neither."""
+    return bool(email) and email.strip().lower() in _approver_emails()
 
 
 def _steward_display() -> str | None:
@@ -355,10 +411,18 @@ def whoami(
     against this workspace), so it's read from `Config().host` and stripped of a trailing slash to
     match `dev_host`'s bare-URL shape; exposed purely so the SPA can build an "Abrir Genie em
     produção" deep-link once a promotion reaches `deployed` (see `_with_prod_space_id`).
+
+    `is_steward`/`is_approver` (S1, app-ux-overhaul persona model): whether the caller's OWN
+    verified identity holds those personas, additive to `is_admin` — a caller can hold any
+    combination (union of capabilities, D1), computed the exact same way as `is_admin` (the
+    request's verified identity against a store-backed, fail-closed effective-email set, never
+    the display-only `x-forwarded-email`). Business User isn't a stored role at all — every
+    caller implicitly holds it, so there's no `is_business_user` flag to compute.
     """
     verified = _verified_email(x_forwarded_access_token, authorization)
     return {"email": x_forwarded_email, "steward": _steward_display(),
-            "is_admin": _is_admin(verified), "repo_url": _repo_url(),
+            "is_admin": _is_admin(verified), "is_steward": _is_steward(verified),
+            "is_approver": _is_approver(verified), "repo_url": _repo_url(),
             "dev_host": os.environ.get("APP_DEV_HOST"),
             "prod_host": (Config().host or "").rstrip("/") or None}
 
@@ -483,8 +547,17 @@ def review(
         # handbook_rules.RULES, unchanged from before this slice).
         store = _rules_store()
         overrides = store.list_all_dicts() if store is not None else None
+        # S7b: this space's in-scope, enabled KA endpoints (None/empty when none registered —
+        # additive-only, D5, so a caller with no KA endpoints reviews exactly as before S7).
+        ka_store = _ka_store()
+        ka_endpoints = ka_store.list_enabled_for_space_dicts(body.space_id) if ka_store is not None else None
+        # S8: the admin-saved custom persona template (None -> DEFAULT_PERSONA, unchanged).
+        pt_store = _prompt_template_store()
+        custom_pt = pt_store.get() if pt_store is not None else None
+        persona_template = custom_pt.template_text if custom_pt is not None else None
         result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec,
-                                        rule_overrides=overrides)
+                                        rule_overrides=overrides, ka_endpoints=ka_endpoints,
+                                        persona_template=persona_template)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
         return {k: result[k] for k in _REVIEW_FIELDS}
@@ -598,11 +671,19 @@ def promote(
     spec = body.access_spec.to_engine() if body.access_spec else None
     rules_store_ = _rules_store()
     overrides = rules_store_.list_all_dicts() if rules_store_ is not None else None
+    # S7b: same in-scope/enabled KA endpoint lookup as /review, above.
+    ka_store_ = _ka_store()
+    ka_endpoints = ka_store_.list_enabled_for_space_dicts(body.space_id) if ka_store_ is not None else None
+    # S8: same custom-persona-template lookup as /review, above.
+    pt_store_ = _prompt_template_store()
+    custom_pt_ = pt_store_.get() if pt_store_ is not None else None
+    persona_template = custom_pt_.template_text if custom_pt_ is not None else None
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
             resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides,
+            ka_endpoints=ka_endpoints, persona_template=persona_template,
             table_mapping=body.table_mapping),
     )
     store = getattr(app.state, "store", None)
@@ -885,9 +966,12 @@ def list_access_requests(
         else:
             requests = store.list_requests(requester_email=verified)
     elif scope == "pending":
-        if not _is_admin(verified):
+        # S1/S5 (app-ux-overhaul): gated on the real Approver persona now, not just is_admin — an
+        # Admin retains this too (superset, backward compatible with pre-S1 behavior), but a
+        # dedicated Approver no longer needs the broader admin-console surface to see this queue.
+        if not (_is_approver(verified) or _is_admin(verified)):
             raise HTTPException(status_code=403,
-                                detail="Apenas Stewards/Admins veem a fila de aprovação.")
+                                detail="Apenas Approvers/Admins veem a fila de aprovação.")
         requests = store.list_requests(state="requested")
     else:
         raise HTTPException(status_code=400, detail="scope inválido; use 'mine' ou 'pending'")
@@ -931,7 +1015,7 @@ def decide_access_request(
     authorization: str | None = Header(default=None),
 ) -> dict:
     """Approve or deny an access request. Approver authority is EXPLICIT: only a configured
-    Steward/Admin (by VERIFIED identity, A2) may decide at all — a random authenticated user
+    Approver/Admin (by VERIFIED identity, A2) may decide at all — a random authenticated user
     cannot self-serve their own approval by simply calling this endpoint. SoD is then enforced a
     SECOND time, server-side, inside the store itself (`AccessRequestStore.decide`): the approver's
     verified identity is compared against the REQUEST's OWN recorded `requester_email` (never a
@@ -956,9 +1040,11 @@ def decide_access_request(
         identity = authz.verify_identity(token, host=Config().host)
     except authz.AccessDenied:
         raise HTTPException(status_code=401, detail="Sessão expirada — recarregue para reautenticar.")
-    if not _is_admin(identity.user_name):
+    # S1/S5 (app-ux-overhaul): gated on the real Approver persona, not just is_admin (superset —
+    # an Admin can still decide, same as before S1).
+    if not (_is_approver(identity.user_name) or _is_admin(identity.user_name)):
         raise HTTPException(status_code=403,
-                            detail="Apenas Stewards/Admins aprovam ou negam solicitações de acesso.")
+                            detail="Apenas Approvers/Admins aprovam ou negam solicitações de acesso.")
     if store.get_request(request_id) is None:
         raise HTTPException(status_code=404, detail="solicitação de acesso não encontrada")
 
@@ -1045,7 +1131,15 @@ def list_promotions(
     at promotion time, per ADR-0005, so this still matches the honest case while no longer trusting
     the header as an authorization input for a DIFFERENT caller's request).
     `scope=all` (cross-user governance view) is ROLE-GATED server-side: only a configured
-    Steward/Admin (by verified identity) gets it; anyone else is denied (403). Bot/SP owns the DB read."""
+    Steward/Admin (by verified identity) gets it; anyone else is denied (403). Bot/SP owns the DB read.
+
+    `scope=steward-queue` (S6, app-ux-overhaul): cross-user, further filtered to promotions
+    currently needing the Steward's OWN attention — phase `open`/`checks_running` (PR review not
+    yet merged) or `awaiting_approval` (the prod deploy gate). Excludes `checks_failed`
+    (the requester's problem to fix, nothing for the Steward to do until it passes),
+    `deploying` (gate already passed), and every terminal phase. Gated on `is_steward OR
+    is_admin` (S1's real Steward persona, superset with Admin for backward compat, mirroring
+    S5's Approver gate)."""
     store = _require_store()
     verified = _verified_email(x_forwarded_access_token, authorization)
     if scope == "mine":
@@ -1054,8 +1148,14 @@ def list_promotions(
         if not _is_admin(verified):
             raise HTTPException(status_code=403, detail="Apenas Stewards/Admins veem todas as promoções.")
         promotions = store.list_promotions(None)  # cross-user
+    elif scope == "steward-queue":
+        if not (_is_steward(verified) or _is_admin(verified)):
+            raise HTTPException(status_code=403,
+                                detail="Apenas Stewards/Admins veem a fila de revisão.")
+        promotions = [p for p in store.list_promotions(None)
+                     if p.current_phase in ("open", "checks_running", "awaiting_approval")]
     else:
-        raise HTTPException(status_code=400, detail="scope inválido; use 'mine' ou 'all'")
+        raise HTTPException(status_code=400, detail="scope inválido; use 'mine', 'all' ou 'steward-queue'")
     return {"promotions": [_promotion_summary(p) for p in promotions]}
 
 
@@ -1177,9 +1277,23 @@ def admin_access_requests(
     return {"requests": [_access_request_summary(r) for r in store.list_requests()]}
 
 
+def _parse_iso_dt(value: str | None, *, field: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field}: invalid ISO datetime {value!r}")
+
+
 @api.get("/admin/audit")
 def admin_audit(
     limit: int = 200,
+    offset: int = 0,
+    resource_id: str | None = None,
+    actor: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
@@ -1190,9 +1304,17 @@ def admin_audit(
     Promotion/resource the event belongs to, so an admin can trace an action back to its Promotion.
     `limit` bounds the response for a workspace with a long history (default 200, newest first —
     truncation drops the OLDEST events, never the most recent ones an admin is most likely to want).
+
+    S4 (app-ux-overhaul, GR4): `offset` pages past `limit` (offset-based — this app's audit
+    volume doesn't need keyset/cursor pagination); `resource_id` and `actor` filter to one space /
+    one actor (`actor` matches EITHER `actor_github_login` or `actor_app_email`); `after`/`before`
+    (ISO datetimes) bound the date range. All independently combinable, all optional — the
+    standalone Audit page's space/user filters + date range.
     """
     _require_admin(x_forwarded_access_token, authorization)
     store = _require_store()
+    after_dt = _parse_iso_dt(after, field="after")
+    before_dt = _parse_iso_dt(before, field="before")
 
     def _run() -> dict:
         # ONE joined query (store.list_recent_audit_events), newest-first + bounded — no per-Promotion
@@ -1203,7 +1325,9 @@ def admin_audit(
             "github_event_at": r["github_event_at"], "detail": r["detail"],
             "promotion_id": r["promotion_id"], "resource_id": r["resource_id"],
             "resource_title": r["resource_title"],
-        } for r in store.list_recent_audit_events(limit)]
+        } for r in store.list_recent_audit_events(
+            limit, offset=offset, resource_id=resource_id, actor=actor, after=after_dt, before=before_dt,
+        )]
         return {"audit": rows}
 
     return _engine_call("admin_audit", _run)
@@ -1478,6 +1602,195 @@ def reset_rule(
     verified = _require_admin(x_forwarded_access_token, authorization)
     store = _require_rules_store()
     store.reset(body.rule_id, actor_email=verified)
+    return {"ok": True}
+
+
+# --- S7a (app-ux-overhaul): admin registry of Knowledge Assistant endpoints (D5, GR1) --------------
+#
+# Admin-gated the same way as the rules CRUD above. `serving-endpoints` is the never-type-an-ID
+# picker source (RS1: a KA endpoint IS a serving endpoint); the ka-endpoints CRUD below is what
+# Settings' new "Assistente de Conhecimento" section calls. S7b (a later slice) is what actually
+# QUERIES an enabled, in-scope endpoint during a real review — this is registration only.
+
+
+def _ka_store():
+    return getattr(app.state, "ka_endpoints_store", None)
+
+
+def _require_ka_store():
+    store = _ka_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+def _ka_endpoint_summary(e) -> dict:
+    return {"id": e.id, "name": e.name, "serving_endpoint_name": e.serving_endpoint_name,
+            "is_global": e.is_global, "scope_space_ids": e.scope_space_ids, "enabled": e.enabled,
+            "created_by": e.created_by, "created_at": e.created_at, "updated_at": e.updated_at}
+
+
+@api.get("/admin/serving-endpoints")
+def list_serving_endpoints_admin(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The live list of serving endpoints the KA-registration picker offers — never a typed
+    endpoint name (RS1's never-type-an-ID convention)."""
+    _require_admin(x_forwarded_access_token, authorization)
+    return _engine_call("list_serving_endpoints", lambda: {"endpoints": app_logic.list_serving_endpoints()})
+
+
+@api.get("/admin/ka-endpoints")
+def list_ka_endpoints(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    return {"endpoints": [_ka_endpoint_summary(e) for e in store.list_all()]}
+
+
+class KaEndpointCreateIn(BaseModel):
+    name: str
+    serving_endpoint_name: str
+    is_global: bool = False
+    scope_space_ids: list[str] = []
+    enabled: bool = True
+
+
+@api.post("/admin/ka-endpoints")
+def create_ka_endpoint(
+    body: KaEndpointCreateIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Register a KA endpoint — scoped to specific Genie Space ids, or `is_global` (applies to
+    every space, always). Audited (`ka_endpoint_created`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    try:
+        e = store.create(
+            name=body.name, serving_endpoint_name=body.serving_endpoint_name,
+            is_global=body.is_global, scope_space_ids=body.scope_space_ids,
+            enabled=body.enabled, actor_email=verified)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    return {"endpoint": _ka_endpoint_summary(e)}
+
+
+class KaEndpointUpdateIn(BaseModel):
+    name: str | None = None
+    serving_endpoint_name: str | None = None
+    is_global: bool | None = None
+    scope_space_ids: list[str] | None = None
+    enabled: bool | None = None
+
+
+@api.post("/admin/ka-endpoints/{endpoint_id}")
+def update_ka_endpoint(
+    endpoint_id: str,
+    body: KaEndpointUpdateIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Partial update (only fields explicitly passed change) — e.g. toggling `enabled`, or
+    re-scoping an endpoint. Audited (`ka_endpoint_updated`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    try:
+        e = store.update(
+            endpoint_id, name=body.name, serving_endpoint_name=body.serving_endpoint_name,
+            is_global=body.is_global, scope_space_ids=body.scope_space_ids,
+            enabled=body.enabled, actor_email=verified)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    return {"endpoint": _ka_endpoint_summary(e)}
+
+
+@api.post("/admin/ka-endpoints/{endpoint_id}/delete")
+def delete_ka_endpoint(
+    endpoint_id: str,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Idempotent — a no-op (200, not 404) if already gone. Audited (`ka_endpoint_deleted`)."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_ka_store()
+    store.delete(endpoint_id, actor_email=verified)
+    return {"ok": True}
+
+
+# --- S8 (app-ux-overhaul): admin-editable reviewer prompt template (D6's revision, GR2) -----------
+#
+# Admin-gated the same way as the rules/KA-endpoint CRUD above. The EDITABLE surface is
+# `review_core.DEFAULT_PERSONA` only — `PROTECTED_CORE` (the prompt-injection defense + JSON
+# output schema) is ALWAYS appended by `build_review_prompt` itself, never sourced from here.
+
+
+def _prompt_template_store():
+    return getattr(app.state, "prompt_template_store", None)
+
+
+def _require_prompt_template_store():
+    store = _prompt_template_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
+    return store
+
+
+@api.get("/admin/prompt-template")
+def get_prompt_template(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The current custom template (or `None` if nothing's saved) alongside the hardcoded
+    default — so the Settings screen can show "editing the default" vs "editing your saved
+    override" and offer a real diff/reset baseline."""
+    _require_admin(x_forwarded_access_token, authorization)
+    store = _require_prompt_template_store()
+    current = store.get()
+    return {
+        "custom": ({"template_text": current.template_text, "updated_by": current.updated_by,
+                    "updated_at": current.updated_at} if current else None),
+        "default": review_core.DEFAULT_PERSONA,
+    }
+
+
+class PromptTemplateSaveIn(BaseModel):
+    template_text: str
+
+
+@api.post("/admin/prompt-template")
+def save_prompt_template(
+    body: PromptTemplateSaveIn,
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Save a new custom persona/policy template — REJECTED (400) if it doesn't survive one real
+    test review (`app_logic.validate_persona_template`, GR2's save-time guardrail) before ever
+    reaching the store. Audited (`prompt_template_saved`) under the caller's VERIFIED identity."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_prompt_template_store()
+    try:
+        app_logic.validate_persona_template(body.template_text, profile=None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    saved = store.save(template_text=body.template_text, actor_email=verified)
+    return {"custom": {"template_text": saved.template_text, "updated_by": saved.updated_by,
+                       "updated_at": saved.updated_at}}
+
+
+@api.post("/admin/prompt-template/reset")
+def reset_prompt_template(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Revert to the hardcoded default. Idempotent — a no-op (200, not 404) if nothing was saved.
+    Audited (`prompt_template_reset`)."""
+    verified = _require_admin(x_forwarded_access_token, authorization)
+    store = _require_prompt_template_store()
+    store.reset(actor_email=verified)
     return {"ok": True}
 
 

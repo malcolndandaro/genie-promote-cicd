@@ -1,13 +1,17 @@
 <script lang="ts">
   import AppShell from './lib/components/AppShell.svelte';
-  import type { NavItem } from './lib/components/Sidebar.svelte';
+  import type { NavSection } from './lib/components/Sidebar.svelte';
   import Topbar from './lib/components/Topbar.svelte';
   import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
-  import MinhasPromocoes from './screens/MinhasPromocoes.svelte';
+  import PromotionDetail from './screens/PromotionDetail.svelte';
   import AcessoEspacos from './screens/AcessoEspacos.svelte';
+  import FilaAprovacao from './screens/FilaAprovacao.svelte';
+  import RevisaoPromocoes from './screens/RevisaoPromocoes.svelte';
   import Rehidratar from './screens/Rehidratar.svelte';
   import Admin from './screens/Admin.svelte';
+  import Auditoria from './screens/Auditoria.svelte';
+  import AssistenteConhecimento from './screens/AssistenteConhecimento.svelte';
   import Settings from './screens/Settings.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
@@ -44,28 +48,65 @@
   // the exact target — running recover there would race it and could surface the WRONG promotion.
   if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  // The admin nav item is only OFFERED when who.is_admin — the real gate is server-side (every F4
-  // endpoint 403s a non-admin on the VERIFIED identity regardless), this is purely a UX affordance
-  // so a non-admin never sees an entry point to a screen that would just error for them.
-  const NAV_ITEMS: NavItem[] = $derived([
-    { id: 'inicio', label: 'Início', icon: 'home' },
-    { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
-    { id: 'promocoes', label: 'Minhas promoções', icon: 'git-branch' },
-    { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
-    { id: 'rehidratar', label: 'Trazer de volta para o dev', icon: 'download' },
-    ...(who?.is_admin ? [{ id: 'admin' as const, label: 'Administração', icon: 'shield' as const }] : []),
+  // S2: persona-sectioned nav (PT1's winning Variant A — grouped sections, always expanded,
+  // union of capabilities per D1). Every section a caller's persona flags unlock is shown
+  // simultaneously; sections for personas they don't hold are simply absent, never an empty
+  // header. The real per-request gate is always server-side (every F4/F3/S-slice endpoint
+  // 403s on the VERIFIED identity regardless) — this is purely a UX affordance so a caller
+  // never sees an entry point to a screen that would just error for them.
+  //
+  // "Aprovações de acesso" (Approver) is shown for is_approver OR is_admin (S5's backend gate is
+  // a superset for backward compat — an existing admin-only deployment keeps this capability).
+  //
+  // S3: "Minhas promoções" is gone as a nav item — its history list merged into "Meus espaços"
+  // (D3). The `promocoes` route still exists for the `#/promocoes/:id` shareable deep-link
+  // (PromotionDetail), just with no nav entry pointing at it anymore.
+  const NAV_SECTIONS: NavSection[] = $derived([
+    {
+      title: 'Meu trabalho',
+      items: [
+        { id: 'inicio', label: 'Início', icon: 'home' },
+        { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
+        { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
+        { id: 'rehidratar', label: 'Exportar Prod → Dev', icon: 'download' },
+      ],
+    },
+    ...(who?.is_approver || who?.is_admin
+      ? [{
+          title: 'Aprovações de acesso',
+          items: [{ id: 'aprovacoes' as const, label: 'Fila de aprovação', icon: 'check-circle' as const }],
+        }]
+      : []),
+    ...(who?.is_steward
+      ? [{
+          title: 'Revisão de promoções',
+          items: [{ id: 'revisao' as const, label: 'Aguardando minha revisão', icon: 'git-branch' as const }],
+        }]
+      : []),
     ...(who?.is_admin
-      ? [{ id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const }]
+      ? [{
+          title: 'Administração',
+          items: [
+            { id: 'admin' as const, label: 'Administração', icon: 'shield' as const },
+            { id: 'auditoria' as const, label: 'Auditoria', icon: 'grid' as const },
+            { id: 'assistente-conhecimento' as const, label: 'Assistente de Conhecimento', icon: 'external' as const },
+            { id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const },
+          ],
+        }]
       : []),
   ]);
 
   const SECTION_TITLE: Record<RouteId, string> = {
     inicio: 'Início',
     espacos: 'Meus espaços',
-    promocoes: 'Minhas promoções',
+    promocoes: 'Detalhe da promoção',
     acesso: 'Acesso',
-    rehidratar: 'Trazer de volta para o dev',
+    aprovacoes: 'Aprovações de acesso',
+    revisao: 'Revisão de promoções',
+    rehidratar: 'Exportar Prod → Dev',
     admin: 'Administração',
+    auditoria: 'Auditoria',
+    'assistente-conhecimento': 'Assistente de Conhecimento',
     configuracoes: 'Configurações',
   };
 
@@ -84,7 +125,7 @@
   }
 </script>
 
-<AppShell navItems={NAV_ITEMS} route={router.route}>
+<AppShell sections={NAV_SECTIONS} route={router.route}>
   {#snippet header({ toggle, open })}
     <Topbar title={SECTION_TITLE[router.route.id]} {who} {open} onToggle={toggle} />
   {/snippet}
@@ -98,24 +139,32 @@
   {:else if router.route.id === 'espacos'}
     <MeusEspacos
       {promotion}
-      userEmail={who?.email ?? null}
+      {who}
       devHost={who?.dev_host ?? null}
       prodHost={who?.prod_host ?? null}
+      onOpenPromotion={openPromotion}
     />
   {:else if router.route.id === 'promocoes'}
-    <MinhasPromocoes
+    <PromotionDetail
       {who}
       {promotion}
-      onOpen={openPromotion}
       detailId={router.route.param}
-      onBack={() => router.navigate('promocoes')}
+      onBack={() => router.navigate('espacos')}
     />
   {:else if router.route.id === 'acesso'}
-    <AcessoEspacos {who} />
+    <AcessoEspacos />
+  {:else if router.route.id === 'aprovacoes'}
+    <FilaAprovacao />
+  {:else if router.route.id === 'revisao'}
+    <RevisaoPromocoes />
   {:else if router.route.id === 'rehidratar'}
     <Rehidratar devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'admin'}
     <Admin devHost={who?.dev_host ?? null} />
+  {:else if router.route.id === 'auditoria'}
+    <Auditoria />
+  {:else if router.route.id === 'assistente-conhecimento'}
+    <AssistenteConhecimento />
   {:else if router.route.id === 'configuracoes'}
     <Settings />
   {/if}

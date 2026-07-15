@@ -6,6 +6,14 @@
     label: string;
     icon: IconName;
   }
+  /** A persona-scoped group of nav items (S2: persona-sectioned nav, PT1's winning Variant A —
+   * grouped sections, always expanded, one per persona the caller holds). `title` is the
+   * section heading; omit/leave undefined for a titleless group (not used today, but keeps the
+   * shape flexible). */
+  export interface NavSection {
+    title?: string;
+    items: NavItem[];
+  }
 </script>
 
 <script lang="ts">
@@ -13,7 +21,9 @@
   import { formatHash } from '../route';
 
   interface Props {
-    navItems: NavItem[];
+    /** Grouped nav sections — one per persona the caller holds, rendered in order, all always
+     * visible (union of capabilities, D1). Replaces the old flat `navItems` list. */
+    sections: NavSection[];
     activeId: RouteId;
     /** Product name shown in the rail brand (generic — not a customer reference, ADR-0004). */
     product?: string;
@@ -23,7 +33,7 @@
     onNavigate?: () => void;
   }
   let {
-    navItems,
+    sections,
     activeId,
     product = 'Promotor Genie/AI-BI',
     mobileOpen = false,
@@ -38,22 +48,27 @@
   </a>
 
   <nav class="nav" aria-label="Navegação principal">
-    <ul class="nav__list">
-      {#each navItems as item (item.id)}
-        <li>
-          <a
-            class="nav__link"
-            class:nav__link--active={item.id === activeId}
-            href={formatHash({ id: item.id })}
-            aria-current={item.id === activeId ? 'page' : undefined}
-            onclick={onNavigate}
-          >
-            <Icon name={item.icon} size={18} />
-            <span>{item.label}</span>
-          </a>
-        </li>
-      {/each}
-    </ul>
+    {#each sections as section, i (section.title ?? i)}
+      <div class="nav__group">
+        {#if section.title}<h4 class="nav__group-title">{section.title}</h4>{/if}
+        <ul class="nav__list">
+          {#each section.items as item (item.id)}
+            <li>
+              <a
+                class="nav__link"
+                class:nav__link--active={item.id === activeId}
+                href={formatHash({ id: item.id })}
+                aria-current={item.id === activeId ? 'page' : undefined}
+                onclick={onNavigate}
+              >
+                <Icon name={item.icon} size={18} />
+                <span>{item.label}</span>
+              </a>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/each}
   </nav>
 
   <div class="sidebar__foot">
@@ -101,6 +116,17 @@
     flex: 1;
     overflow-y: auto;
     padding: var(--space-4) var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+  .nav__group-title {
+    margin: 0 0 var(--space-2) 0.75rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--primary-foreground-faint);
   }
   .nav__list {
     list-style: none;

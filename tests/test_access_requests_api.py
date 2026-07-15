@@ -182,6 +182,40 @@ def test_self_approval_is_rejected_even_for_an_admin(monkeypatch, access_store):
     assert access_store.get_request(rid).state == "requested"
 
 
+def test_a_dedicated_approver_not_admin_can_see_the_pending_queue_and_decide(monkeypatch, access_store):
+    # S1/S5 (app-ux-overhaul): Approver is its own persona now — a caller who holds ONLY the
+    # Approver role (no APP_ADMINS) can see `scope=pending` and decide, without needing the
+    # broader admin surface.
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    monkeypatch.setenv("APP_APPROVERS", "approver@x")
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-approver": "approver@x"})
+    rid = client.post("/api/access-requests", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "tok-ana"}).json()["request"]["id"]
+
+    pending = client.get("/api/access-requests?scope=pending",
+                         headers={"x-forwarded-access-token": "tok-approver"})
+    assert pending.status_code == 200
+    assert [r["id"] for r in pending.json()["requests"]] == [rid]
+
+    r = client.post(f"/api/access-requests/{rid}/decide", json={"approve": False, "note": "fora do escopo"},
+                    headers={"x-forwarded-access-token": "tok-approver"})
+    assert r.status_code == 200
+    assert r.json()["request"]["state"] == "denied"
+
+
+def test_a_plain_requester_without_the_approver_role_cannot_see_pending_or_decide(monkeypatch, access_store):
+    monkeypatch.delenv("APP_ADMINS", raising=False)
+    monkeypatch.delenv("APP_APPROVERS", raising=False)
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-rando": "rando@x"})
+    rid = client.post("/api/access-requests", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "tok-ana"}).json()["request"]["id"]
+
+    assert client.get("/api/access-requests?scope=pending",
+                      headers={"x-forwarded-access-token": "tok-rando"}).status_code == 403
+    assert client.post(f"/api/access-requests/{rid}/decide", json={"approve": True},
+                       headers={"x-forwarded-access-token": "tok-rando"}).status_code == 403
+
+
 def test_self_approval_rejected_despite_spoofed_display_header(monkeypatch, access_store):
     monkeypatch.setenv("APP_ADMINS", "ana@x")
     _verify_as(monkeypatch, {"tok-ana": "ana@x"})
@@ -207,6 +241,21 @@ def test_distinct_approver_can_deny(monkeypatch, access_store):
     events = access_store.list_audit_events(rid)
     assert [e.event_type for e in events] == ["requested", "denied"]
     assert events[1].actor_email == "pedro@x"
+
+
+def test_deny_without_a_note_is_rejected_with_400(monkeypatch, access_store):
+    # S5 (app-ux-overhaul, D8): denial requires a reason — server-enforced (400), not just a UI
+    # affordance. Approving still needs no reason.
+    monkeypatch.setenv("APP_ADMINS", "pedro@x")
+    _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-pedro": "pedro@x"})
+    rid = client.post("/api/access-requests", json={"space_id": "s1"},
+                      headers={"x-forwarded-access-token": "tok-ana"}).json()["request"]["id"]
+    r = client.post(f"/api/access-requests/{rid}/decide", json={"approve": False},
+                    headers={"x-forwarded-access-token": "tok-pedro"})
+    assert r.status_code == 400
+    # The request is still `requested` — the rejected decision must not have landed partially.
+    status = client.get(f"/api/access-requests/{rid}", headers={"x-forwarded-access-token": "tok-ana"}).json()
+    assert status["request"]["state"] == "requested"
 
 
 def test_approval_applies_the_grant_via_the_governed_path_never_a_direct_mutation(
