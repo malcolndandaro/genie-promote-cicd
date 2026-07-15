@@ -69,9 +69,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'          # 20 is deprecated on the runners; 22 is the current LTS
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Install + type-check the SPA
         working-directory: web
+        # `npm ci` (deterministic, from package-lock.json) instead of `npm install`: the latter's
+        # dependency resolution crashed the hosted runner once ("Exit handler never called!" — a known
+        # flaky npm-internal failure that left svelte-check uninstalled -> "svelte-check: not found").
+        # `npm ci` installs the exact lockfile, is built for CI, and is far more reliable.
         run: |
-          npm install
+          npm ci
           npm run check
