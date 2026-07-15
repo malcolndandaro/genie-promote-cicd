@@ -96,7 +96,13 @@ provisioned in dev, back when the app was dev-hosted; that no longer applies). T
 2. **Generate a private key** (downloads a `.pem`) and **Install** the App on your repo.
 3. Capture the **App ID** (app page) and **Installation ID** (`GET /app/installations` as the App,
    or the install URL).
-4. **Store the three values** in a Databricks secret scope the app's SP can read — in **prod**:
+4. **Store the three values** in a Databricks secret scope the app's SP can read — in **prod**.
+   Easiest: run the helper, which mints an App JWT, auto-discovers the installation id for your
+   repo, writes all three keys, and grants the app SP READ:
+   ```
+   scripts/provision_github_app_secrets.sh <APP_ID> <path/to/key.pem> <prod-profile> <owner/repo>
+   ```
+   Or do it by hand:
    ```
    databricks secrets create-scope genie_promote -p <prod-profile>
    databricks secrets put-secret  genie_promote github_app_id          --string-value <APP_ID>          -p <prod-profile>
