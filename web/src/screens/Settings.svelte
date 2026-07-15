@@ -30,7 +30,7 @@
     isAuthError,
   } from '../lib/api';
   import type { PickerOption } from '../lib/picker';
-  import type { RoleName, RuleSeverity } from '../lib/types';
+  import type { EffectiveRule, RoleName, RuleSeverity } from '../lib/types';
 
   let rolesP = $state(getRoles());
   let driftP = $state(getAdminDrift());
@@ -190,6 +190,37 @@
   // Surfacing this prevents the (otherwise misleading) impression that toggling them off in the UI
   // turns the guard off.
   const DETERMINISTIC_RULES = new Set(['EVAL-01', 'GRANT-01', 'ENV-01']);
+
+  // Of the deterministic rules, ENV-01 + GRANT-01 are enforced ENTIRELY in the CI pipeline
+  // (scripts/pre_render.py allowlist; scripts/check_grants.py), which has NO Lakebase access — so
+  // there is NOTHING an admin can toggle/edit here that changes their enforcement. Their row is
+  // READ-ONLY (text, enabled, severity): informational only, "what it checks", no editing, no
+  // disabling. EVAL-01 is the exception: its backstop (review_core.finalize_findings) reads the
+  // store, so its enable/min_benchmarks/threshold/severity ARE the real, configurable knobs — its
+  // TEXT stays read-only (also a deterministic check) but its parameters remain editable.
+  const PIPELINE_LOCKED = new Set(['ENV-01', 'GRANT-01']);
+
+  // Short "what this check does" summary for the deterministic rules (shown read-only in place of an
+  // editable handbook text — the point the user made: for a code-enforced check, inform, don't edit).
+  const DETERMINISTIC_CHECKS: Record<string, string> = {
+    'ENV-01': 'O pipeline rejeita qualquer referência a catálogo de outro ambiente (dev_/sbx_/…) — só prod_<domínio> passa. Verificado no CI (pre_render), independente do texto.',
+    'GRANT-01': 'O pipeline verifica no CI (check_grants) que o grupo consumidor de produção tem SELECT em toda tabela do espaço. Grant faltando = BLOCKER, independente do texto.',
+    'EVAL-01': 'O revisor conta as perguntas de benchmark do espaço e exige o mínimo configurado abaixo. Aplicado deterministicamente (não pelo LLM).',
+  };
+
+  // Fixed display order for the deterministic group so they always sit together, in sequence.
+  const DETERMINISTIC_ORDER = ['ENV-01', 'GRANT-01', 'EVAL-01'];
+
+  // Split the hardcoded rules into the two sections the UI renders. Deterministic ones are ordered
+  // per DETERMINISTIC_ORDER; the rest keep their handbook order. `data` is the getRules() payload.
+  function splitRules(hardcoded: EffectiveRule[]): { deterministic: EffectiveRule[]; configurable: EffectiveRule[] } {
+    const byId = new Map(hardcoded.map((r) => [r.rule_id, r]));
+    const deterministic = DETERMINISTIC_ORDER
+      .map((id) => byId.get(id))
+      .filter((r): r is EffectiveRule => r !== undefined);
+    const configurable = hardcoded.filter((r) => !DETERMINISTIC_RULES.has(r.rule_id));
+    return { deterministic, configurable };
+  }
 
   // Inline content editing (the handbook text an admin can now rewrite). Keyed by rule_id so only
   // one row is in edit mode at a time; the draft is the textarea buffer.
@@ -406,12 +437,20 @@
       {#if data.hardcoded.length === 0}
         <p class="muted text-sm">Nenhuma regra encontrada.</p>
       {:else}
+        {@const groups = splitRules(data.hardcoded)}
+
+        <!-- Grupo 1: regras DETERMINÍSTICAS (aplicadas pelo pipeline/código), juntas em sequência. -->
+        <h4 class="rules-group__title">Verificações determinísticas</h4>
+        <p class="muted text-xs rules-group__desc">
+          Aplicadas pelo pipeline (código), não pelo revisor (LLM). O texto é informativo e não
+          editável. ENV-01 e GRANT-01 rodam no CI e estão sempre ativas; só o EVAL-01 é configurável.
+        </p>
         <ul class="row-list">
-          {#each data.hardcoded as rule (rule.rule_id)}
+          {#each groups.deterministic as rule (rule.rule_id)}
             {@const override = data.overrides.find((o) => o.rule_id === rule.rule_id)}
+            {@const locked = PIPELINE_LOCKED.has(rule.rule_id)}
             {@const enabled = override?.enabled ?? true}
             {@const severity = override?.severity ?? rule.severity_hint}
-            {@const content = override?.content ?? rule.content}
             {@const minBenchmarks = (override?.params?.min_benchmarks as number | undefined)
               ?? (rule.params?.min_benchmarks as number | undefined) ?? 2}
             {@const evalThresholdPct = Math.round((
@@ -421,13 +460,104 @@
               <div class="row__main">
                 <div class="rule-row__head">
                   <strong>{rule.rule_id}</strong>
-                  {#if DETERMINISTIC_RULES.has(rule.rule_id)}
-                    <Badge tone="accent">determinística</Badge>
+                  {#if locked}
+                    <Badge tone="neutral">sempre ativa no pipeline</Badge>
+                  {:else}
+                    <Badge tone="accent">determinística · configurável</Badge>
                   {/if}
                   {#if !enabled}<span class="muted text-xs">desabilitada</span>{/if}
                 </div>
                 <span class="muted text-xs">{rule.citation}</span>
-                <!-- The handbook text the reviewer LLM is grounded on — now visible + editable. -->
+                <!-- Read-only: informa O QUE a verificação faz (não é texto de prompt editável). -->
+                <p class="rule-row__content text-sm">{DETERMINISTIC_CHECKS[rule.rule_id] ?? rule.content}</p>
+              </div>
+              <div class="row__meta rule-row__controls">
+                {#if locked}
+                  <!-- ENV-01 / GRANT-01: enforcement 100% no CI (sem Lakebase). Nada aqui muda o gate. -->
+                  <Badge tone={SEVERITY_TONE[rule.severity_hint]}>{rule.severity_hint}</Badge>
+                {:else}
+                  <!-- EVAL-01: os knobs reais (o backstop lê o store). -->
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      disabled={mutatingRuleId === rule.rule_id}
+                      onchange={(e) => toggleEnabled(rule.rule_id, override, e.currentTarget.checked)}
+                    />
+                    <span class="muted text-xs">Habilitada</span>
+                  </label>
+                  <label class="field field--inline">
+                    <span class="field__label">Severidade</span>
+                    <select
+                      class="field__input field__input--narrow"
+                      value={severity}
+                      disabled={mutatingRuleId === rule.rule_id}
+                      onchange={(e) => setSeverity(rule.rule_id, override, e.currentTarget.value as RuleSeverity)}
+                    >
+                      {#each SEVERITIES as s (s)}
+                        <option value={s}>{s}</option>
+                      {/each}
+                    </select>
+                  </label>
+                  <label class="field field--inline">
+                    <span class="field__label">Mín. benchmarks</span>
+                    <input
+                      type="number"
+                      min="0"
+                      class="field__input field__input--narrow"
+                      value={minBenchmarks}
+                      disabled={mutatingRuleId === rule.rule_id}
+                      onchange={(e) => setMinBenchmarks(override, Number(e.currentTarget.value))}
+                    />
+                  </label>
+                  <label class="field field--inline">
+                    <span class="field__label">Limiar do eval-run (%)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      class="field__input field__input--narrow"
+                      value={evalThresholdPct}
+                      disabled={mutatingRuleId === rule.rule_id}
+                      onchange={(e) => setEvalThreshold(override, Number(e.currentTarget.value))}
+                    />
+                  </label>
+                  <Badge tone={SEVERITY_TONE[severity]}>{severity}</Badge>
+                  {#if override}
+                    <Button
+                      variant="ghost"
+                      loading={mutatingRuleId === rule.rule_id}
+                      disabled={!!mutatingRuleId}
+                      onclick={() => resetOne(rule.rule_id)}
+                    >
+                      Restaurar padrão
+                    </Button>
+                  {/if}
+                {/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
+
+        <!-- Grupo 2: regras CONFIGURÁVEIS (texto que aterra o revisor LLM) — edição livre. -->
+        <h4 class="rules-group__title">Regras configuráveis (revisor)</h4>
+        <p class="muted text-xs rules-group__desc">
+          Texto que o agente revisor (LLM) usa como base. Habilite/desabilite, ajuste severidade e
+          edite o texto — efeito imediato, sem redeploy.
+        </p>
+        <ul class="row-list">
+          {#each groups.configurable as rule (rule.rule_id)}
+            {@const override = data.overrides.find((o) => o.rule_id === rule.rule_id)}
+            {@const enabled = override?.enabled ?? true}
+            {@const severity = override?.severity ?? rule.severity_hint}
+            {@const content = override?.content ?? rule.content}
+            <li class="row rule-row" class:rule-row--disabled={!enabled}>
+              <div class="row__main">
+                <div class="rule-row__head">
+                  <strong>{rule.rule_id}</strong>
+                  {#if !enabled}<span class="muted text-xs">desabilitada</span>{/if}
+                </div>
+                <span class="muted text-xs">{rule.citation}</span>
                 {#if editingContentId === rule.rule_id}
                   <div class="rule-row__edit">
                     <textarea
@@ -460,12 +590,6 @@
                     Editar texto
                   </button>
                 {/if}
-                {#if DETERMINISTIC_RULES.has(rule.rule_id)}
-                  <span class="muted text-xs rule-row__det-note">
-                    Enforcement determinístico no pipeline — desabilitar/editar aqui muda só o que o
-                    revisor (LLM) considera; o backstop do pipeline continua valendo.
-                  </span>
-                {/if}
                 {#if override?.updated_by}
                   <span class="muted text-xs">Editado por {override.updated_by}</span>
                 {/if}
@@ -493,31 +617,6 @@
                     {/each}
                   </select>
                 </label>
-                {#if rule.rule_id === 'EVAL-01'}
-                  <label class="field field--inline">
-                    <span class="field__label">Mín. benchmarks</span>
-                    <input
-                      type="number"
-                      min="0"
-                      class="field__input field__input--narrow"
-                      value={minBenchmarks}
-                      disabled={mutatingRuleId === rule.rule_id}
-                      onchange={(e) => setMinBenchmarks(override, Number(e.currentTarget.value))}
-                    />
-                  </label>
-                  <label class="field field--inline">
-                    <span class="field__label">Limiar do eval-run (%)</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      class="field__input field__input--narrow"
-                      value={evalThresholdPct}
-                      disabled={mutatingRuleId === rule.rule_id}
-                      onchange={(e) => setEvalThreshold(override, Number(e.currentTarget.value))}
-                    />
-                  </label>
-                {/if}
                 <Badge tone={SEVERITY_TONE[severity]}>{severity}</Badge>
                 {#if override}
                   <Button
@@ -772,9 +871,16 @@
     color: var(--foreground);
     max-width: 46rem;
   }
-  .rule-row__det-note {
+  .rules-group__title {
+    margin: var(--space-4) 0 0.15rem;
+    font-size: 0.95rem;
+  }
+  .rules-group__title:first-of-type {
+    margin-top: 0;
+  }
+  .rules-group__desc {
+    margin: 0 0 var(--space-2);
     max-width: 46rem;
-    font-style: italic;
   }
   .rule-row__edit {
     display: flex;

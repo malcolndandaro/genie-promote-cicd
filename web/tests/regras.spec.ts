@@ -8,6 +8,7 @@ import { test, expect } from '@playwright/test';
 
 const HARDCODED = [
   { rule_id: 'ENV-01', severity_hint: 'BLOCKER', citation: 'Handbook › ENV-01', content: 'catálogo por ambiente' },
+  { rule_id: 'GRANT-01', severity_hint: 'BLOCKER', citation: 'Handbook › GRANT-01', content: 'grupo consumidor tem SELECT' },
   { rule_id: 'EVAL-01', severity_hint: 'BLOCKER', citation: 'Handbook › EVAL-01', content: '>= N benchmarks',
     params: { min_benchmarks: 2 } },
   { rule_id: 'SQL-01', severity_hint: 'STYLE', citation: 'Handbook › SQL-01', content: 'convenções SQL' },
@@ -71,7 +72,7 @@ function rulesCard(page: import('@playwright/test').Page) {
 test('lists the hardcoded rules with severity badge and citation', async ({ page }) => {
   mockAdminScreen(page);
   await page.goto('/#/configuracoes');
-  await expect(page.getByRole('heading', { name: 'Regras' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Regras', exact: true })).toBeVisible();
   await expect(page.getByText('ENV-01', { exact: true })).toBeVisible();
   await expect(page.getByText('Handbook › ENV-01')).toBeVisible();
   await expect(page.getByText('EVAL-01', { exact: true })).toBeVisible();
@@ -132,20 +133,22 @@ test('editing EVAL-01\'s eval-run threshold (%) persists as a fraction, alongsid
   await expect(finalRow.getByLabel('Limiar do eval-run (%)')).toHaveValue('60');
 });
 
-test('a rule with an override can be reset back to default', async ({ page }) => {
+test('a configurable rule with an override can be reset back to default', async ({ page }) => {
+  // SQL-01 is a configurable (non-pipeline-locked) rule, so it has a reset affordance;
+  // ENV-01/GRANT-01 are locked and never show one.
   mockAdminScreen(page, [
-    { rule_id: 'ENV-01', is_custom: false, enabled: false, severity: null, params: null,
+    { rule_id: 'SQL-01', is_custom: false, enabled: false, severity: null, params: null,
       content: null, citation: null, updated_by: 'admin@databricks.com', updated_at: '2026-07-01T00:00:00Z' },
   ]);
   await page.goto('/#/configuracoes');
 
-  const envRow = page.locator('li').filter({ hasText: 'ENV-01' });
-  await expect(envRow.getByText('desabilitada')).toBeVisible();
-  await envRow.getByRole('button', { name: 'Restaurar padrão' }).click();
+  const sqlRow = page.locator('li').filter({ hasText: 'SQL-01' });
+  await expect(sqlRow.getByText('desabilitada')).toBeVisible();
+  await sqlRow.getByRole('button', { name: 'Restaurar padrão' }).click();
 
-  await expect(page.locator('li').filter({ hasText: 'ENV-01' }).getByText('desabilitada')).toHaveCount(0);
+  await expect(page.locator('li').filter({ hasText: 'SQL-01' }).getByText('desabilitada')).toHaveCount(0);
   // The reset override disappears, so "Restaurar padrão" itself is gone too.
-  await expect(page.locator('li').filter({ hasText: 'ENV-01' }).getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
+  await expect(page.locator('li').filter({ hasText: 'SQL-01' }).getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
 });
 
 test('adding a custom rule appears in the list and can be removed', async ({ page }) => {
@@ -165,16 +168,23 @@ test('adding a custom rule appears in the list and can be removed', async ({ pag
   await expect(page.locator('li').filter({ hasText: 'CUSTOM-01' })).toHaveCount(0);
 });
 
-test('shows each hardcoded rule\'s handbook text (content), not just id + citation', async ({ page }) => {
+test('groups rules into deterministic + configurable sections', async ({ page }) => {
   mockAdminScreen(page);
   await page.goto('/#/configuracoes');
-  const envRow = page.locator('li').filter({ hasText: 'ENV-01' });
-  await expect(envRow.getByText('catálogo por ambiente')).toBeVisible();
-  const sqlRow = page.locator('li').filter({ hasText: 'SQL-01' });
-  await expect(sqlRow.getByText('convenções SQL')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Verificações determinísticas' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Regras configuráveis (revisor)' })).toBeVisible();
 });
 
-test('editing a hardcoded rule\'s text persists as an override', async ({ page }) => {
+test('shows each configurable rule\'s editable handbook text', async ({ page }) => {
+  mockAdminScreen(page);
+  await page.goto('/#/configuracoes');
+  // A configurable rule shows its handbook text + an "Editar texto" affordance.
+  const sqlRow = page.locator('li').filter({ hasText: 'SQL-01' });
+  await expect(sqlRow.getByText('convenções SQL')).toBeVisible();
+  await expect(sqlRow.getByRole('button', { name: 'Editar texto' })).toBeVisible();
+});
+
+test('editing a configurable rule\'s text persists as an override', async ({ page }) => {
   mockAdminScreen(page);
   await page.goto('/#/configuracoes');
 
@@ -191,15 +201,31 @@ test('editing a hardcoded rule\'s text persists as an override', async ({ page }
   await expect(refreshed.getByText('Editado por admin@databricks.com')).toBeVisible();
 });
 
-test('deterministic rules carry a badge + a note that disabling only affects the LLM', async ({ page }) => {
+test('pipeline-locked rules (ENV-01/GRANT-01) are read-only: no toggle, no edit, informative text', async ({ page }) => {
+  mockAdminScreen(page);
+  await page.goto('/#/configuracoes');
+
+  const grantRow = page.locator('li').filter({ hasText: 'GRANT-01' });
+  await expect(grantRow.getByText('sempre ativa no pipeline')).toBeVisible();
+  // read-only: no enable checkbox, no "Editar texto", no severity dropdown
+  await expect(grantRow.getByRole('checkbox')).toHaveCount(0);
+  await expect(grantRow.getByRole('button', { name: 'Editar texto' })).toHaveCount(0);
+  await expect(grantRow.getByRole('combobox')).toHaveCount(0);
+  // it DOES inform what the check does
+  await expect(grantRow.getByText(/check_grants/)).toBeVisible();
+});
+
+test('EVAL-01 is the configurable deterministic rule: keeps its params + toggle, text read-only', async ({ page }) => {
   mockAdminScreen(page);
   await page.goto('/#/configuracoes');
   const evalRow = page.locator('li').filter({ hasText: 'EVAL-01' });
-  await expect(evalRow.getByText('determinística', { exact: true })).toBeVisible();
-  await expect(evalRow.getByText(/backstop do pipeline continua/)).toBeVisible();
-  // A non-deterministic rule has neither.
-  const sqlRow = page.locator('li').filter({ hasText: 'SQL-01' });
-  await expect(sqlRow.getByText('determinística', { exact: true })).toHaveCount(0);
+  await expect(evalRow.getByText('determinística · configurável')).toBeVisible();
+  // configurable knobs remain
+  await expect(evalRow.getByLabel('Mín. benchmarks')).toHaveValue('2');
+  await expect(evalRow.getByLabel('Limiar do eval-run (%)')).toHaveValue('80');
+  await expect(evalRow.getByRole('checkbox')).toBeVisible();
+  // but its TEXT is not editable (deterministic check, informative only)
+  await expect(evalRow.getByRole('button', { name: 'Editar texto' })).toHaveCount(0);
 });
 
 test('a 403 from the server surfaces as a clear error, not a silent empty screen', async ({ page }) => {
