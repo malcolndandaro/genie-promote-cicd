@@ -98,6 +98,15 @@ async def _lifespan(app: FastAPI):
     app.state.rules_store = rules_store.build_store_from_env()
     logger.info("Rules store: %s",
                 "initialized (migrations applied)" if app.state.rules_store else "absent (no PGHOST — local/test)")
+    # Seed the handbook rules as editable rows on a FRESH store (idempotent, empty-store-guarded) —
+    # so the 9 handbook rules stop being an invisible compile-time baseline and become real rows an
+    # admin can edit/disable/remove in the Regras UI. `effective_rules` still merges to the same set
+    # (the seeded rows carry the same values), so review behavior is unchanged; this only makes them
+    # visible + editable. No-op when the store is already populated (never clobbers admin edits).
+    if app.state.rules_store is not None:
+        n_seeded = app.state.rules_store.seed_defaults(handbook_rules.RULES)
+        if n_seeded:
+            logger.info("Rules store: seeded %d default handbook rule(s) into an empty store", n_seeded)
     # S7a (app-ux-overhaul): the admin registry of Knowledge Assistant endpoints — same
     # hard-dependency contract. An absent/empty store just means no KA endpoints are configured
     # (the reviewer has none to consult, D5's additive-only design degrades to a no-op).

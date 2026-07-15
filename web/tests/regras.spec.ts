@@ -32,7 +32,8 @@ function mockAdminScreen(page: import('@playwright/test').Page, overridesInit: R
     for (const rule of HARDCODED) {
       const ov = byId.get(rule.rule_id) as Record<string, unknown> | undefined;
       if (ov && ov.enabled === false) continue;
-      out.push(ov ? { ...rule, severity_hint: ov.severity ?? rule.severity_hint, params: ov.params ?? rule.params } : rule);
+      out.push(ov ? { ...rule, severity_hint: ov.severity ?? rule.severity_hint,
+        params: ov.params ?? rule.params, content: ov.content ?? rule.content } : rule);
     }
     for (const ov of overrides) {
       if (ov.is_custom && ov.enabled !== false) {
@@ -162,6 +163,43 @@ test('adding a custom rule appears in the list and can be removed', async ({ pag
 
   await customRow.getByRole('button', { name: 'Remover' }).click();
   await expect(page.locator('li').filter({ hasText: 'CUSTOM-01' })).toHaveCount(0);
+});
+
+test('shows each hardcoded rule\'s handbook text (content), not just id + citation', async ({ page }) => {
+  mockAdminScreen(page);
+  await page.goto('/#/configuracoes');
+  const envRow = page.locator('li').filter({ hasText: 'ENV-01' });
+  await expect(envRow.getByText('catálogo por ambiente')).toBeVisible();
+  const sqlRow = page.locator('li').filter({ hasText: 'SQL-01' });
+  await expect(sqlRow.getByText('convenções SQL')).toBeVisible();
+});
+
+test('editing a hardcoded rule\'s text persists as an override', async ({ page }) => {
+  mockAdminScreen(page);
+  await page.goto('/#/configuracoes');
+
+  const sqlRow = page.locator('li').filter({ hasText: 'SQL-01' });
+  await sqlRow.getByRole('button', { name: 'Editar texto' }).click();
+  const textarea = sqlRow.getByRole('textbox');
+  await textarea.fill('sempre alias com AS, nunca SELECT *');
+  await sqlRow.getByRole('button', { name: 'Salvar texto' }).click();
+
+  // Survives a refresh (round-tripped through the mocked store).
+  await rulesCard(page).getByRole('button', { name: 'Atualizar' }).click();
+  const refreshed = page.locator('li').filter({ hasText: 'SQL-01' });
+  await expect(refreshed.getByText('sempre alias com AS, nunca SELECT *')).toBeVisible();
+  await expect(refreshed.getByText('Editado por admin@databricks.com')).toBeVisible();
+});
+
+test('deterministic rules carry a badge + a note that disabling only affects the LLM', async ({ page }) => {
+  mockAdminScreen(page);
+  await page.goto('/#/configuracoes');
+  const evalRow = page.locator('li').filter({ hasText: 'EVAL-01' });
+  await expect(evalRow.getByText('determinística', { exact: true })).toBeVisible();
+  await expect(evalRow.getByText(/backstop do pipeline continua/)).toBeVisible();
+  // A non-deterministic rule has neither.
+  const sqlRow = page.locator('li').filter({ hasText: 'SQL-01' });
+  await expect(sqlRow.getByText('determinística', { exact: true })).toHaveCount(0);
 });
 
 test('a 403 from the server surfaces as a clear error, not a silent empty screen', async ({ page }) => {

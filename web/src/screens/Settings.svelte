@@ -183,6 +183,45 @@
     void withRuleMutation(ruleId, () => resetRule(ruleId));
   }
 
+  // Rules whose enforcement is DETERMINISTIC in the pipeline (not the LLM): EVAL-01 (benchmark
+  // count in review_core.finalize_findings), GRANT-01 (scripts/check_grants.py in CI), ENV-01
+  // (scripts/pre_render.py allowlist in CI). Disabling/editing their TEXT here only changes what the
+  // reviewer LLM is grounded on — the deterministic backstop in the pipeline still runs regardless.
+  // Surfacing this prevents the (otherwise misleading) impression that toggling them off in the UI
+  // turns the guard off.
+  const DETERMINISTIC_RULES = new Set(['EVAL-01', 'GRANT-01', 'ENV-01']);
+
+  // Inline content editing (the handbook text an admin can now rewrite). Keyed by rule_id so only
+  // one row is in edit mode at a time; the draft is the textarea buffer.
+  let editingContentId = $state<string | null>(null);
+  let contentDraft = $state('');
+
+  function startEditContent(ruleId: string, current: string): void {
+    editingContentId = ruleId;
+    contentDraft = current;
+  }
+
+  function cancelEditContent(): void {
+    editingContentId = null;
+    contentDraft = '';
+  }
+
+  // Persist an edited handbook-rule text as a plain override (is_custom=false). Spreads the existing
+  // override so enabled/severity/params survive a text-only edit (the store replaces the whole row).
+  function saveContent(
+    ruleId: string,
+    override: { enabled: boolean; severity: RuleSeverity | null; params: Record<string, unknown> | null } | undefined,
+  ): void {
+    const next = contentDraft.trim();
+    if (!next) return;
+    void withRuleMutation(ruleId, () =>
+      upsertRule({
+        ruleId, enabled: override?.enabled ?? true, severity: override?.severity ?? undefined,
+        params: override?.params ?? undefined, content: next,
+      }),
+    ).then(() => { editingContentId = null; contentDraft = ''; });
+  }
+
   // --- custom rule form -----------------------------------------------------------------------
   let customRuleId = $state('');
   let customSeverity = $state<RuleSeverity>('SUGGESTION');
@@ -372,6 +411,7 @@
             {@const override = data.overrides.find((o) => o.rule_id === rule.rule_id)}
             {@const enabled = override?.enabled ?? true}
             {@const severity = override?.severity ?? rule.severity_hint}
+            {@const content = override?.content ?? rule.content}
             {@const minBenchmarks = (override?.params?.min_benchmarks as number | undefined)
               ?? (rule.params?.min_benchmarks as number | undefined) ?? 2}
             {@const evalThresholdPct = Math.round((
@@ -379,9 +419,56 @@
               ?? (rule.params?.eval_run_threshold as number | undefined) ?? 0.8) * 100)}
             <li class="row rule-row" class:rule-row--disabled={!enabled}>
               <div class="row__main">
-                <strong>{rule.rule_id}</strong>
+                <div class="rule-row__head">
+                  <strong>{rule.rule_id}</strong>
+                  {#if DETERMINISTIC_RULES.has(rule.rule_id)}
+                    <Badge tone="accent">determinística</Badge>
+                  {/if}
+                  {#if !enabled}<span class="muted text-xs">desabilitada</span>{/if}
+                </div>
                 <span class="muted text-xs">{rule.citation}</span>
-                {#if !enabled}<span class="muted text-xs">desabilitada</span>{/if}
+                <!-- The handbook text the reviewer LLM is grounded on — now visible + editable. -->
+                {#if editingContentId === rule.rule_id}
+                  <div class="rule-row__edit">
+                    <textarea
+                      class="field__input rule-row__textarea"
+                      rows="3"
+                      bind:value={contentDraft}
+                    ></textarea>
+                    <div class="rule-row__edit-actions">
+                      <Button
+                        variant="primary"
+                        loading={mutatingRuleId === rule.rule_id}
+                        disabled={!contentDraft.trim() || !!mutatingRuleId}
+                        onclick={() => saveContent(rule.rule_id, override)}
+                      >
+                        Salvar texto
+                      </Button>
+                      <Button variant="ghost" disabled={!!mutatingRuleId} onclick={cancelEditContent}>
+                        Cancelar
+                      </Button>
+                    </div>
+                  </div>
+                {:else}
+                  <p class="rule-row__content text-sm">{content}</p>
+                  <button
+                    type="button"
+                    class="rule-row__edit-link"
+                    disabled={!!mutatingRuleId}
+                    onclick={() => startEditContent(rule.rule_id, content)}
+                  >
+                    Editar texto
+                  </button>
+                {/if}
+                {#if DETERMINISTIC_RULES.has(rule.rule_id)}
+                  <span class="muted text-xs rule-row__det-note">
+                    Enforcement determinístico no pipeline — desabilitar/editar aqui muda só o que o
+                    revisor (LLM) considera; o backstop do pipeline continua valendo.
+                  </span>
+                {/if}
+                {#if override?.updated_by}
+                  <span class="muted text-xs">Editado por {override.updated_by}</span>
+                {/if}
               </div>
               <div class="row__meta rule-row__controls">
                 <label class="toggle">
@@ -673,6 +760,50 @@
   }
   .rule-row__controls {
     row-gap: var(--space-2);
+  }
+  .rule-row__head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .rule-row__content {
+    margin: 0.2rem 0 0;
+    color: var(--foreground);
+    max-width: 46rem;
+  }
+  .rule-row__det-note {
+    max-width: 46rem;
+    font-style: italic;
+  }
+  .rule-row__edit {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-top: 0.3rem;
+    max-width: 46rem;
+  }
+  .rule-row__textarea {
+    width: 100%;
+    resize: vertical;
+  }
+  .rule-row__edit-actions {
+    display: flex;
+    gap: var(--space-2);
+  }
+  .rule-row__edit-link {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--primary, #00a99d);
+    font-size: 0.8rem;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  .rule-row__edit-link:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .toggle {
     display: flex;

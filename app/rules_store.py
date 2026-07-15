@@ -154,6 +154,39 @@ class RulesStore:
         event_type = "rule_deleted" if existing.get("is_custom") else "rule_reset"
         self._append_event(rule_id, event_type, actor_email=actor_email, detail=None)
 
+    def seed_defaults(self, rules: list[dict], *, actor_email: str = "system") -> int:
+        """Seed the handbook's default rules as editable rows — the "no more hardcoded rules"
+        requirement: after this runs, the 9 handbook rules exist as real `rule_overrides` rows an
+        admin can edit/disable/remove via the UI, instead of being an invisible compile-time baseline.
+
+        IDEMPOTENT + non-destructive: seeds ONLY when the store is completely empty (a fresh install),
+        so it never clobbers admin edits on a later boot, and a re-run (or a multi-replica startup
+        race) is a no-op — each row is written with `upsert`'s `ON CONFLICT (rule_id)`, so even a
+        racing double-write converges to the same keyed rows. Returns the number of rows seeded (0 if
+        the store was already populated).
+
+        The seeded rows are plain overrides (`is_custom=False`) mirroring `handbook_rules.RULES` field
+        for field (severity_hint->severity, content, citation, and params when present). Deliberately
+        writes rows DIRECTLY via the backend, NOT through `upsert()`: `upsert` would append a
+        `rule_updated` audit event per rule, but seeding is the store's INITIAL STATE, not an admin
+        action — polluting the audit trail with 9 synthetic "changes" at every fresh install would
+        misrepresent "who changed what". `effective_rules` still returns a set identical to the
+        hardcoded baseline (the seeded rows carry the same values), so runtime review behavior is
+        unchanged — only now the rows are real + editable."""
+        if self._b.list_all():
+            return 0
+        now = self._clock()
+        seeded = 0
+        for r in rules:
+            row = RuleOverride(
+                rule_id=r["rule_id"], is_custom=False, enabled=True,
+                severity=r.get("severity_hint"), params=r.get("params"),
+                content=r.get("content"), citation=r.get("citation"),
+                updated_by=actor_email, created_at=now, updated_at=now)
+            self._b.upsert(dataclasses.asdict(row))
+            seeded += 1
+        return seeded
+
     def get(self, rule_id: str) -> Optional[RuleOverride]:
         return _as(RuleOverride, self._b.get(rule_id))
 
