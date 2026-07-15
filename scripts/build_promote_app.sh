@@ -89,6 +89,11 @@ env:
   # server unions APP_ADMINS + APP_STEWARDS + APP_STEWARD.
   - name: APP_ADMINS
     value: "malcoln.dandaro@databricks.com"
+  # S9b (repo split): the promotion PR target. Bot opens promote/<slug> PRs HERE, not in the app
+  # repo — the content repo receives promotions (D9). Overrides app_logic.GH_REPO's default
+  # (malcolndandaro/genie-promote-cicd). Config-driven (ADR-0004); a fork sets its own content repo.
+  - name: APP_GH_REPO
+    value: "malcolndandaro/genie-spaces-content"
   # NOTE: the GitHub icon's target is config-driven (ADR-0004) via APP_REPO_URL, which defaults in the
   # backend (`engine_api/main.py:_repo_url`) to the accelerator's own repo — the SINGLE source of
   # truth. A fork overrides it by setting APP_REPO_URL here; left unset, the default applies.
