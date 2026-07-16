@@ -30,9 +30,6 @@ variables:
     description: Environment prefix for the catalog (dev|prod). Set per target.
   warehouse_id:
     description: SQL warehouse id. Set per target, or override in CI via --var.
-  consumer_group:
-    description: UC group that consumes the domain's diamond (gold) layer.
-    default: account users
   # Lakebase (Databricks Postgres) — durable promotion state/audit/cache (ADR-0005). Config-driven
   # (ADR-0004): a new customer changes these + redeploys, nothing else. Lakebase now lives in PROD
   # with the app (ADR-0006 — the app is a durable, prod-hosted control plane that reaches into dev;

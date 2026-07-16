@@ -47,12 +47,10 @@ for src in src/genie/*.serialized_space.json; do
     # by matching this title via genie.list_spaces() (the id isn't in bundle summary / the payload).
     cp "src/genie/${slug}.title" "build/genie/${slug}.title"
   fi
-  # Canonical AudienceSpec. During the expand/switch window also materialize a BUILD-ONLY copy at
-  # the legacy filename so the not-yet-switched content workflow still invokes the compatibility
-  # entrypoints. The git writer never emits this filename and the payload remains AudienceSpec.
+  # Canonical AudienceSpec. A legacy input remains readable only during ADR-0009's bounded
+  # compatibility window; canonical content is always materialized at the canonical filename.
   if [ -f "src/genie/${slug}.audience.json" ]; then
     cp "src/genie/${slug}.audience.json" "build/genie/${slug}.audience.json"
-    cp "src/genie/${slug}.audience.json" "build/genie/${slug}.access.json"
   elif [ -f "src/genie/${slug}.access.json" ]; then
     # Read-only legacy input until the content-repo atomic switch (ADR-0009).
     cp "src/genie/${slug}.access.json" "build/genie/${slug}.access.json"
@@ -116,7 +114,6 @@ resources:
             base_parameters:
               catalog: "${var.env}_${var.domain}"
               env: "${var.env}"
-              consumer_group: "${var.consumer_group}"
 YAML
   echo "generated $SETUP_GEN (setup job included)"
 else

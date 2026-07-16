@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import audience_spec  # noqa: E402
 import change_request  # noqa: E402
+import content_revision  # noqa: E402
 import reconcile_audience  # noqa: E402
 from apply_access import resolve_space_id  # noqa: E402
 
@@ -52,15 +53,6 @@ def _safe_reason(exc: BaseException) -> str:
         if secret:
             value = value.replace(secret, "[REDACTED]")
     return value[:1000]
-
-
-def _content_revision(root: Path) -> str:
-    files = {
-        str(path.relative_to(root)): path.read_text(encoding="utf-8")
-        for path in sorted((root / "src").rglob("*"))
-        if path.is_file()
-    }
-    return change_request.compute_content_revision(files)
 
 
 @dataclasses.dataclass
@@ -285,14 +277,17 @@ def _evidence(root: Path) -> AttemptEvidence:
     engine_revision = os.environ.get("ENGINE_REVISION", "0" * 40)
     # Validation is intentional: a deploy cannot proceed with a floating/short engine revision.
     change_request.parse_engine_lock(engine_revision)
-    content_revision = os.environ.get("CONTENT_REVISION") or _content_revision(root)
-    change_request.RevisionPair(content_revision, engine_revision)
+    content_revision_value = (
+        os.environ.get("CONTENT_REVISION")
+        or content_revision.compute_content_tree_revision(root)
+    )
+    change_request.RevisionPair(content_revision_value, engine_revision)
     server = os.environ.get("GITHUB_SERVER_URL")
     repo = os.environ.get("GITHUB_REPOSITORY")
     run_url = f"{server}/{repo}/actions/runs/{run_id}" if server and repo else None
     return AttemptEvidence(
         attempt_id=f"github:{run_id}:{run_attempt}", run_attempt=run_attempt,
-        revisions={"content_revision": content_revision, "engine_revision": engine_revision},
+        revisions={"content_revision": content_revision_value, "engine_revision": engine_revision},
         run_url=run_url,
     )
 

@@ -35,12 +35,12 @@ def _render_repo(tmp_path: Path, sidecar_name: str, sidecar: dict) -> Path:
     return tmp_path / "build" / "genie"
 
 
-def test_render_materializes_canonical_audience_and_build_only_compatibility_copy(tmp_path):
+def test_render_materializes_only_canonical_audience_after_workflow_switch(tmp_path):
     payload = {"principals": [{"principal": "finance-users", "is_group": True}]}
     built = _render_repo(tmp_path, "receivables.audience.json", payload)
 
     assert json.loads((built / "receivables.audience.json").read_text()) == payload
-    assert json.loads((built / "receivables.access.json").read_text()) == payload
+    assert not (built / "receivables.access.json").exists()
     assert not (tmp_path / "src" / "genie" / "receivables.access.json").exists()
 
 
