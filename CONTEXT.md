@@ -32,6 +32,14 @@ implementation details live in code + ADRs (`docs/adr/`).
   brand-new deployment with an empty `roles` table; once any row exists, the store is authoritative.
   "Approver" exists in the schema for a future finer-grained role; F3 approval is gated on Admin today.
 
+- **App Maintainer (KIP)** — the team accountable for keeping the Promotion App operational and for
+  its maintenance and future improvements. This is product/runtime ownership, distinct from deciding
+  whether a specific Promotion should be approved.
+
+- **Adoption Owner (GestOps)** — the team accountable for publicizing the Promotion App and guiding
+  business users in how to use it. GestOps owns adoption and first-line usage orientation, not the
+  app's code/runtime maintenance.
+
 - **Review Snapshot** — the immutable reviewer result captured when a Promotion is requested:
   findings, the gate verdict, the eval result, and the pipeline timeline. It is the AI-generated
   assessment at a point in time. **Persisted with the Promotion** so reopening a Promotion renders the
