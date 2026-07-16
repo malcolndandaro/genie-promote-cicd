@@ -83,16 +83,46 @@ def test_list_serving_endpoints_skips_unnamed_entries():
     assert app_logic.list_serving_endpoints("p", client=fake) == [{"name": "ka-x"}]
 
 
-def test_query_ka_endpoint_parses_the_chat_completion_response():
-    # S7b: same Chat Completions response shape _claude already parses (RS1).
-    fake = NS(serving_endpoints=NS(query=lambda **kw: NS(
-        choices=[NS(message=NS(content="resposta do KA"))])))
+def test_query_ka_endpoint_uses_the_responses_api_and_concatenates_text():
+    # Agent Bricks KA endpoints serve the Responses API (task agent/v1/responses): the request is
+    # `{"input": [...]}` to /invocations, and the answer arrives as output[].content[].output_text
+    # segments (proven live 2026-07-16 — the old Chat-Completions `messages` shape is rejected).
+    captured = {}
+
+    def fake_do(method, path, body=None):
+        captured["method"], captured["path"], captured["body"] = method, path, body
+        return {"output": [
+            {"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "resposta "},
+                {"type": "output_text", "text": "do KA", "annotations": [{"type": "url_citation"}]},
+            ]},
+        ]}
+
+    fake = NS(api_client=NS(do=fake_do))
     assert app_logic._query_ka_endpoint("ka-handbook", "pergunta?", "p", client=fake) == "resposta do KA"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/serving-endpoints/ka-handbook/invocations"
+    assert captured["body"] == {"input": [{"role": "user", "content": "pergunta?"}]}
 
 
-def test_query_ka_endpoint_handles_no_choices():
-    fake = NS(serving_endpoints=NS(query=lambda **kw: NS(choices=None)))
+def test_query_ka_endpoint_empty_on_no_output():
+    fake = NS(api_client=NS(do=lambda *a, **k: {"output": []}))
     assert app_logic._query_ka_endpoint("ka-handbook", "pergunta?", "p", client=fake) == ""
+
+
+def test_extract_responses_text_shape_variations():
+    # Multiple message items concatenated; string-content and top-level output_text fallbacks.
+    multi = {"output": [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a"}]},
+        {"type": "reasoning", "content": [{"type": "output_text", "text": "IGNORED"}]},  # not a message
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
+    ]}
+    assert app_logic._extract_responses_text(multi) == "ab"
+    assert app_logic._extract_responses_text(
+        {"output": [{"type": "message", "content": "plain"}]}) == "plain"
+    assert app_logic._extract_responses_text({"output_text": " top-level "}) == "top-level"
+    assert app_logic._extract_responses_text({}) == ""
+    assert app_logic._extract_responses_text("not a dict") == ""
 
 
 def test_export_serialized_parses_json_string():

@@ -403,21 +403,53 @@ def _claude(system: str, user: str, profile: str, client: WorkspaceClient | None
 
 def _query_ka_endpoint(serving_endpoint_name: str, question: str, profile: str,
                        client: WorkspaceClient | None = None) -> str:
-    """S7b (app-ux-overhaul): query a registered Knowledge Assistant endpoint — same query
-    mechanics as `_claude` (RS1: a KA endpoint IS a serving endpoint, Chat Completions shape),
-    just a single USER message (no system prompt — the KA's OWN indexed knowledge grounds it,
-    not this app's reviewer persona) against a DIFFERENT endpoint name. No explicit client-side
-    timeout (RS1 found no dedicated timeout param on `query()` itself); the SDK's own HTTP
-    client default is relied on, and `_ka_advisory_findings` below catches ANY failure uniformly
-    (timeout, 429, 5xx, not-ready) rather than trying to distinguish them."""
+    """S7b (app-ux-overhaul): query a registered Knowledge Assistant endpoint — a single USER turn
+    (no system prompt: the KA's OWN indexed knowledge grounds it, not this app's reviewer persona).
+
+    Agent Bricks Knowledge Assistants serve the **Responses API** (`task: agent/v1/responses`), NOT
+    Chat Completions — proven live 2026-07-16: `serving_endpoints.query(messages=...)` is rejected
+    ("'messages' field is not supported. Please use 'input' field instead"). So we POST the Responses
+    shape `{"input": [{"role","content"}]}` to `/serving-endpoints/{name}/invocations` and read back
+    `output[].content[].output_text` (the assistant message may arrive as several text segments +
+    citation annotations — we concatenate the text). `_ka_advisory_findings` catches ANY failure
+    uniformly (timeout, 429, 5xx, not-ready), so this stays a best-effort advisory call."""
     w = client or _client(profile)
-    resp = w.serving_endpoints.query(
-        name=serving_endpoint_name,
-        messages=[ChatMessage(role=ChatMessageRole.USER, content=question)],
-        max_tokens=1000,
+    resp = w.api_client.do(
+        "POST", f"/serving-endpoints/{serving_endpoint_name}/invocations",
+        body={"input": [{"role": "user", "content": question}]},
     )
-    choices = resp.choices or []
-    return choices[0].message.content if choices and choices[0].message else ""
+    return _extract_responses_text(resp)
+
+
+def _extract_responses_text(resp: dict) -> str:
+    """Pull the assistant's plain text out of a Responses-API payload. The KA returns
+    `output`: a list of items; the assistant message item (`type == "message"`, `role ==
+    "assistant"`) carries `content`: a list of segments, each `{"type": "output_text", "text": ...}`
+    (plus optional citation annotations we don't surface). Concatenate every output_text segment
+    across every message item. Tolerant of shape drift: a segment whose `content` is a plain string,
+    or a top-level `output_text`, are both handled; anything unrecognized yields ''."""
+    if not isinstance(resp, dict):
+        return ""
+    parts: list[str] = []
+    for item in resp.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+            continue
+        for seg in content or []:
+            if isinstance(seg, dict) and seg.get("type") == "output_text" and seg.get("text"):
+                parts.append(seg["text"])
+            elif isinstance(seg, str):
+                parts.append(seg)
+    text = "".join(parts).strip()
+    if text:
+        return text
+    # Fallbacks for minor shape variations seen across serving versions.
+    if isinstance(resp.get("output_text"), str):
+        return resp["output_text"].strip()
+    return ""
 
 
 def _ka_question(ctx: dict) -> str:
