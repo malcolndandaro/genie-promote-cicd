@@ -146,8 +146,11 @@ test('deploy_failed → Deploy step shows reprovado with an expandable PT detail
 
   // Closed by default — must expand the disclosure to reveal WHY the deploy step failed.
   await page.getByText('Ver detalhes do deploy').click();
-  await expect(page.getByText("AttributeError: 'dict' object has no attribute 'as_dict'")).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Ver log no GitHub ↗' })).toHaveAttribute(
+  const pipeline = page.getByLabel('Pipeline de promoção');
+  await expect(
+    pipeline.getByText("AttributeError: 'dict' object has no attribute 'as_dict'"),
+  ).toBeVisible();
+  await expect(pipeline.getByRole('link', { name: 'Ver log no GitHub ↗' })).toHaveAttribute(
     'href',
     'https://github.com/malcolndandaro/genie-promote-cicd/actions/runs/9/jobs/101',
   );

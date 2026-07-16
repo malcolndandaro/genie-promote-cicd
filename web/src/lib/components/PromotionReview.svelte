@@ -58,7 +58,9 @@
   // review so polling runs exactly when the review is on screen (the active flow OR a promotion
   // detail) and stops when it isn't. It also refreshes the audit trail (the poll reconciles
   // server-side, LB4). Stops at a terminal phase.
-  const TERMINAL = new Set(['deployed', 'closed', 'deploy_failed']);
+  // A failed deploy is recoverable forward by KIP. Keep polling so a provider re-run (new Attempt,
+  // same approved revisions) becomes the `resuming` state without requiring a reload.
+  const TERMINAL = new Set(['deployed', 'closed']);
   $effect(() => {
     if (!promotion.pr) return;
     promotion.refreshStatus();
@@ -128,7 +130,7 @@
         liveStatus={promotion.liveStatus}
         {devHost}
         devSpaceId={promotion.resource?.id ?? null}
-        showPipeline={!promotion.noChange}
+        showPipeline={!!promotion.pr && !promotion.noChange}
       >
         {#snippet approval()}
           {#if driftP}

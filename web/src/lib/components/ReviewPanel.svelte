@@ -4,6 +4,7 @@
   import Pipeline from './Pipeline.svelte';
   import EvalResultsPanel from './EvalResultsPanel.svelte';
   import Markdown from './Markdown.svelte';
+  import DecisionSummary from './DecisionSummary.svelte';
   import { severityTone, buildPromotionSteps } from '../pipeline';
   import type { Review } from '../types';
 
@@ -29,9 +30,10 @@
     showPipeline = true,
   }: Props = $props();
 
-  let failed = $derived(review.gate.conclusion === 'failure');
   // Findings have no stable id; the list never reorders, so a rule_id+index key is unique & safe.
   let keyed = $derived(review.findings.map((f, i) => ({ ...f, _k: `${f.rule_id}-${i}` })));
+  let blockers = $derived(keyed.filter((f) => f.severity === 'BLOCKER' || f.severity === 'OPERATIONAL'));
+  let advisories = $derived(keyed.filter((f) => f.severity !== 'BLOCKER' && f.severity !== 'OPERATIONAL'));
   // The 7-step pipeline: verdict steps from review.timeline, git steps driven live by liveStatus.
   let timeline = $derived(buildPromotionSteps(review, liveStatus));
   // Required Público do Space shown so the Steward approves the exact CAN_RUN audience.
@@ -39,36 +41,16 @@
 </script>
 
 <div class="review">
-  <!-- Pipeline timeline (real per-step verdicts from the server; advances on approval). Hidden on a
-       no-op promotion (no PR), where the git steps would be a misleading string of pending nodes. -->
-  {#if showPipeline}
-    <section>
-      <h3 class="review__heading">Pipeline de promoção</h3>
-      <Pipeline steps={timeline} />
-    </section>
-  {/if}
+  <DecisionSummary {review} {liveStatus} mode="decision" />
 
-  <!-- Gate summary (role so the verdict isn't conveyed by colour alone; failure = alert). -->
-  {#if failed}
-    <div class="gate gate--fail" role="alert">{review.gate.summary}</div>
-  {:else}
-    <p
-      class="gate-text"
-      role="status"
-      data-tone={review.gate.conclusion === 'success' ? 'success' : 'warning'}
-    >
-      {review.gate.summary}
-    </p>
-  {/if}
-
-  <!-- Findings. -->
+  <!-- Decision-first findings: blockers are never hidden; guidance is available but collapsed. -->
   <section>
-    <h3 class="review__heading">Achados do Genie Reviewer</h3>
+    <h3 class="review__heading">Bloqueios que exigem ação</h3>
     {#if keyed.length === 0}
       <p class="muted text-sm">Nenhum achado — espaço limpo.</p>
-    {:else}
+    {:else if blockers.length > 0}
       <div class="findings">
-        {#each keyed as f, i (f._k)}
+        {#each blockers as f, i (f._k)}
           <article class="finding" in:fly={{ y: 10, duration: 260, delay: i * 70 }}>
             <div class="finding__head">
               <Badge tone={severityTone(f.severity)}>{f.severity}</Badge>
@@ -86,8 +68,39 @@
           </article>
         {/each}
       </div>
+    {:else}
+      <p class="muted text-sm">Nenhum bloqueio. As orientações opcionais estão recolhidas abaixo.</p>
+    {/if}
+    {#if advisories.length > 0}
+      <details class="advisories">
+        <summary>Orientações não bloqueantes ({advisories.length})</summary>
+        <div class="findings">
+          {#each advisories as f, i (f._k)}
+            <article class="finding" in:fly={{ y: 10, duration: 200, delay: i * 40 }}>
+              <div class="finding__head">
+                <Badge tone={severityTone(f.severity)}>{f.severity}</Badge>
+                <span class="finding__rule">{f.rule_id}</span>
+              </div>
+              {#if f.rule_id.startsWith('KA:')}
+                <div class="finding__msg"><Markdown text={f.message} /></div>
+              {:else}<p class="finding__msg">{f.message}</p>{/if}
+              {#if f.suggestion}<p class="finding__suggestion">↳ {f.suggestion}</p>{/if}
+              {#if f.citation}<p class="finding__citation">{f.citation}</p>{/if}
+            </article>
+          {/each}
+        </div>
+      </details>
     {/if}
   </section>
+
+  {#if showPipeline}
+    <section>
+      <h3 class="review__heading">Pipeline de promoção</h3>
+      <Pipeline steps={timeline} />
+    </section>
+  {/if}
+
+  <DecisionSummary {review} {liveStatus} mode="evidence" />
 
   <!-- Read-only here; reconciliation is governed by CI and never applied from this screen. -->
   {#if audienceSpec && audienceSpec.principals.length > 0}
@@ -131,28 +144,9 @@
     flex-wrap: wrap;
     gap: var(--space-2);
   }
-  .gate {
-    border-radius: var(--radius-sm);
-    padding: var(--space-3) var(--space-4);
-    font-weight: 500;
-    font-size: 0.9rem;
-  }
-  .gate--fail {
-    background: var(--destructive-soft);
-    border: 1px solid color-mix(in srgb, var(--destructive) 30%, transparent);
-    color: var(--destructive);
-  }
-  .gate-text {
-    margin: 0;
-    font-weight: 600;
-    font-size: 0.9rem;
-  }
-  .gate-text[data-tone='success'] {
-    color: var(--success);
-  }
-  .gate-text[data-tone='warning'] {
-    color: var(--warning);
-  }
+  .advisories { margin-top: var(--space-4); }
+  .advisories summary { cursor: pointer; color: var(--accent-hover); font-size: 0.82rem; font-weight: 700; }
+  .advisories[open] summary { margin-bottom: var(--space-3); }
   .findings {
     display: flex;
     flex-direction: column;

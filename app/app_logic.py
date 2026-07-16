@@ -874,8 +874,9 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     widens its OWN allowlist for the caller's chosen catalogs — promotion never does, since CI (not
     this app) is what applies the mapping and must keep enforcing the strict target allowlist.
 
-    Returns {review (UI fields), pr:{number,url}}. The PR opens regardless of findings — it's the
-    fix/approval loop; pr-checks + the Steward gate (GH4) enforce the outcome.
+    Returns {review (UI fields), pr:{number,url}|None}. A content BLOCKER stops before GitHub: the
+    author fixes the named item in Dev and re-reviews, so no Change Request exists for knowingly
+    invalid content. Passing review continues through the immutable PR + CI + Steward gates.
     """
     if audience_spec_ is None and access_spec_ is not None and not access_spec_.is_empty():
         # Compatibility is read-only: translate the safe CAN_RUN subset; never write AccessSpec.
@@ -888,6 +889,13 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     full.setdefault("audience_spec", audience_spec_.to_dict() if audience_spec_ is not None else None)
     full.setdefault("access_spec", None)
     review = {k: full[k] for k in REVIEW_FIELDS}
+
+    # Decision-first pilot flow: content findings are resolved before a Change Request exists.
+    # This is still entirely pre-production (review/export reads only); no branch, PR, comment,
+    # Lakebase Promotion or deploy Attempt is created for a blocked review.
+    if (review.get("gate") or {}).get("conclusion") == "failure":
+        return {"review": review, "pr": None, "branch": None, "no_change": False,
+                "blocked": True}
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the
     # TOCTOU window where the committed artifact could differ from the reviewed one).

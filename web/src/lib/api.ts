@@ -117,6 +117,8 @@ export interface PromoteResult {
   /** True when the promoted content is byte-identical to what's already in prod — nothing to
    * promote. The app shows a "nada a promover" notice instead of tracking a nonexistent PR. */
   no_change?: boolean;
+  /** Review stopped on content blockers before any Change Request or production mutation. */
+  blocked?: boolean;
 }
 
 /**
@@ -255,6 +257,22 @@ export type PromotePhase =
   | 'merged'
   | 'closed';
 
+export interface DeploymentAttemptEvidence {
+  version?: number;
+  attempt_id: string;
+  run_attempt: number;
+  revisions: { content_revision: string; engine_revision: string };
+  mutation_started: boolean;
+  completed_stages: string[];
+  current_stage: string | null;
+  failed_stage: string | null;
+  target_ids: Record<string, string>;
+  reason: string | null;
+  run_url: string | null;
+  terminal_state: 'running' | 'operational_failed' | 'partial_failed' | 'succeeded';
+  sequence?: number;
+}
+
 export interface PromoteStatus {
   provider?: string;
   external_id?: string;
@@ -278,6 +296,7 @@ export interface PromoteStatus {
     revisions?: { content_revision: string; engine_revision: string } | null;
     rejected?: boolean;
     rejection_reason?: string | null;
+    attempt?: DeploymentAttemptEvidence | null;
   };
   /** Fix C: WHY the deploy failed — only populated when `deploy.conclusion === 'failure'` (the
    * bot degrades to `null` on any GitHub read hiccup, same contract as `checks_detail`). */

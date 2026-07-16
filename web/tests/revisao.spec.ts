@@ -77,6 +77,8 @@ test('a KA advisory finding renders its markdown (bold/code/list), not raw ** an
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
+  // Non-blocking guidance is intentionally collapsed; blockers remain the only always-open class.
+  await page.getByText('Orientações não bloqueantes (1)', { exact: true }).click();
   const finding = page.locator('.finding').filter({ hasText: 'KA:Handbook CI/CD' });
   // Bold renders as <strong>, inline code as <code>, list items as <li> — NOT literal markdown.
   await expect(finding.locator('strong', { hasText: 'bem alinhada' })).toBeVisible();

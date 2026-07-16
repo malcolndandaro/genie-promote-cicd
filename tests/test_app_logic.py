@@ -597,8 +597,8 @@ class _FakeGitHubApp:
 
 
 _FULL_REVIEW = {
-    "findings": [{"rule_id": "EVAL-01", "severity": "BLOCKER", "message": "poucas perguntas"}],
-    "gate": {"conclusion": "failure", "blocker_count": 1, "summary": "🔴 bloqueada"},
+    "findings": [{"rule_id": "EVAL-01", "severity": "SUGGESTION", "message": "poucas perguntas"}],
+    "gate": {"conclusion": "success", "blocker_count": 0, "summary": "🟢 pronta"},
     "eval": {"status": "advisory", "summary": "🟡 x"},
     "timeline": [{"key": "checks", "label": "Checagens", "status": "pass"}],
     "allowlist_violations": [],
@@ -636,6 +636,23 @@ def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
     assert "malcoln@x" in gh.comment["body"] and "EVAL-01" in gh.comment["body"]
     assert "**Revisões imutáveis:**" in gh.comment["body"]
     assert ("a" * 40) in gh.comment["body"]
+
+
+def test_blocked_review_stops_before_change_request(monkeypatch):
+    blocked = dict(_FULL_REVIEW)
+    blocked["findings"] = [{"rule_id": "ENV-01", "severity": "BLOCKER", "message": "fora"}]
+    blocked["gate"] = {"conclusion": "failure", "blocker_count": 1, "summary": "bloqueada"}
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: blocked)
+    gh = _FakeGitHubApp()
+
+    out = app_logic.request_promotion(
+        "sp1", user_token="tok", requester_email="malcoln@x",
+        resource_title="Recebíveis", github=gh,
+    )
+
+    assert out["blocked"] is True and out["pr"] is None
+    assert out["review"]["gate"]["conclusion"] == "failure"
+    assert gh.promo is None and gh.comment is None
 
 
 def test_two_spaces_get_distinct_branches_and_paths():
