@@ -230,6 +230,50 @@ def test_resets_stale_branch_to_base_when_no_open_pr():
     assert any(m == "PATCH" and "/git/refs/heads/promote/x" in p for m, p in fg.calls)
 
 
+def test_no_op_promotion_when_content_matches_base_opens_no_pr():
+    # The reported case: the space is already in prod byte-identical (its serialized_space + title
+    # sidecar match `main`). Promoting would create an EMPTY PR that triggers no CI. Detect it and
+    # return {no_change: True} WITHOUT opening a PR or touching the branch.
+    fg = FakeGitHub()
+    fg.files[("main", "src/genie/s.json")] = {"sha": "b1", "content": base64.b64encode(b"{}").decode()}
+    fg.files[("main", "src/genie/s.title")] = {"sha": "b2", "content": base64.b64encode(b"My Space\n").decode()}
+    pr = _app(fg).open_or_update_promotion(
+        branch="promote/x", path="src/genie/s.json", content="{}", title="t", body="b",
+        extra_files={"src/genie/s.title": "My Space\n"})
+    assert pr == {"no_change": True}
+    assert len(fg.pulls) == 0                       # no PR opened
+    assert "promote/x" not in fg.refs               # branch never created/touched
+    assert ("promote/x", "src/genie/s.json") not in fg.files
+
+
+def test_content_differing_from_base_still_opens_a_pr():
+    # Guard the no-op detection doesn't over-fire: if the artifact differs from base (a real change),
+    # the normal PR flow runs even when the title sidecar happens to match.
+    fg = FakeGitHub()
+    fg.files[("main", "src/genie/s.json")] = {"sha": "b1", "content": base64.b64encode(b"{}").decode()}
+    pr = _app(fg).open_or_update_promotion(
+        branch="promote/x", path="src/genie/s.json", content='{"changed": true}', title="t", body="b")
+    assert pr["number"] == 1                         # a real PR opened
+    assert ("promote/x", "src/genie/s.json") in fg.files
+
+
+def test_no_op_detection_fails_open_on_a_github_read_error():
+    # If the base read errors (not 200/404), we must NOT suppress the promotion — fall through to the
+    # normal PR flow rather than risk silently dropping a real change on a transient GitHub hiccup.
+    fg = FakeGitHub()
+
+    def transport(method, url, headers, body):
+        path = url.split("api.github.com")[-1]
+        if method == "GET" and "/contents/" in path and "ref=main" in path:
+            return 500, {"message": "boom"}
+        return fg.transport(method, url, headers, body)
+
+    gh = GitHubApp(owner="o", repo="r", transport=transport, token_provider=lambda: "tok")
+    pr = gh.open_or_update_promotion(branch="promote/x", path="src/genie/s.json", content="{}",
+                                     title="t", body="b")
+    assert pr["number"] == 1  # fell through to the normal flow, didn't return no_change
+
+
 def test_no_branch_reset_while_a_pr_is_open():
     # Second request with the PR open updates the file in place — no branch reset (PATCH).
     fg = FakeGitHub()

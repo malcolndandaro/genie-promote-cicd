@@ -696,7 +696,10 @@ def promote(
             table_mapping=body.table_mapping),
     )
     store = getattr(app.state, "store", None)
-    if store is not None:  # deployed app always has it (hard dep); local-without-Lakebase skips
+    # A no-op promotion (space already in prod byte-identical) opened no PR — there's nothing to
+    # persist (the Promotion row is 1:1 with a PR). Skip persistence; the app shows a "nada a
+    # promover" notice from the `no_change` flag instead of tracking a nonexistent PR.
+    if store is not None and not result.get("no_change"):  # deployed app always has the store (hard dep)
         result["promotion_id"] = _persist_promotion(store, result, body, x_forwarded_email)
     return result
 

@@ -43,6 +43,10 @@ export class Promotion {
   liveStatus = $state<PromoteStatus | null>(null);
   /** The persisted Promotion id (LB3) — drives the audit-trail fetch (LB4). */
   promotionId = $state<string | null>(null);
+  /** True when the last request found NOTHING to promote — the space is already in prod byte-
+   * identical, so no PR was opened. The UI shows a "nada a promover" notice (the review still ran,
+   * so `review` is populated). Reset by every `select()`/new request. */
+  noChange = $state(false);
   /** Whether the CURRENT promotion flow was actively STARTED by the user on this screen this session
    * (via `requestPromotion`) — as opposed to auto-restored by `recover()` on page load. "Meus
    * espaços" gates the inline pipeline/review on this so it appears only when the user actually
@@ -117,6 +121,7 @@ export class Promotion {
     this.audit = [];
     this.requesterEmail = this.viewerEmail; // a fresh flow is requested by the viewer
     this.initiatedHere = false; // a bare selection isn't yet a requested promotion
+    this.noChange = false;
     this.pendingAccessSpec = undefined;
     this.pendingProdTitle = undefined;
     this.pendingTableMapping = undefined;
@@ -172,6 +177,7 @@ export class Promotion {
     const id = this.resource.id;
     this.phase = 'reviewing';
     this.initiatedHere = true; // user-initiated on this screen → its inline pipeline may show now
+    this.noChange = false;
     this.review = null;
     this.error = null;
     this.pr = null;
@@ -188,8 +194,9 @@ export class Promotion {
       this.review = res.review;
       this.pr = res.pr;
       this.promotionId = res.promotion_id ?? null;
+      this.noChange = !!res.no_change; // nothing to promote — space already in prod byte-identical
       this.phase = 'reviewed';
-      void this.refreshAudit(); // show the `requested` event immediately
+      void this.refreshAudit(); // show the `requested` event immediately (no-op when no PR)
     } catch (e) {
       if (this.resource?.id !== id) return;
       this.error = e instanceof Error ? e.message : String(e);

@@ -88,6 +88,16 @@
         <Button variant="outline" onclick={() => promotion.requestPromotion()}>Tentar novamente</Button>
       </div>
     {:else if promotion.phase === 'reviewed' && promotion.review}
+      {#if promotion.noChange}
+        <div class="no-change-banner" role="status">
+          <span class="no-change-banner__title">Nada a promover</span>
+          <span class="no-change-banner__body">
+            Este Genie Space já está em produção com conteúdo idêntico — não há mudanças para promover,
+            então nenhum PR foi aberto. Edite o espaço no dev e solicite a promoção novamente para
+            gerar um diff. (A revisão abaixo rodou mesmo assim, para referência.)
+          </span>
+        </div>
+      {/if}
       {#if promotion.pr}
         <div class="pr-banner" role="status">
           <span class="pr-banner__dot" aria-hidden="true"></span>
@@ -118,6 +128,7 @@
         liveStatus={promotion.liveStatus}
         {devHost}
         devSpaceId={promotion.resource?.id ?? null}
+        showPipeline={!promotion.noChange}
       >
         {#snippet approval()}
           {#if driftP}
@@ -180,6 +191,23 @@
     margin-top: var(--space-5);
     padding-top: var(--space-5);
     border-top: 1px solid var(--border);
+  }
+  .no-change-banner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-bottom: var(--space-5);
+    padding: var(--space-3) var(--space-4);
+    background: var(--warning-soft);
+    border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+    border-radius: var(--radius-sm);
+    font-size: 0.9rem;
+  }
+  .no-change-banner__title {
+    font-weight: 600;
+  }
+  .no-change-banner__body {
+    color: var(--muted-foreground);
   }
   .pr-banner {
     display: flex;

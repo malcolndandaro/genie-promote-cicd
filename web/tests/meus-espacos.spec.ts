@@ -115,6 +115,29 @@ test('a terminal (deployed) promotion is NOT auto-pinned as an inline pipeline o
   await expect(page.getByText('Pipeline de promoção')).toHaveCount(0);
 });
 
+test('a no-op promotion (already in prod) shows a "nada a promover" notice, no pipeline', async ({ page }) => {
+  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
+  // The backend detected the space is already in prod byte-identical: no PR, no_change: true.
+  await page.route('**/api/promote', (route) =>
+    route.fulfill({
+      json: {
+        pr: null, no_change: true,
+        review: { findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
+          eval: { status: 'advisory', summary: 'x' }, allowlist_violations: [], consumer_group: '', timeline: [] },
+      },
+    }),
+  );
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+
+  await expect(page.getByText('Nada a promover')).toBeVisible();
+  // no PR banner, and the (misleading) pipeline is suppressed on a no-op.
+  await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
+  await expect(page.getByText('Pipeline de promoção')).toHaveCount(0);
+});
+
 test('shows the empty state pointing to the dev workspace when there are no spaces', async ({ page }) => {
   await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [] } }));
   await page.goto('/#/espacos');

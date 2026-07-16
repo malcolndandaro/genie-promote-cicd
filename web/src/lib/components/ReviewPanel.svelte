@@ -19,8 +19,14 @@
     /** Optional supplementary content rendered below the review (currently: the Steward's F5
      * drift callout — the approval action itself lives in the PR banner, see PromotionReview). */
     approval?: import('svelte').Snippet;
+    /** Whether to render the 7-step promotion pipeline. False on a no-op promotion (no PR opened),
+     * where a pipeline would be misleading — the findings still render for reference. Default true. */
+    showPipeline?: boolean;
   }
-  let { review, userEmail, liveStatus = null, devHost = null, devSpaceId = null, approval }: Props = $props();
+  let {
+    review, userEmail, liveStatus = null, devHost = null, devSpaceId = null, approval,
+    showPipeline = true,
+  }: Props = $props();
 
   let failed = $derived(review.gate.conclusion === 'failure');
   // Findings have no stable id; the list never reorders, so a rule_id+index key is unique & safe.
@@ -36,11 +42,14 @@
 </script>
 
 <div class="review">
-  <!-- Pipeline timeline (real per-step verdicts from the server; advances on approval). -->
-  <section>
-    <h3 class="review__heading">Pipeline de promoção</h3>
-    <Pipeline steps={timeline} />
-  </section>
+  <!-- Pipeline timeline (real per-step verdicts from the server; advances on approval). Hidden on a
+       no-op promotion (no PR), where the git steps would be a misleading string of pending nodes. -->
+  {#if showPipeline}
+    <section>
+      <h3 class="review__heading">Pipeline de promoção</h3>
+      <Pipeline steps={timeline} />
+    </section>
+  {/if}
 
   <!-- Gate summary (role so the verdict isn't conveyed by colour alone; failure = alert). -->
   {#if failed}

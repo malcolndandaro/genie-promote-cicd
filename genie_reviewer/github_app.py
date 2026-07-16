@@ -204,8 +204,17 @@ class GitHubApp:
         `.access.json`/`.mapping.json` would otherwise survive on the branch forever once committed,
         even after the Requester clears the declaration, and CI would keep reading the stale
         sidecar. Deleting is 404-tolerant (`_delete_file_if_exists`), so this is always safe to pass
-        unconditionally, including on a path that was never committed."""
+        unconditionally, including on a path that was never committed.
+
+        NO-OP GUARD: if there's no open PR AND the promoted content (artifact + every sidecar) is
+        byte-identical to what's already on `base`, this is a promotion of a space that is already in
+        prod unchanged — writing it would create empty commits and an EMPTY PR that triggers no CI (no
+        diff → pr-checks has nothing to run, and the merge is a no-op that never fires deploy.yml). We
+        detect that up front and return `{"no_change": True}` WITHOUT touching the branch, so the app
+        can tell the user "nada a promover" instead of opening a silent empty PR."""
         pr = self._find_open_pr(branch)
+        if pr is None and self._matches_base(path, content, extra_files, remove_files):
+            return {"no_change": True}
         if pr is None:
             self._reset_branch_to_base(branch)
         self._put_file(branch, path, content, f"promote: update {path}")
@@ -214,6 +223,26 @@ class GitHubApp:
         for p in (remove_files or []):
             self._delete_file_if_exists(branch, p, f"promote: clear {p}")
         return pr if pr is not None else self._create_pr(branch, title, body)
+
+    def _matches_base(self, path: str, content: str, extra_files: dict | None,
+                      remove_files: "list[str] | None") -> bool:
+        """True iff promoting would produce NO diff vs `base`: the artifact + every `extra_files`
+        sidecar already match `base` byte-for-byte, and every `remove_files` path is already absent
+        from `base` (a sidecar present on base that this request removes IS a change). Any GitHub read
+        error is treated as "not a match" (fail-OPEN to the normal PR flow — never suppress a
+        promotion on uncertainty)."""
+        try:
+            if self.get_file_content(path, ref=self.base) != content:
+                return False
+            for p, c in (extra_files or {}).items():
+                if self.get_file_content(p, ref=self.base) != c:
+                    return False
+            for p in (remove_files or []):
+                if self.get_file_content(p, ref=self.base) is not None:
+                    return False
+            return True
+        except GitHubError:
+            return False
 
     def get_file_content(self, path: str, *, ref: str | None = None) -> str | None:
         """Read a committed file's raw text content (decoded from the GitHub contents API's base64

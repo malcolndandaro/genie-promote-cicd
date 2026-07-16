@@ -826,10 +826,16 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
               f"Espaço `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo; `pr-checks` "
               f"é o gate automático e o Steward libera o deploy de produção (segregação de funções)."),
     )
+    # No-op promotion: the space is already in prod byte-identical (nothing to promote). No PR was
+    # opened — surface it so the app tells the user instead of showing an empty pipeline. The review
+    # still ran (it's informative), so we return it; there's just no PR to track.
+    if pr.get("no_change"):
+        return {"review": review, "pr": None, "branch": branch, "no_change": True}
     gh.post_review_comment(pr["number"], PROMOTION_COMMENT_MARKER,
                            render_promotion_comment(review, requester_email,
                                                     resource_title=prod_title, table_mapping=table_mapping))
-    return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch}
+    return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch,
+            "no_change": False}
 
 
 def promotion_status(number: int, profile: str | None = None, *, github: GitHubApp | None = None) -> dict:

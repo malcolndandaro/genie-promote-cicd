@@ -108,9 +108,15 @@ export interface PullRequestRef {
 
 export interface PromoteResult {
   review: Review;
-  pr: PullRequestRef;
-  /** The persisted Promotion id (LB3) — present when a durable store is bound (the deployed app). */
+  /** null on a no-op promotion (`no_change`): the space was already in prod byte-identical, so no
+   * PR was opened (an empty PR triggers no CI and its merge never deploys). */
+  pr: PullRequestRef | null;
+  /** The persisted Promotion id (LB3) — present when a durable store is bound (the deployed app).
+   * Absent on a no-op promotion (nothing is persisted without a PR). */
   promotion_id?: string;
+  /** True when the promoted content is byte-identical to what's already in prod — nothing to
+   * promote. The app shows a "nada a promover" notice instead of tracking a nonexistent PR. */
+  no_change?: boolean;
 }
 
 /**
