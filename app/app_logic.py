@@ -708,24 +708,36 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     review = review_core.parse_review(_claude(system, user, profile, client=sp))
     findings = review_core.finalize_findings(review["findings"], deterministic, ctx["n_benchmark"],
                                              min_benchmark=min_bench, eval01_severity=eval01_severity)
-    # S7b: additive-only KA advisory findings — appended AFTER finalize_findings owns the
-    # deterministic rule_ids, so decide_gate below sees them but they can never win a BLOCKER
-    # (every KA finding is SUGGESTION or, on failure, STYLE — never BLOCKER, D5).
-    findings = findings + _ka_advisory_findings(ka_endpoints, ctx, profile, client=sp)
-    gate = review_core.decide_gate(findings)
+    # The eval-RUN (Genie re-runs its own benchmark questions) is computed BEFORE the gate so a
+    # `block` verdict (pass-rate < threshold) can gate the promotion — a failed eval-run is a real
+    # quality BLOCKER, not just a red pipeline node. `advisory` (eval-run unavailable, or no
+    # benchmark questions) stays non-blocking (graceful degradation). Runs against the DEV space via
+    # the same transport as the export (dev-reader SP under OBO once prod-hosted, ADR-0006; or the
+    # given profile locally). Any failure degrades to advisory — never breaks the review.
     try:
-        # W2: a REAL eval-run via the typed Genie REST API (genie_create_eval_run/
-        # genie_get_eval_run) — works from the deployed app (no `databricks` CLI on the Apps
-        # container, unlike the legacy eval_gate.run_eval_gate this replaces). The Space being
-        # reviewed lives in DEV, so this targets the SAME transport export_serialized just used
-        # for the export step above: the dev-reader/writer SP under OBO (scope="dev-sp" — OBO
-        # cannot span workspaces once the app is prod-hosted, ADR-0006), or the given profile
-        # directly for local/offline callers with no user_token.
         eval_client = _client(scope="dev-sp") if user_token else _client(profile)
         eval_res = eval_gate.run_eval_gate_rest(space_id, client=eval_client, threshold=eval_threshold)
     except Exception as e:  # noqa: BLE001 — never break the review; degrade to advisory
         eval_res = eval_gate.decide_eval(None, eval_threshold, available=False,
                                          reason=f"eval-run indisponível neste ambiente ({e})")
+    # A blocking eval-run becomes a deterministic EVAL-RUN BLOCKER finding, so decide_gate below
+    # turns the whole gate to `failure` (the app then shows "promoção bloqueada" and offers no
+    # merge). It's a distinct rule_id from EVAL-01 (which is the ">= N benchmark questions" COUNT
+    # check); this is the RUN's pass-rate. Appended before decide_gate so it counts as a BLOCKER.
+    if eval_res.get("status") == "block":
+        findings.append({
+            "severity": "BLOCKER", "rule_id": "EVAL-RUN",
+            "citation": "Genie Promotion Handbook › Quality › EVAL-RUN",
+            "message": eval_res.get("summary")
+            or "O eval-run do Genie ficou abaixo do limiar de acerto — promoção bloqueada.",
+            "suggestion": "Revise instruções/exemplos do espaço e reexecute os benchmarks até "
+                          "passar do limiar antes de promover.",
+        })
+    # S7b: additive-only KA advisory findings — appended AFTER the deterministic + eval findings own
+    # their rule_ids, so decide_gate sees them but they can never win a BLOCKER (every KA finding is
+    # SUGGESTION or, on failure, STYLE — never BLOCKER, D5).
+    findings = findings + _ka_advisory_findings(ka_endpoints, ctx, profile, client=sp)
+    gate = review_core.decide_gate(findings)
     return {
         "findings": findings, "gate": gate, "eval": eval_res,
         "allowlist_violations": violations, "consumer_group": consumer_group,

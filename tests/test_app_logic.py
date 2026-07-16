@@ -1019,6 +1019,38 @@ def test_review_space_eval_degrades_when_dev_sp_not_configured(monkeypatch):
     assert result["gate"] is not None  # the rest of the review still completed normally
 
 
+def test_review_space_blocking_eval_run_fails_the_gate(monkeypatch):
+    """A `block` eval-run (pass-rate < threshold) must inject an EVAL-RUN BLOCKER finding and flip
+    the whole gate to `failure` — so the app shows 'promoção bloqueada' and offers no merge (the
+    fix for a failed eval-run that previously left the gate green + PR merge-ready)."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
+                        lambda *a, **k: {"status": "block", "pass_rate": 0.4, "n": 5,
+                                         "summary": "🔴 acertou 2 (40%) — abaixo do limiar."})
+
+    result = app_logic.review_space("sp1", profile="p")
+    assert result["eval"]["status"] == "block"
+    assert result["gate"]["conclusion"] == "failure"
+    ev = [f for f in result["findings"] if f["rule_id"] == "EVAL-RUN"]
+    assert len(ev) == 1 and ev[0]["severity"] == "BLOCKER"
+    assert "40%" in ev[0]["message"]  # the eval-run summary rides along
+
+
+def test_review_space_advisory_eval_run_does_not_fail_the_gate(monkeypatch):
+    """Graceful degradation preserved: an `advisory` eval-run (unavailable / no benchmarks) must NOT
+    add a BLOCKER nor fail the gate — only a real `block` verdict gates."""
+    _stub_review_space_llm_leg_only(monkeypatch)
+    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
+    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
+                        lambda *a, **k: {"status": "advisory", "summary": "🟡 indisponível — não bloqueia."})
+
+    result = app_logic.review_space("sp1", profile="p")
+    assert result["eval"]["status"] == "advisory"
+    assert result["gate"]["conclusion"] != "failure"
+    assert [f for f in result["findings"] if f["rule_id"] == "EVAL-RUN"] == []
+
+
 # --- eval-run threshold threading (W3 follow-up): admin-configurable via EVAL-01's params -------
 
 def test_review_space_threads_admin_configured_eval_threshold_to_the_gate(monkeypatch):
