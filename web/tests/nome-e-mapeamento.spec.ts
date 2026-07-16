@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { confirmPilotPromotion } from './promotion-helpers';
 
 // G7: the promotion-time counterpart to G6's rehydrate de-para — "PromotionConfirm" gains an
@@ -15,6 +15,10 @@ const cleanReview = {
   timeline: [{ key: 'review', label: 'Revisão', status: 'pass' }],
 };
 const PR = { number: 9, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/9' };
+
+async function openAdvancedMapping(page: Page): Promise<void> {
+  await page.getByText('Opções avançadas de de-para', { exact: true }).click();
+}
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (route) =>
@@ -75,6 +79,7 @@ test('confirming without editing the name sends the dev title unchanged', async 
 test('shows the de-para pre-filled with the default target and sends only the OVERRIDDEN row', async ({ page }) => {
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await openAdvancedMapping(page);
 
   await expect(page.getByText('De-para de tabelas')).toBeVisible();
   await expect(page.getByText('dev_recebiveis.diamond.fato_recebiveis')).toBeVisible();
@@ -102,6 +107,7 @@ test('shows the de-para pre-filled with the default target and sends only the OV
 test('"Restaurar padrão" resets an edited row back to the default target', async ({ page }) => {
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await openAdvancedMapping(page);
 
   const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
   await targetInput.fill('prod_recebiveis.diamond.custom');
@@ -150,6 +156,7 @@ test('re-requesting the SAME space after a completed promotion resets the name/m
 
   const nameInput = page.getByLabel('Nome do space em produção');
   await nameInput.fill('Recebíveis PROD');
+  await openAdvancedMapping(page);
   const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
   await targetInput.fill('prod_recebiveis.diamond.fato_recebiveis_v2');
   await confirmPilotPromotion(page);
@@ -177,6 +184,7 @@ test('cancelling the confirmation panel discards any declared name/mapping', asy
 
   const nameInput = page.getByLabel('Nome do space em produção');
   await nameInput.fill('Nome temporário');
+  await openAdvancedMapping(page);
   const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
   await targetInput.fill('prod_recebiveis.diamond.custom');
 

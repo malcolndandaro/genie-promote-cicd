@@ -38,7 +38,7 @@ function home(page: Page, promotions: unknown[] = [summary]) {
 
 test('renders the explainer, the 3-step flow, my spaces, and recent promotions', async ({ page }) => {
   home(page);
-  await page.goto('/');
+  await page.goto('/#/inicio');
 
   await expect(page).toHaveURL(/#\/inicio$/);
   // Explainer + simplified governed flow.
@@ -58,7 +58,7 @@ test('empty states when the user has no spaces and no promotions', async ({ page
     r.fulfill({ json: { email: 'ana@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }));
   page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
   page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
-  await page.goto('/');
+  await page.goto('/#/inicio');
 
   await expect(page.getByText('Nenhum Genie Space encontrado')).toBeVisible();
   await expect(page.getByText('Nenhuma promoção ainda')).toBeVisible();
@@ -67,7 +67,7 @@ test('empty states when the user has no spaces and no promotions', async ({ page
 test('a space card pre-selects the confirmation step on "Meus espaços" (G3)', async ({ page }) => {
   home(page, []); // no recent promotions, so recover() is a no-op
   await page.route('**/api/promote', (r) => r.fulfill({ json: { review, pr: { number: 99, url: PR.url }, promotion_id: 'new-1' } }));
-  await page.goto('/');
+  await page.goto('/#/inicio');
 
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
   // Lands on "Meus espaços" with the confirmation panel bound to the chosen space — NOT yet promoted.
@@ -115,7 +115,7 @@ test('a recent promotion deep-links to its detail without re-running the reviewe
   let promoteCalled = false;
   await page.route('**/api/promote', (r) => { promoteCalled = true; r.fulfill({ status: 500, json: {} }); });
   home(page);
-  await page.goto('/');
+  await page.goto('/#/inicio');
 
   await page.getByRole('button', { name: 'Abrir promoção: Recebíveis' }).click();
   // The shareable detail deep-link + the recovered review (from the stored snapshot).

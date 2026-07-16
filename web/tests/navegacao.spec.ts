@@ -22,9 +22,9 @@ test('lands on the default route with the sidebar nav and an active item', async
   for (const label of ['Início', 'Meus espaços', 'Acesso', 'Exportar Prod → Dev']) {
     await expect(page.getByRole('link', { name: label })).toBeVisible();
   }
-  // Default route is the home ("Início"), reflected in the URL and the active link.
-  await expect(page).toHaveURL(/#\/inicio$/);
-  await expect(page.getByRole('link', { name: 'Início' })).toHaveAttribute('aria-current', 'page');
+  // Meus Espaços is the business-user home.
+  await expect(page).toHaveURL(/#\/espacos$/);
+  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
 });
 
 test('sidebar navigation switches the screen AND the URL hash', async ({ page }) => {
@@ -55,8 +55,8 @@ test('a bare #/promocoes (no id) redirects to Meus espaços — there is no stan
 
 test('an unknown hash falls back to the default screen', async ({ page }) => {
   await page.goto('/#/bogus');
-  await expect(page).toHaveURL(/#\/inicio$/);
-  await expect(page.getByRole('link', { name: 'Início' })).toHaveAttribute('aria-current', 'page');
+  await expect(page).toHaveURL(/#\/espacos$/);
+  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
 });
 
 test('on a narrow viewport the sidebar collapses into a toggle/drawer', async ({ page }) => {

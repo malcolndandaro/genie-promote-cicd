@@ -19,7 +19,7 @@ test('a skip-to-content link focuses the main region (keyboard a11y)', async ({ 
 });
 
 test('navigating moves focus to the main content region', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/#/inicio');
   await page.getByRole('link', { name: 'Meus espaços' }).click();
   await expect(page).toHaveURL(/#\/espacos$/);
   await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('conteudo');
@@ -35,8 +35,8 @@ test('renders under prefers-reduced-motion on a phone viewport', async ({ page }
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  // The home still renders its key sections, and the mobile chrome (hamburger) is present.
-  await expect(page.getByText('Promova seus Genie Spaces para produção, com governança')).toBeVisible();
+  // The author home still renders its key sections, and the mobile chrome is present.
+  await expect(page.getByText('Do rascunho à produção,', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Abrir menu' })).toBeVisible();
 });

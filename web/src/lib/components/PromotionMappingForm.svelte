@@ -84,10 +84,11 @@
 
 <div class="mapping-form">
   <label class="mapping-form__field">
-    <span class="mapping-form__label">Nome do space em produção</span>
+    <span class="mapping-form__label">Título de produção</span>
     <input
       type="text"
       class="mapping-form__input"
+      aria-label="Nome do space em produção"
       bind:value={title}
       placeholder="Nome do Space em produção"
     />
@@ -101,40 +102,47 @@
     </p>
   {:else if rows.length > 0}
     <div class="mapping-form__mapping">
-      <p class="text-xs muted mapping-form__hint">
-        De-para de tabelas — ajuste se uma tabela deve ter outro nome em produção.
-      </p>
-      <div class="mapping-form__table-wrap">
-        <table class="mapping-form__table">
-          <thead>
-            <tr>
-              <th>Tabela em dev</th>
-              <th>Tabela em produção</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each rows as row (row.source)}
-              <tr>
-                <td><code>{row.source}</code></td>
-                <td>
-                  <input
-                    type="text"
-                    class="mapping-form__input"
-                    aria-label="Tabela em produção para {row.source}"
-                    bind:value={row.target}
-                  />
-                </td>
-                <td>
-                  {#if row.target.trim() !== row.defaultTarget}
-                    <Button variant="ghost" onclick={() => resetRow(row)}>Restaurar padrão</Button>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+      <div class="mapping-form__summary" aria-label="Mapeamento automático de tabelas">
+        <strong>{rows.length} {rows.length === 1 ? 'referência' : 'referências'}</strong>
+        <span>dev_{rows[0]?.source.split('_')[1]?.split('.')[0] ?? 'catálogo'} → prod_{rows[0]?.source.split('_')[1]?.split('.')[0] ?? 'catálogo'}</span>
       </div>
+      <details class="mapping-form__advanced">
+        <summary>Opções avançadas de de-para</summary>
+        <p class="text-xs muted mapping-form__hint">
+          De-para de tabelas — altere somente quando o destino em produção fugir do padrão.
+        </p>
+        <div class="mapping-form__table-wrap">
+          <table class="mapping-form__table">
+            <thead>
+              <tr>
+                <th>Tabela em dev</th>
+                <th>Tabela em produção</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each rows as row (row.source)}
+                <tr>
+                  <td><code>{row.source}</code></td>
+                  <td>
+                    <input
+                      type="text"
+                      class="mapping-form__input"
+                      aria-label="Tabela em produção para {row.source}"
+                      bind:value={row.target}
+                    />
+                  </td>
+                  <td>
+                    {#if row.target.trim() !== row.defaultTarget}
+                      <Button variant="ghost" onclick={() => resetRow(row)}>Restaurar padrão</Button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </details>
     </div>
   {/if}
 </div>
@@ -173,6 +181,26 @@
     flex-direction: column;
     gap: var(--space-2);
   }
+  .mapping-form__summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 0.7rem 0.8rem;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent-soft) 60%, var(--surface));
+    color: var(--muted-foreground);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+  }
+  .mapping-form__summary strong { color: var(--accent-hover); }
+  .mapping-form__advanced summary {
+    width: fit-content;
+    cursor: pointer;
+    color: var(--accent-hover);
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+  .mapping-form__advanced[open] summary { margin-bottom: var(--space-3); }
   .mapping-form__hint {
     margin: 0;
   }

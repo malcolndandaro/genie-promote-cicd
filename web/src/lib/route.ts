@@ -40,7 +40,7 @@ export const ROUTE_IDS: readonly RouteId[] = [
 ];
 
 /** The default landing route — the business-user home/dashboard (UI4). */
-export const DEFAULT_ROUTE: Route = { id: 'inicio' };
+export const DEFAULT_ROUTE: Route = { id: 'espacos' };
 
 function isRouteId(s: string): s is RouteId {
   return (ROUTE_IDS as readonly string[]).includes(s);

@@ -30,7 +30,7 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
 // G3: choosing a card SELECTS the space and opens a confirmation panel bound to it — it does not
 // fire the request. The grid locks (including the chosen card itself) until the panel is
 // confirmed or cancelled, since the actual "Solicitar promoção" action now lives in the panel.
-test('choosing a space locks the grid and opens a confirmation panel bound to it', async ({ page }) => {
+test('choosing and switching Spaces keeps one panel and resets it to the new Space', async ({ page }) => {
   await page.route('**/api/spaces', (route) =>
     route.fulfill({
       json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Cedentes' }] },
@@ -44,8 +44,13 @@ test('choosing a space locks the grid and opens a confirmation panel bound to it
   const panel = page.locator('.confirm');
   await expect(panel.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeEnabled();
+
+  // Directly switching selection remounts the working panel (no stale declaration can leak).
+  await page.getByRole('button', { name: 'Solicitar promoção: Cedentes' }).click();
+  await expect(panel.getByRole('heading', { name: 'Cedentes', level: 3 })).toBeVisible();
+  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Cedentes');
 
   // Cancelling releases the lock and drops the panel — no request was ever sent.
   await page.getByRole('button', { name: '← Escolher outro espaço' }).click();
@@ -155,4 +160,77 @@ test('shows an error state with retry when /api/spaces fails', async ({ page }) 
 
   await expect(page.getByText(/Não foi possível listar os espaços/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();
+});
+
+test('search and status filter narrow the Space list without losing context', async ({ page }) => {
+  await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [
+    { space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Arranjos' },
+  ] } }));
+  await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [{
+    id: 'p1', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
+    requester_email: 'ana@databricks.com', current_phase: 'open', terminal: false,
+    created_at: '2026-07-16T10:00:00Z', updated_at: '2026-07-16T10:00:00Z',
+  }] } }));
+  await page.goto('/');
+
+  await page.getByRole('textbox', { name: 'Buscar Space' }).fill('arr');
+  await expect(page.getByRole('heading', { name: 'Arranjos', level: 3 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toHaveCount(0);
+
+  await page.getByRole('textbox', { name: 'Buscar Space' }).fill('');
+  await page.getByRole('combobox', { name: 'Filtrar por status' }).selectOption('open');
+  await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Arranjos', level: 3 })).toHaveCount(0);
+});
+
+test('direct Space switch clears an unsaved Público do Space', async ({ page }) => {
+  await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [
+    { space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Arranjos' },
+  ] } }));
+  await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [] } }));
+  await page.route('**/api/principals**', (route) => route.fulfill({ json: { principals: [
+    { type: 'group', id: 'g1', display: 'GestOps', email: null },
+  ] } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('combobox', { name: 'Usuário ou grupo' }).click();
+  await page.getByRole('option', { name: /GestOps/ }).click();
+  await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeEnabled();
+
+  await page.getByRole('button', { name: 'Solicitar promoção: Arranjos' }).click();
+  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Arranjos');
+  await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeDisabled();
+});
+
+test('Prod to Dev export is contextual and only enabled after a deployed version exists', async ({ page }) => {
+  const deployed = {
+    id: 'p-live', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
+    requester_email: 'ana@databricks.com', pr_number: 12, pr_url: 'https://gh/pr/12',
+    current_phase: 'deployed', terminal: true,
+    created_at: '2026-07-15T10:00:00Z', updated_at: '2026-07-15T11:00:00Z',
+  };
+  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [deployed] } }));
+  await page.route('**/api/promotions/p-live', (route) => route.fulfill({ json: {
+    promotion: deployed, review: null, live_status: { phase: 'deployed' }, audit: [],
+  } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+
+  const exportButton = page.getByRole('button', { name: 'Exportar versão Prod para Dev' });
+  await expect(exportButton).toBeEnabled();
+  await exportButton.click();
+  await expect(page).toHaveURL(/#\/promocoes\/p-live$/);
+});
+
+test('author journey has no document-level horizontal overflow on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [] } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await expect(page.getByText('Revisar e solicitar promoção', { exact: false })).toBeVisible();
+  const sizes = await page.evaluate(() => ({ width: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth }));
+  expect(sizes.scrollWidth).toBeLessThanOrEqual(sizes.width);
 });

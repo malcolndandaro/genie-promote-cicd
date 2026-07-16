@@ -120,8 +120,12 @@
     { key: 'deployed', label: 'Implantada' },
   ];
   let statusFilter = $state<StatusBucket | 'all'>('all');
+  let searchQuery = $state('');
 
   function matchesFilter(group: EspacoGroup): boolean {
+    if (!group.resource.title.toLocaleLowerCase('pt-BR').includes(searchQuery.trim().toLocaleLowerCase('pt-BR'))) {
+      return false;
+    }
     if (statusFilter === 'all') return true;
     const latest = group.promotions[0];
     return !!latest && statusBucket(latest.current_phase) === statusFilter;
@@ -135,64 +139,65 @@
   }
 </script>
 
-<div class="stack">
-  <section>
-    <header class="screen-head">
-      <h2 class="screen-head__title">Meus espaços</h2>
-      <p class="muted text-sm">Escolha um espaço, veja seu histórico e solicite a promoção governada para produção.</p>
-    </header>
+<div class="author-home">
+  <header class="hero">
+    <div>
+      <p class="hero__crumb">Genie / Meus Espaços</p>
+      <h1>Do rascunho à produção,<br />sem perder o fio.</h1>
+      <p class="hero__copy">
+        Escolha um Space, confirme seu público e acompanhe cada promoção no mesmo lugar.
+        A edição continua no Dev; a publicação passa pelo Steward.
+      </p>
+    </div>
+  </header>
 
-    {#await Promise.all([resourcesP, promotionsP])}
-      <div class="space-list">
-        <Skeleton height="6rem" />
-        <Skeleton height="6rem" />
-        <Skeleton height="6rem" />
+  {#await Promise.all([resourcesP, promotionsP])}
+    <div class="workspace workspace--loading">
+      <div class="space-list"><Skeleton height="7rem" /><Skeleton height="7rem" /></div>
+      <Skeleton height="34rem" />
+    </div>
+  {:then [resources, promotions]}
+    {@const allGroups = sortGroups(groupBySpace(resources, promotions))}
+    {@const shownGroups = allGroups.filter(matchesFilter)}
+    {@const selectedGroup = allGroups.find((group) => group.resource.id === promotion.resource?.id)}
+
+    <div class="toolbar">
+      <label class="toolbar__search">
+        <span aria-hidden="true">⌕</span>
+        <span class="visually-hidden">Buscar Space</span>
+        <input bind:value={searchQuery} placeholder="Buscar por nome do Space" />
+      </label>
+      <label class="toolbar__status">
+        <span class="visually-hidden">Filtrar por status</span>
+        <select bind:value={statusFilter} aria-label="Filtrar por status">
+          {#each STATUS_FILTERS as filter (filter.key)}
+            <option value={filter.key}>{filter.label}</option>
+          {/each}
+        </select>
+      </label>
+      <span class="toolbar__count"><strong>{resources.length}</strong> Spaces disponíveis em Dev</span>
+      {#if who?.is_admin}
+        <div class="toolbar__scope" role="group" aria-label="Escopo do histórico">
+          <Button variant={scope === 'mine' ? 'primary' : 'outline'} onclick={() => setScope('mine')}>Minhas</Button>
+          <Button variant={scope === 'all' ? 'primary' : 'outline'} onclick={() => setScope('all')}>Todas (Steward/Admin)</Button>
+        </div>
+      {/if}
+    </div>
+
+    {#if resources.length === 0 && allGroups.length === 0 && !who?.is_admin}
+      <div class="empty">
+        <p class="empty__title">Nenhum Genie Space encontrado</p>
+        <p class="muted text-sm">Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção.</p>
       </div>
-    {:then [resources, promotions]}
-      {@const allGroups = sortGroups(groupBySpace(resources, promotions))}
-      {@const shownGroups = allGroups.filter(matchesFilter)}
-      {#if resources.length === 0 && allGroups.length === 0 && !who?.is_admin}
-        <!-- Truly nothing to show and no reason to offer the toolbar (no personal spaces, no
-             personal history, not an admin who could switch scope to see others'). -->
-        <div class="empty">
-          <p class="empty__title">Nenhum Genie Space encontrado</p>
-          <p class="muted text-sm">
-            Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção.
-          </p>
-        </div>
-      {:else}
-        <div class="toolbar">
-          <div class="toolbar__filters" role="group" aria-label="Filtrar por status">
-            {#each STATUS_FILTERS as f (f.key)}
-              <Button
-                variant={statusFilter === f.key ? 'primary' : 'outline'}
-                onclick={() => (statusFilter = f.key)}
-              >
-                {f.label}
-              </Button>
-            {/each}
-          </div>
-          {#if who?.is_admin}
-            <div class="toolbar__scope" role="group" aria-label="Escopo do histórico">
-              <Button variant={scope === 'mine' ? 'primary' : 'outline'} onclick={() => setScope('mine')}>Minhas</Button>
-              <Button variant={scope === 'all' ? 'primary' : 'outline'} onclick={() => setScope('all')}>Todas (Steward/Admin)</Button>
+    {:else}
+      <div class="workspace">
+        <section class="space-list" aria-label="Spaces disponíveis">
+          {#if shownGroups.length === 0}
+            <div class="empty">
+              <p class="empty__title">Nenhum Genie Space encontrado</p>
+              <p class="muted text-sm">Nenhum espaço corresponde à busca e ao status selecionados.</p>
             </div>
-          {/if}
-        </div>
-
-        {#if shownGroups.length === 0}
-          <div class="empty">
-            <p class="empty__title">Nenhum Genie Space encontrado</p>
-            <p class="muted text-sm">
-              {#if allGroups.length > 0}
-                Nenhum espaço corresponde ao filtro selecionado.
-              {:else}
-                Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção.
-              {/if}
-            </p>
-          </div>
-        {:else}
-          <div class="space-list">
+          {:else}
             {#each shownGroups as group (group.resource.id)}
               <EspacoRow
                 resource={group.resource}
@@ -202,89 +207,184 @@
                 {onOpenPromotion}
                 onPromote={chooseSpace}
                 busy={promotion.phase === 'reviewing' && promotion.resource?.id === group.resource.id}
-                disabled={promotion.phase === 'reviewing' ? promotion.resource?.id !== group.resource.id : confirming}
-                selected={confirming && promotion.resource?.id === group.resource.id}
+                disabled={promotion.phase === 'reviewing' && promotion.resource?.id !== group.resource.id}
+                selected={promotion.resource?.id === group.resource.id}
               />
             {/each}
-          </div>
-        {/if}
-      {/if}
-    {:catch err}
-      <div class="error-state" role="alert">
-        <span class="error">
-          {#if isAuthError(err)}
-            Sessão expirada — recarregue a página para reautenticar.
-          {:else}
-            Não foi possível listar os espaços: {err instanceof Error ? err.message : String(err)}
           {/if}
-        </span>
-        {#if isAuthError(err)}
-          <Button variant="outline" onclick={() => location.reload()}>Recarregar</Button>
-        {:else}
-          <Button variant="outline" onclick={reload}>Tentar novamente</Button>
-        {/if}
+        </section>
+
+        <section class="working-panel" aria-live="polite">
+          {#if confirming}
+            {#key promotion.selectionSeq}
+              <PromotionConfirm
+                {promotion}
+                promotions={selectedGroup?.promotions ?? []}
+                {onOpenPromotion}
+                onCancel={() => promotion.select(null)}
+              />
+            {/key}
+          {:else if promotion.initiatedHere}
+            <div class="working-panel__handoff">
+              <p class="hero__crumb">Revisão iniciada</p>
+              <h2>Acompanhe a decisão logo abaixo</h2>
+              <p class="muted text-sm">O Space continua disponível em produção durante a revisão.</p>
+            </div>
+          {:else}
+            <div class="working-panel__empty">
+              <span aria-hidden="true">↖</span>
+              <h2>Escolha um Space</h2>
+              <p>O título, o público, as tabelas e o histórico aparecerão aqui sem tirar você do contexto.</p>
+            </div>
+          {/if}
+        </section>
       </div>
-    {/await}
-  </section>
+    {/if}
+  {:catch err}
+    <div class="error-state" role="alert">
+      <span class="error">
+        {#if isAuthError(err)}Sessão expirada — recarregue a página para reautenticar.
+        {:else}Não foi possível listar os espaços: {err instanceof Error ? err.message : String(err)}{/if}
+      </span>
+      {#if isAuthError(err)}<Button variant="outline" onclick={() => location.reload()}>Recarregar</Button>
+      {:else}<Button variant="outline" onclick={reload}>Tentar novamente</Button>{/if}
+    </div>
+  {/await}
 
-  <!-- G3: the confirmation step — bound to the CHOSEN space (title visible), optional access
-       declaration, then "Confirmar promoção". Shown only until the promotion is actually requested.
-       Keyed by `selectionSeq` (NOT `resource?.id` — found live, PR #25: re-selecting the SAME space
-       must ALSO remount the panel, or its declaration forms keep their prior rows/title and the
-       stale audience/table-mapping/title silently rides the next request) so EVERY select(), same-
-       space included, remounts PromotionMappingForm/AudienceSpecForm fresh. -->
-  {#if confirming}
-    {#key promotion.selectionSeq}
-      <PromotionConfirm {promotion} onCancel={() => promotion.select(null)} />
-    {/key}
-  {/if}
-
-  <!-- The active promotion's review/pipeline/approval (in-place below the grid) — shown ONLY when the
-       user actively requested a promotion on this screen this session (`initiatedHere`), never
-       auto-pinned to the last promotion recovered on page load. To revisit a past promotion's
-       pipeline, expand the space (its history) and open the attempt (→ #/promocoes/:id). -->
   {#if promotion.initiatedHere}
     <PromotionReview {promotion} userEmail={who?.email ?? null} {devHost} {prodHost} />
   {/if}
 </div>
 
 <style>
-  .screen-head {
-    margin-bottom: var(--space-4);
+  .author-home { display: flex; flex-direction: column; gap: var(--space-5); }
+  .hero {
+    position: relative;
+    padding: var(--space-3) 0 var(--space-4);
+    overflow: clip;
   }
-  .screen-head__title {
-    font-size: 1.2rem;
+  .hero::after {
+    content: '';
+    position: absolute;
+    width: 16rem;
+    height: 16rem;
+    right: -5rem;
+    top: -7rem;
+    border-radius: 50%;
+    background: radial-gradient(circle, color-mix(in srgb, var(--destructive) 9%, transparent), transparent 68%);
+    pointer-events: none;
+  }
+  .hero__crumb {
+    margin: 0 0 var(--space-3);
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+  }
+  .hero h1 {
+    max-width: 48rem;
+    font-family: var(--font-display, Georgia, serif);
+    font-size: clamp(2.2rem, 5vw, 4rem);
+    line-height: 0.95;
+    letter-spacing: -0.055em;
+  }
+  .hero__copy {
+    max-width: 48rem;
+    margin: var(--space-4) 0 0;
+    color: var(--muted-foreground);
+    font-size: 0.95rem;
   }
   .toolbar {
+    display: grid;
+    grid-template-columns: minmax(14rem, 1fr) auto auto;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .toolbar__search {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: var(--space-3);
-    flex-wrap: wrap;
-    margin-bottom: var(--space-4);
+    min-width: 0;
+    padding: 0.7rem 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
   }
-  .toolbar__filters,
+  .toolbar__search input {
+    min-width: 0;
+    width: 100%;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    font: inherit;
+  }
+  .toolbar__status select {
+    min-height: 2.85rem;
+    padding: 0 var(--space-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--foreground);
+    font: inherit;
+  }
+  .toolbar__count {
+    padding-left: var(--space-3);
+    border-left: 3px solid var(--destructive);
+    color: var(--muted-foreground);
+    font-size: 0.72rem;
+  }
+  .toolbar__count strong {
+    display: block;
+    color: var(--foreground);
+    font-family: var(--font-display, Georgia, serif);
+    font-size: 1.5rem;
+  }
   .toolbar__scope {
+    grid-column: 1 / -1;
     display: flex;
     gap: var(--space-2);
-    flex-wrap: wrap;
+  }
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(16rem, 0.75fr) minmax(28rem, 1.6fr);
+    gap: var(--space-4);
+    align-items: start;
   }
   .space-list {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    gap: var(--space-3);
+    min-width: 0;
   }
-  .empty {
+  .working-panel {
+    min-width: 0;
+    border-radius: var(--radius);
+  }
+  .working-panel__empty,
+  .working-panel__handoff {
+    min-height: 24rem;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-3);
-    padding: var(--space-4) 0;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: var(--space-6);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--surface) 75%, transparent);
   }
-  .empty__title {
-    margin: 0;
-    font-weight: 600;
+  .working-panel__empty > span { color: var(--accent-hover); font-size: 1.5rem; }
+  .working-panel__empty h2,
+  .working-panel__handoff h2 {
+    margin-top: var(--space-2);
+    font-family: var(--font-display, Georgia, serif);
   }
+  .working-panel__empty p { max-width: 28rem; color: var(--muted-foreground); }
+  .workspace--loading { opacity: 0.75; }
+  .empty {
+    padding: var(--space-5);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+  }
+  .empty__title { margin: 0; font-weight: 700; }
   .error-state {
     display: flex;
     align-items: center;
@@ -294,5 +394,17 @@
   .error {
     color: var(--destructive);
     font-size: 0.875rem;
+  }
+  @media (max-width: 1040px) {
+    .workspace { grid-template-columns: 1fr; }
+    .space-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .space-list :global(.espaco-row__history) { grid-column: 1 / -1; }
+  }
+  @media (max-width: 720px) {
+    .hero h1 { font-size: clamp(2rem, 12vw, 3rem); }
+    .toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+    .toolbar__count { display: none; }
+    .space-list { grid-template-columns: 1fr; }
+    .workspace { min-width: 0; }
   }
 </style>
