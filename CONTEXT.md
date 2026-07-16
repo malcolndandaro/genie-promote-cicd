@@ -100,31 +100,25 @@ so a family of terms exists for how the app reaches across that boundary safely.
   makes the dev-reader/writer SP's broad reach safe — see
   `docs/security/assert-can-access-threat-model.md`.
 
-## Access & governance (F2–F5, G1–G9)
+## Access & governance
 
-- **AccessSpec** — the Requester's (or an approved Access Request's) **declared** access for a
-  Promotion: Genie Space permissions (`CAN_RUN`/`CAN_VIEW`) and/or UC `SELECT` grants, for individual
-  users or existing groups. Declaring is always **app-direct** (a committed `.access.json` sidecar);
-  **enforcing** it (the actual grant/permission mutation) is always **governed** — CI runs
-  `scripts/apply_access.py` as the prod SP, behind `pr-checks` + the Steward's deploy gate. The app
-  itself never calls `w.grants.update`/`w.permissions.update`.
-- **Direct-to-principal grants** — how `apply_access.py` enforces an AccessSpec: each declared
-  principal is granted directly, never via an intermediate per-Space group. Superseded an earlier
-  per-Space-group design that failed live (`w.groups.create` in a workspace context makes a
-  **workspace-local** group; UC grants only accept **account-level** principals). A declared group
-  that turns out to be workspace-local still gets its Genie Space permission (that ACL accepts
-  workspace-local groups) but its UC grant is skipped — loudly, never silently.
-- **GRANT-01 (two classes)** — the deterministic check that every principal who can open a Space also
-  has `SELECT` on its data. A miss on the **baseline** consumer group is a BLOCKER (unchanged — the
-  pipeline never grants the baseline for you); a miss on a **declared** AccessSpec principal is a
-  non-blocking SUGGESTION (`apply_access` is going to grant it at deploy anyway — blocking the PR on
-  it would be contradictory). A declared principal `apply_access` could never grant (a workspace-local
-  group) gets its own advisory instead of a promise the pipeline can't keep.
-- **Access Request** — F3's self-service grant flow: a user requests Space permission and/or UC
-  `SELECT` on a Space they don't yet have; a Steward/Admin approves or denies from the **Acesso**
-  screen's approval queue. An approval lands through the SAME governed AccessSpec path F2 uses
-  (declare → PR → `apply_access.py`) — merged additively into any existing sidecar, never overwriting
-  a principal a prior promotion already declared.
+- **AudienceSpec / Público do Space** — the authoritative desired set of users and groups who should
+  be able to run the promoted Space. It is committed as `<slug>.audience.json`; entries carry no
+  permission level because the pipeline always derives Genie `CAN_RUN`. It never requests or applies
+  UC grants. The pipeline reconciles only audience ACLs previously managed by this declaration and
+  preserves owners, technical identities and unrelated ACLs.
+- **AUDIENCE-01** — the deterministic, validation-only check of whether every AudienceSpec principal
+  has effective `SELECT` on every rendered production table. Missing `SELECT` is informational and
+  points to CERC's Terraform access queue; it never blocks promotion. Invalid tables/principals
+  block preflight, while inability to query the grants API is an operational failure, not an author
+  finding. There is no static baseline consumer group.
+- **Technical Space access** — app, dev-transport and CI identities receive the minimum technical
+  permissions their jobs require (`CAN_MANAGE` where a live ACL/export/update needs it). These grants
+  are operational controls, never members of AudienceSpec. The prod CI SP temporarily retains UC
+  `MANAGE` during the pilot solely to inspect effective grants; no app or pipeline path mutates UC.
+- **AccessSpec / Access Request (legacy)** — the demo-era model that combined Genie ACLs, UC grants
+  and an approval queue. It is not part of the pilot domain and exists only through the explicit
+  two-phase compatibility window while `.access.json` consumers and demo tables are removed.
 - **Rehydrate** — pulling an already-promoted **prod** Genie Space back into **dev**, with no git PR
   (A3/G6; `app/rehydrate.py`). Works for ANY prod Space the caller can access, not only ones this app
   promoted (the prod store starts empty per ADR-0006). Gated at BOTH blast sites with
@@ -147,6 +141,6 @@ so a family of terms exists for how the app reaches across that boundary safely.
   screen): either override severity/content/citation on one of the 9 hardcoded handbook rules, or add
   a fully custom rule alongside them. Persisted in Lakebase (`rule_overrides` + an append-only
   `rule_audit_events`); merged purely (`rules_config.effective_rules`) into the LLM's prompt context.
-  GRANT-01 is deliberately NOT configurable this way (CI, which owns the authoritative check, has no
+  AUDIENCE-01 is deliberately NOT configurable this way (CI owns the authoritative check and has no
   Lakebase access); EVAL-01's benchmark-count floor is the one deterministic exception with a tunable
   parameter (`min_benchmarks`).
