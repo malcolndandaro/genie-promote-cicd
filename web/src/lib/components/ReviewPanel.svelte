@@ -3,6 +3,7 @@
   import Badge from './Badge.svelte';
   import Pipeline from './Pipeline.svelte';
   import EvalResultsPanel from './EvalResultsPanel.svelte';
+  import Markdown from './Markdown.svelte';
   import { severityTone, buildPromotionSteps } from '../pipeline';
   import type { Review } from '../types';
 
@@ -77,7 +78,13 @@
               <Badge tone={severityTone(f.severity)}>{f.severity}</Badge>
               <span class="finding__rule">{f.rule_id}</span>
             </div>
-            <p class="finding__msg">{f.message}</p>
+            <!-- KA advisory findings return markdown (bold, inline code, lists); render it safely.
+                 Plain reviewer findings are single-line text, shown as-is. -->
+            {#if f.rule_id.startsWith('KA:')}
+              <div class="finding__msg"><Markdown text={f.message} /></div>
+            {:else}
+              <p class="finding__msg">{f.message}</p>
+            {/if}
             {#if f.suggestion}<p class="finding__suggestion">↳ {f.suggestion}</p>{/if}
             {#if f.citation}<p class="finding__citation">{f.citation}</p>{/if}
           </article>

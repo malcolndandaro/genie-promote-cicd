@@ -59,6 +59,34 @@ test('promoting renders the review (finding + pipeline + gate) and the PR link',
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
 });
 
+test('a KA advisory finding renders its markdown (bold/code/list), not raw ** and backticks', async ({ page }) => {
+  const kaReview = {
+    findings: [{
+      rule_id: 'KA:Handbook CI/CD (geral)',
+      severity: 'SUGGESTION',
+      citation: 'Knowledge Assistant › Handbook CI/CD (geral)',
+      message: 'Sua promoção está **bem alinhada**. Catálogo `prod_recebiveis` correto.\n\n**Pontos:**\n1. **Benchmark**: mínimo 2\n2. **Grants**: SELECT em todas',
+    }],
+    gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
+    eval: { status: 'advisory', summary: 'x' },
+    allowlist_violations: [], consumer_group: 'account users', timeline: [],
+  };
+  await page.route('**/api/promote', (route) => route.fulfill({ json: { review: kaReview, pr: PR } }));
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+
+  const finding = page.locator('.finding').filter({ hasText: 'KA:Handbook CI/CD' });
+  // Bold renders as <strong>, inline code as <code>, list items as <li> — NOT literal markdown.
+  await expect(finding.locator('strong', { hasText: 'bem alinhada' })).toBeVisible();
+  await expect(finding.locator('code', { hasText: 'prod_recebiveis' })).toBeVisible();
+  await expect(finding.locator('li', { hasText: 'Benchmark' })).toBeVisible();
+  await expect(finding.locator('li')).toHaveCount(2);
+  // The raw markdown markers must NOT appear as visible text.
+  await expect(finding.getByText('**bem alinhada**')).toHaveCount(0);
+  await expect(finding.getByText('`prod_recebiveis`')).toHaveCount(0);
+});
+
 test('reflects the live PR status (polled) as a badge in the PR banner', async ({ page }) => {
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
   await page.route(`**/api/promote/${PR.number}/status`, (route) =>
