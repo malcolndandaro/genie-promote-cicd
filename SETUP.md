@@ -81,6 +81,40 @@ now only renders + deploys dev's `setup` job (no app there anymore).
 Open a PR that touches a resource → `pr-checks` validates → merge → `deploy-prod`
 pauses on the prod gate → the Steward approves → SP runs `bundle deploy -t prod`.
 
+## Quality gates that BLOCK the merge (branch protection)
+
+The promotion PR (in the content repo `genie-spaces-content`) is gated by two required-check jobs in
+`pr-checks.yml`, both scoped to the spaces the PR changed (`git diff` vs the PR base — so unrelated /
+legacy content never blocks a PR):
+
+- **`bundle validate (prod)`** — runs as the prod CI SP: `bundle validate`, baseline **GRANT-01**
+  (`scripts/check_grants.py`), and **EVAL-01** the benchmark-COUNT floor (`scripts/check_eval.py`,
+  offline — the count is in the committed serialized_space; min via `EVAL_MIN_BENCHMARKS`, default 2).
+- **`eval-run pass-rate (dev)`** — runs as the **dev-reader SP** (the eval-run needs the live dev
+  space with benchmarks): `scripts/check_eval_run.py` re-runs the benchmarks and fails on a
+  below-threshold pass-rate (`EVAL_RUN_THRESHOLD`, default 0.8). Advisory/unavailable never blocks.
+  Requires `DATABRICKS_DEV_SP_CLIENT_ID` (var) + `DATABRICKS_DEV_SP_SECRET` (secret) on the content
+  repo — the same dev-reader SP creds from the `genie_promote` scope.
+
+Enable the enforcement with **branch protection** on the content repo's `main`:
+```
+gh api -X PUT repos/<owner>/genie-spaces-content/branches/main/protection --input - <<'JSON'
+{"required_status_checks":{"strict":true,"contexts":["bundle validate (prod)","eval-run pass-rate (dev)"]},
+ "enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}
+JSON
+```
+(No required PR review — separation of duties is the Steward's prod Environment gate at deploy.)
+
+## Knowledge Assistants (Assistente de Conhecimento) — optional advisory sources
+
+To let the reviewer consult Agent Bricks Knowledge Assistants as ADDITIVE advisory findings: create
+each KA (`databricks knowledge-assistants create-knowledge-assistant` + `create-knowledge-source`
+from a UC Volume of `.md`/PDF; sync; wait for state ACTIVE — see the `databricks-agent-bricks` skill),
+grant the **app SP `CAN_QUERY`** on each KA serving endpoint, and register them via **`APP_KA_SEED`**
+(a JSON array in the app.yaml, seeded at startup as the app SP — no browser). NOTE: KA endpoints are
+the **Responses API** (`task agent/v1/responses`) — queried via `{"input":[...]}` at `/invocations`,
+NOT `serving_endpoints.query(messages=)`.
+
 ## GitHub App (bot) for the in-app PR integration (GH1)
 
 The app opens promotion PRs + posts review comments as a **GitHub App (bot)** — never a human PAT

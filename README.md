@@ -38,7 +38,7 @@ flowchart LR
   subgraph gh["GitHub — source of truth for verdicts"]
     src[("src/genie/&lt;slug&gt;.serialized_space.json<br/>+ .title / .access.json / .mapping.json sidecars")]
     pr["Promotion PR<br/>head: promote/&lt;slug&gt;"]
-    checks{{"pr-checks workflow<br/>render+allowlist · bundle validate ·<br/>GRANT-01 (baseline) · pytest"}}
+    checks{{"pr-checks (branch-protected, per changed space)<br/>validate (prod): render+allowlist · bundle validate · GRANT-01 · EVAL-01 count · pytest<br/>eval-run (dev): eval-run pass-rate"}}
     deploy{{"deploy.yml<br/>+ prod Environment gate<br/>+ apply_access (direct-to-principal)"}}
   end
 
@@ -143,16 +143,25 @@ sequenceDiagram
    severities**: a missing grant on the *baseline* consumer group is a BLOCKER; a missing grant on
    an author-*declared* `AccessSpec` principal is a non-blocking SUGGESTION, since `apply_access`
    grants it at deploy anyway. A REST **eval-run** (`genie_create_eval_run`/`genie_get_eval_run`,
-   polled with a bounded wait budget) runs against the dev-sp transport and degrades to advisory
-   if it can't complete in time — never a hard block on eval infra.
+   polled with a bounded wait budget) runs against the dev-sp transport; a below-threshold pass-rate
+   (`block`) becomes an **EVAL-RUN BLOCKER** that fails the app's gate, while an eval-run that can't
+   complete in time degrades to advisory — never a hard block on eval infra. In-scope **Knowledge
+   Assistant** endpoints (Assistente de Conhecimento) are also consulted here as ADDITIVE advisory
+   findings (never a BLOCKER, D5).
 3. The **bot** opens a real PR editing `src/genie/<slug>.serialized_space.json` (+ the declared
    `.access.json`/`.mapping.json`/`.title` sidecars) and posts the attributed review comment
    (`Revisão #N`, one per re-review — never edited in place); the app **persists** the promotion +
    AccessSpec + snapshot + `requested` audit event to Lakebase.
-4. `pr-checks` runs on the **self-hosted runner** (the prod SP re-runs baseline GRANT-01 +
-   `bundle validate`).
-5. The **Steward/Admin** approves the PR review (merge), then approves the **prod Environment
-   gate** (deploy) — two gates, distinct from the requester (`prevent_self_review`).
+4. `pr-checks` (in the content repo `genie-spaces-content`, checking out this repo for the pipeline
+   logic) runs on the **self-hosted runner**, gating ONLY the spaces the PR changed (`git diff` vs
+   the PR base). Two required-check jobs enforce the merge under **branch protection** (both required,
+   strict, enforce_admins): `bundle validate (prod)` — as the prod SP: `bundle validate` + baseline
+   **GRANT-01** + **EVAL-01** (benchmark-count floor, `scripts/check_eval.py`) — and
+   **`eval-run pass-rate (dev)`** — as the dev-reader SP: the eval-run pass-rate gate
+   (`scripts/check_eval_run.py`), which blocks the merge on a below-threshold score.
+5. The **Steward/Admin** approves the **prod Environment gate** (deploy), distinct from the requester
+   (`prevent_self_review`) — the human SoD gate. (Branch protection requires the checks, not a PR
+   review, so the bot-opened PR doesn't need a separate human merge approval.)
 6. On merge, `deploy.yml` deploys the Genie Space + dashboard to prod as **DABs resources** via the
    **CI/CD SP**, which then runs `apply_access.py`: every declared AccessSpec principal gets its UC
    SELECT grant and Genie Space permission applied **directly** (no intermediate group — a
