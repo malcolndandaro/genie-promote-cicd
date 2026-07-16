@@ -168,6 +168,29 @@ test('adding a custom rule appears in the list and can be removed', async ({ pag
   await expect(page.locator('li').filter({ hasText: 'CUSTOM-01' })).toHaveCount(0);
 });
 
+test('a custom rule can be DISABLED (kept) separately from being removed', async ({ page }) => {
+  // "Desabilitar" (toggle) and "Remover" (delete) are distinct actions on a custom rule: disabling
+  // keeps the row but drops it from the reviewer prompt; the toggle must re-send the full custom
+  // payload (isCustom+severity+content+citation) or the backend rejects it.
+  mockAdminScreen(page, [
+    { rule_id: 'CUSTOM-9', is_custom: true, enabled: true, severity: 'SUGGESTION', params: null,
+      content: 'evite abreviações', citation: 'Padrão interno', updated_by: 'admin@databricks.com',
+      updated_at: '2026-07-16T00:00:00Z' },
+  ]);
+  await page.goto('/#/configuracoes');
+
+  const row = page.locator('li').filter({ hasText: 'CUSTOM-9' });
+  await expect(row.getByRole('checkbox')).toBeChecked();
+  await row.getByRole('checkbox').uncheck();
+  await expect(row.getByText('desabilitada')).toBeVisible();
+
+  // Survives a refresh (round-tripped through the mocked store) AND the row is still there (not removed).
+  await rulesCard(page).getByRole('button', { name: 'Atualizar' }).click();
+  const refreshed = page.locator('li').filter({ hasText: 'CUSTOM-9' });
+  await expect(refreshed.getByText('desabilitada')).toBeVisible();
+  await expect(refreshed.getByRole('button', { name: 'Remover' })).toBeVisible();  // remove still available
+});
+
 test('groups rules into deterministic + configurable sections', async ({ page }) => {
   mockAdminScreen(page);
   await page.goto('/#/configuracoes');

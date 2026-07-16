@@ -30,7 +30,7 @@
     isAuthError,
   } from '../lib/api';
   import type { PickerOption } from '../lib/picker';
-  import type { EffectiveRule, RoleName, RuleSeverity } from '../lib/types';
+  import type { EffectiveRule, RoleName, RuleOverride, RuleSeverity } from '../lib/types';
 
   let rolesP = $state(getRoles());
   let driftP = $state(getAdminDrift());
@@ -142,6 +142,21 @@
   function toggleEnabled(ruleId: string, override: { enabled: boolean; severity: RuleSeverity | null; params: Record<string, unknown> | null } | undefined, enabled: boolean): void {
     void withRuleMutation(ruleId, () =>
       upsertRule({ ruleId, enabled, severity: override?.severity ?? undefined, params: override?.params ?? undefined }),
+    );
+  }
+
+  // A CUSTOM rule's toggle must re-send the whole row (isCustom + severity + content + citation) —
+  // the backend upsert REQUIRES those for is_custom=true and would reject a bare {enabled} payload.
+  // So this is distinct from `toggleEnabled` (which is for hardcoded-rule overrides). "Desabilitar"
+  // (this) removes the rule from the reviewer prompt but KEEPS it; "Remover" (resetOne) deletes it.
+  function toggleCustomEnabled(o: RuleOverride, enabled: boolean): void {
+    void withRuleMutation(o.rule_id, () =>
+      upsertRule({
+        ruleId: o.rule_id, isCustom: true, enabled,
+        severity: o.severity ?? 'SUGGESTION',
+        content: o.content ?? '', citation: o.citation ?? '',
+        params: o.params ?? undefined,
+      }),
     );
   }
 
@@ -634,13 +649,27 @@
           {#each data.overrides.filter((o) => o.is_custom) as o (o.rule_id)}
             <li class="row rule-row" class:rule-row--disabled={!o.enabled}>
               <div class="row__main">
-                <strong>{o.rule_id}</strong>
+                <div class="rule-row__head">
+                  <strong>{o.rule_id}</strong>
+                  <Badge tone="accent">Custom</Badge>
+                  {#if !o.enabled}<span class="muted text-xs">desabilitada</span>{/if}
+                </div>
                 <span class="muted text-xs">{o.citation}</span>
                 <span class="muted text-xs">{o.content}</span>
               </div>
-              <div class="row__meta">
+              <div class="row__meta rule-row__controls">
+                <!-- Desabilitar (reversível — tira do prompt do revisor, mantém a regra) e Remover
+                     (apaga a regra) são ações SEPARADAS. -->
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={o.enabled}
+                    disabled={mutatingRuleId === o.rule_id}
+                    onchange={(e) => toggleCustomEnabled(o, e.currentTarget.checked)}
+                  />
+                  <span class="muted text-xs">Habilitada</span>
+                </label>
                 <Badge tone={SEVERITY_TONE[o.severity ?? 'SUGGESTION']}>{o.severity}</Badge>
-                <Badge tone="accent">Custom</Badge>
                 <Button
                   variant="ghost"
                   loading={mutatingRuleId === o.rule_id}
