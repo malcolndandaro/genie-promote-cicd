@@ -34,6 +34,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "genie_reviewer"))
 import access_spec  # noqa: E402
+import audience_check  # noqa: E402
+import audience_spec  # noqa: E402
 import grant_check  # noqa: E402
 
 from databricks.sdk import WorkspaceClient
@@ -71,6 +73,30 @@ def _non_grantable_declared(w: WorkspaceClient, spec: access_spec.AccessSpec) ->
             if not grant_check.is_uc_grantable_group(_group_resource_type(w, name), name)]
 
 
+def _principal_exists(w: WorkspaceClient, name: str, is_group: bool) -> bool:
+    return bool(list(w.groups.list(filter=f'displayName eq "{name}"'))) if is_group \
+        else bool(list(w.users.list(filter=f'userName eq "{name}"')))
+
+
+def _canonical_audience_main(space: dict, payload: dict, w: WorkspaceClient) -> int:
+    spec = audience_spec.AudienceSpec.from_dict(payload)
+    findings = audience_check.check_audience(
+        space, spec, lambda fq: _effective_grants(w, fq),
+        principal_exists=lambda name, is_group: _principal_exists(w, name, is_group),
+        table_exists=lambda fq: bool(w.tables.exists(full_name=fq)),
+    )
+    for finding in findings:
+        level = "error" if finding["severity"] in {"BLOCKER", "OPERATIONAL"} else "warning"
+        subject = finding.get("principal") or finding.get("table") or "AUDIENCE-01"
+        _emit_annotation(level, f"{subject}: {finding['message']}", title="AUDIENCE-01")
+    if any(f["severity"] == "OPERATIONAL" for f in findings):
+        return 2
+    if any(f["severity"] == "BLOCKER" for f in findings):
+        return 1
+    print("✅ AUDIENCE-01 — Público do Space válido; missing SELECT é orientação Terraform.")
+    return 0
+
+
 def _gh_escape(s: str) -> str:
     """Escape text for a GitHub Actions workflow-command payload (`::error::`/`::warning::` lines a
     step prints to stdout — GitHub auto-converts them into check-run annotations, which is how the
@@ -79,14 +105,14 @@ def _gh_escape(s: str) -> str:
     return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
-def _emit_annotation(level: str, message: str) -> None:
+def _emit_annotation(level: str, message: str, *, title: str = "GRANT-01") -> None:
     """Print a GRANT-01 finding as a REAL GitHub annotation (found live: bare `print()`s never
     became annotations, so the app's check-details fallback picked up GitHub's own generic noise —
     a Node.js deprecation warning + "Process completed with exit code 1." — instead of the actual PT
     finding). `level` is `"error"` for a BLOCKER (baseline) finding, `"warning"` for an advisory
     (declared-principal) one — GitHub reports these back as `annotation_level` `failure`/`warning`
     respectively (see `github_app._summarize_annotations`, which prefers the `failure` ones)."""
-    print(f"::{level} title=GRANT-01::{_gh_escape(message)}")
+    print(f"::{level} title={title}::{_gh_escape(message)}")
 
 
 def _effective_grants(w: WorkspaceClient, full_name: str) -> list[dict]:
@@ -110,6 +136,14 @@ def main() -> int:
         return 0
     with open(path, encoding="utf-8") as fh:
         space = json.load(fh)
+
+    # The current content workflow still passes the third argument under the legacy filename.
+    # render.sh may place a canonical AudienceSpec payload there during the atomic switch.
+    if sidecar_path and os.path.exists(sidecar_path):
+        with open(sidecar_path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if "principals" in payload:
+            return _canonical_audience_main(space, payload, WorkspaceClient())
 
     spec = _load_access_spec(sidecar_path)
     declared = list(spec.all_principals())

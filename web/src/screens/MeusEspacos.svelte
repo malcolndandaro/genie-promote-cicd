@@ -231,8 +231,8 @@
        declaration, then "Confirmar promoção". Shown only until the promotion is actually requested.
        Keyed by `selectionSeq` (NOT `resource?.id` — found live, PR #25: re-selecting the SAME space
        must ALSO remount the panel, or its declaration forms keep their prior rows/title and the
-       stale AccessSpec/table-mapping/title silently rides the next request) so EVERY select(), same-
-       space included, remounts PromotionMappingForm/AccessSpecForm fresh. -->
+       stale audience/table-mapping/title silently rides the next request) so EVERY select(), same-
+       space included, remounts PromotionMappingForm/AudienceSpecForm fresh. -->
   {#if confirming}
     {#key promotion.selectionSeq}
       <PromotionConfirm {promotion} onCancel={() => promotion.select(null)} />

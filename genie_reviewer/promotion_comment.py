@@ -43,6 +43,19 @@ def _mapping_lines(table_mapping: dict | None) -> list[str]:
     return lines
 
 
+def _audience_lines(review: dict) -> list[str]:
+    spec = review.get("audience_spec") or {}
+    principals = spec.get("principals") or []
+    if not principals:
+        return []
+    lines = ["", "### Público do Space", ""]
+    for principal in principals:
+        kind = "grupo" if principal.get("is_group") else "usuário"
+        lines.append(f"- `{_safe(principal.get('principal'))}` ({kind}) · `CAN_RUN`")
+    lines += ["", "_O pipeline aplica apenas o ACL do Space. Acesso aos dados permanece no Terraform da CERC._"]
+    return lines
+
+
 def render_promotion_comment(review: dict, requester_email: str | None, *,
                              resource_title: str | None = None,
                              table_mapping: dict | None = None) -> str:
@@ -81,6 +94,7 @@ def render_promotion_comment(review: dict, requester_email: str | None, *,
         lines.append(f"- {icon} {_safe(step.get('label', step.get('key', '')))} — _{word}_")
 
     lines += ["", _gate_line(review.get("gate", {}))]
+    lines += _audience_lines(review)
     lines += _mapping_lines(table_mapping)
     lines += ["", "### Achados do Genie Reviewer", ""]
     findings = review.get("findings", [])

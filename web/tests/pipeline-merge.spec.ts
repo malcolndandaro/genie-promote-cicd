@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { confirmPilotPromotion } from './promotion-helpers';
 
 // GH5: the merge + PR-review (merge-approval) gate are first-class, LIVE-monitored pipeline steps.
 // The first 3 steps come from the review verdict; pr_review/merge/approval/deploy are driven by the
@@ -44,7 +45,7 @@ async function promote(page: import('@playwright/test').Page, status: unknown) {
   await page.route(`**/api/promote/${PR.number}/status`, (route) => route.fulfill({ json: status }));
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
+  await confirmPilotPromotion(page);
 }
 
 // The Pipeline renders a visually-hidden status word per step inside its listitem

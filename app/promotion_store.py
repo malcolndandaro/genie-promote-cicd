@@ -81,6 +81,9 @@ class Promotion:
     # after the sidecar's own PR/branch is long merged/closed. None when no AccessSpec was declared
     # (pre-F2 promotions, or a promotion with no declared access).
     access_spec: Optional[dict] = None
+    # Pilot Público do Space desired set. New promotions write this field; `access_spec` above is
+    # read-only compatibility until ADR-0009 Phase 2 drops it.
+    audience_spec: Optional[dict] = None
     # G7: the Requester's declared table de-para (jsonb; source DEV ref -> desired prod ref
     # overrides) — persisted WITH the Promotion for the SAME reason as access_spec above (survives
     # independently of the `.mapping.json` sidecar's own PR/branch lifetime). None/empty means the
@@ -200,6 +203,7 @@ class PromotionStore:
                          pr_number: Optional[int], pr_url: Optional[str], branch: Optional[str],
                          current_phase: Optional[str], live_status: Optional[dict],
                          access_spec: Optional[dict] = None,
+                         audience_spec: Optional[dict] = None,
                          table_mapping: Optional[dict] = None) -> Promotion:
         now = self._clock()
         p = Promotion(
@@ -207,7 +211,7 @@ class PromotionStore:
             resource_title=resource_title, requester_email=requester_email, pr_number=pr_number,
             pr_url=pr_url, branch=branch, current_phase=current_phase, live_status=live_status,
             terminal=False, last_reconciled_at=None, created_at=now, updated_at=now,
-            access_spec=access_spec, table_mapping=table_mapping)
+            access_spec=access_spec, audience_spec=audience_spec, table_mapping=table_mapping)
         self._b.insert_promotion(dataclasses.asdict(p))
         return p
 
@@ -217,7 +221,9 @@ class PromotionStore:
         self._b.update_promotion(promotion_id, {"updated_at": self._clock()})
 
     def update_declarations(self, promotion_id: str, *, resource_title: Optional[str],
-                            access_spec: Optional[dict], table_mapping: Optional[dict]) -> None:
+                            access_spec: Optional[dict] = None,
+                            audience_spec: Optional[dict] = None,
+                            table_mapping: Optional[dict] = None) -> None:
         """Refresh the declared `resource_title`/`access_spec`/`table_mapping` on an EXISTING
         Promotion (found #3): a re-request on the same open PR can change any of these three (a
         different prod name, a revised AccessSpec, a new table de-para), but `create_promotion`
@@ -230,6 +236,7 @@ class PromotionStore:
         stale one only the previous round declared."""
         self._b.update_promotion(promotion_id, {
             "resource_title": resource_title, "access_spec": access_spec,
+            "audience_spec": audience_spec,
             "table_mapping": table_mapping, "updated_at": self._clock()})
 
     def get_promotion(self, promotion_id: str) -> Optional[Promotion]:
@@ -483,12 +490,14 @@ MIGRATIONS = (
         created_at         timestamptz NOT NULL,
         updated_at         timestamptz NOT NULL,
         access_spec        jsonb,
+        audience_spec      jsonb,
         table_mapping      jsonb
     )""",
     # F2 (added after the original CREATE TABLE shipped): idempotent for a promotions table that
     # predates this column — the CREATE TABLE above already includes it for a fresh DB (no-op
     # there); ADD COLUMN IF NOT EXISTS covers a promotions table created before F2.
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS access_spec jsonb",
+    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS audience_spec jsonb",
     # G7: same idempotent-migration pattern as access_spec above, for the declared table de-para.
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS table_mapping jsonb",
     """CREATE TABLE IF NOT EXISTS review_snapshots (
@@ -539,10 +548,10 @@ MIGRATIONS = (
 )
 
 # Columns that hold JSON blobs (wrapped as jsonb on write).
-_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec", "table_mapping"}
+_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec", "audience_spec", "table_mapping"}
 _PROMO_COLS = ("id", "resource_id", "resource_kind", "resource_title", "requester_email",
                "pr_number", "pr_url", "branch", "current_phase", "live_status", "terminal",
-               "last_reconciled_at", "created_at", "updated_at", "access_spec", "table_mapping")
+               "last_reconciled_at", "created_at", "updated_at", "access_spec", "audience_spec", "table_mapping")
 _SNAP_COLS = ("id", "promotion_id", "created_at", "gate_conclusion", "gate_summary",
               "findings", "eval", "timeline")
 _EVENT_COLS = ("id", "promotion_id", "seq", "occurred_at", "event_type", "actor_github_login",

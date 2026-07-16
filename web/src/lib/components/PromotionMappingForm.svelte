@@ -3,11 +3,11 @@
   // (pre-filled with the dev title) + a per-table de-para (source dev ref read-only -> destination
   // prod ref editable, default = the plain dev_->prod_ rebind), loaded from `/api/promote/preview`
   // BEFORE the caller commits. Both ride the NEXT `Solicitar promoção` as
-  // pendingProdTitle/pendingTableMapping (mirrors AccessSpecForm's pendingAccessSpec) — the app
+  // pendingProdTitle/pendingTableMapping (mirrors AudienceSpecForm's pendingAudienceSpec) — the app
   // writes them to git sidecars (`.title`/`.mapping.json`); CI is what actually applies the
   // mapping + enforces the allowlist (never applied here, see app_logic.request_promotion).
   //
-  // Unlike AccessSpecForm this is never collapsed (the name is a declaration every promotion makes,
+  // Unlike AudienceSpecForm this is never collapsed (the name is a declaration every promotion makes,
   // not an opt-in). A preview load failure degrades gracefully: the name still defaults to the
   // already-selected resource's own title (known synchronously, no network wait) and no mapping
   // override is sent — this is an ADDITIVE capability over a promotion flow that already worked
@@ -69,7 +69,7 @@
     row.target = row.defaultTarget;
   }
 
-  // Publish to the promotion store whenever the editable state changes — mirrors AccessSpecForm's
+  // Publish to the promotion store whenever the editable state changes — mirrors AudienceSpecForm's
   // own $effect (never reads pendingProdTitle/pendingTableMapping back, no loop).
   $effect(() => {
     promotion.pendingProdTitle = title.trim() || undefined;

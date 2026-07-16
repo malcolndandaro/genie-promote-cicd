@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { confirmPilotPromotion } from './promotion-helpers';
 
 // A failing review (mirrors the dev space's EVAL-01 BLOCKER) with a full timeline.
 const review = {
@@ -41,7 +42,7 @@ test('promoting renders the review (finding + pipeline + gate) and the PR link',
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
+  await confirmPilotPromotion(page);
 
   // The opened PR is surfaced with a link to GitHub.
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
@@ -74,7 +75,7 @@ test('a KA advisory finding renders its markdown (bold/code/list), not raw ** an
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review: kaReview, pr: PR } }));
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   const finding = page.locator('.finding').filter({ hasText: 'KA:Handbook CI/CD' });
   // Bold renders as <strong>, inline code as <code>, list items as <li> — NOT literal markdown.
@@ -103,7 +104,7 @@ test('reflects the live PR status (polled) as a badge in the PR banner', async (
   );
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   await expect(page.getByText('Checagens em execução')).toBeVisible(); // live phase badge (polled)
@@ -118,7 +119,7 @@ test('shows the animated running pipeline while the promotion is in flight', asy
   });
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('Executando pipeline de promoção…')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
@@ -151,7 +152,7 @@ test('renders a clean (success) review with no findings', async ({ page }) => {
   );
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('Nenhum achado — espaço limpo.')).toBeVisible();
   await expect(page.getByText('🟢 Pronto para promoção.')).toBeVisible();
@@ -175,7 +176,7 @@ test('a finding without suggestion/citation omits those lines', async ({ page })
   );
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('Referência fora do ambiente.')).toBeVisible();
   await expect(page.getByText('↳', { exact: false })).toHaveCount(0); // no suggestion line
@@ -187,7 +188,7 @@ test('shows an error state with retry when /api/promote fails', async ({ page })
   );
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click(); // G3: confirm the chosen space
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText(/Não foi possível solicitar a promoção/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();
@@ -221,7 +222,7 @@ test('a block eval state renders the panel with a failures-first question list +
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review: evalReview, pr: PR } }));
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   await page.getByText('Ver resultados do eval (4)').click();
   await expect(page.getByText(/O Genie re-executou as 4 perguntas/)).toBeVisible();
@@ -246,7 +247,7 @@ test('an advisory eval state renders only the explainer + summary, no question l
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } })); // eval: advisory, no `questions`
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   await page.getByText(/Ver resultados do eval/).click();
   await expect(

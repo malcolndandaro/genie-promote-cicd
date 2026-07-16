@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { confirmPilotPromotion } from './promotion-helpers';
 
 // SoD approval, now IDENTITY-DERIVED (no manual persona toggle) and surfaced as a compact button
 // in the PR banner (the old standalone "Aprovação do Steward" section was removed as UI noise):
@@ -62,7 +63,7 @@ async function requestAsAuthor(page: Page, review: unknown, viewer = 'malcoln@da
   await page.goto('/');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
   // G3: choosing the space from Home lands on the confirmation panel in "Meus espaços" — confirm it.
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 }
 

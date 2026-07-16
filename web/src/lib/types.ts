@@ -152,6 +152,16 @@ export interface AccessSpec {
   uc_principals: AccessPrincipal[];
 }
 
+export interface AudienceEntry {
+  principal: string;
+  is_group: boolean;
+}
+
+/** Público do Space: required desired set; every entry derives to Genie CAN_RUN. */
+export interface AudienceSpec {
+  principals: AudienceEntry[];
+}
+
 export interface Review {
   findings: Finding[];
   gate: Gate;
@@ -162,6 +172,7 @@ export interface Review {
   /** The declared AccessSpec (F2) — present once the engine always returns it; optional here so an
    * older cached/recovered review payload (pre-F2) still type-checks. */
   access_spec?: AccessSpec;
+  audience_spec?: AudienceSpec | null;
 }
 
 /** F3: the self-service access-request state machine. `applied` is distinct from `approved` —

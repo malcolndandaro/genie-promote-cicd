@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { confirmPilotPromotion } from './promotion-helpers';
 
 // G7: the promotion-time counterpart to G6's rehydrate de-para — "PromotionConfirm" gains an
 // editable prod Space name (pre-filled with the dev title) + a per-table de-para, loaded from
@@ -49,7 +50,7 @@ test('the prod Space name is pre-filled with the dev title and editable', async 
     posted = route.request().postDataJSON();
     return route.fulfill({ json: { review: cleanReview, pr: PR } });
   });
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   expect(posted).toMatchObject({ space_id: 'sp1', resource_title: 'Recebíveis PROD' });
@@ -64,7 +65,7 @@ test('confirming without editing the name sends the dev title unchanged', async 
     posted = route.request().postDataJSON();
     return route.fulfill({ json: { review: cleanReview, pr: PR } });
   });
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   expect(posted).toMatchObject({ resource_title: 'Recebíveis' });
@@ -90,7 +91,7 @@ test('shows the de-para pre-filled with the default target and sends only the OV
     posted = route.request().postDataJSON();
     return route.fulfill({ json: { review: cleanReview, pr: PR } });
   });
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   expect(posted?.table_mapping).toEqual({
@@ -127,7 +128,7 @@ test('a preview load failure degrades gracefully — the name still defaults and
     posted = route.request().postDataJSON();
     return route.fulfill({ json: { review: cleanReview, pr: PR } });
   });
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   expect(posted).toMatchObject({ resource_title: 'Recebíveis' });
@@ -151,7 +152,7 @@ test('re-requesting the SAME space after a completed promotion resets the name/m
   await nameInput.fill('Recebíveis PROD');
   const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
   await targetInput.fill('prod_recebiveis.diamond.fato_recebiveis_v2');
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   expect(posted).toHaveLength(1);
   expect(posted[0]).toMatchObject({ resource_title: 'Recebíveis PROD' });
@@ -162,7 +163,7 @@ test('re-requesting the SAME space after a completed promotion resets the name/m
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
   await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Recebíveis');
   await expect(page.getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 
   expect(posted).toHaveLength(2);

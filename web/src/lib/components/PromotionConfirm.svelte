@@ -4,10 +4,10 @@
   // BEFORE any review runs (promotion.resource set, phase still 'idle'), clearly bound to that space
   // (title visible here). The Requester declares the prod Space name + table de-para (G7) and may
   // optionally declare access (F2), then confirms — all of it rides `requestPromotion()`'s payload
-  // (pendingProdTitle/pendingTableMapping/pendingAccessSpec, same capture-before-confirm pattern).
+  // (pendingProdTitle/pendingTableMapping/pendingAudienceSpec, same capture-before-confirm pattern).
   import Card from './Card.svelte';
   import Button from './Button.svelte';
-  import AccessSpecForm from './AccessSpecForm.svelte';
+  import AudienceSpecForm from './AudienceSpecForm.svelte';
   import PromotionMappingForm from './PromotionMappingForm.svelte';
   import type { Promotion } from '../promotion.svelte';
 
@@ -30,14 +30,24 @@
       </header>
 
       <PromotionMappingForm {promotion} />
-      <AccessSpecForm {promotion} />
+      <AudienceSpecForm {promotion} />
 
       <div class="confirm__actions">
         <Button variant="outline" onclick={onCancel}>← Escolher outro espaço</Button>
-        <Button onclick={() => promotion.requestPromotion()} loading={promotion.phase === 'reviewing'}>
+        <Button
+          onclick={() => promotion.requestPromotion()}
+          loading={promotion.phase === 'reviewing'}
+          disabled={!promotion.pendingAudienceSpec}
+          ariaDescribedby="audience-required"
+        >
           {promotion.phase === 'reviewing' ? 'Solicitando…' : 'Confirmar promoção'}
         </Button>
       </div>
+      {#if !promotion.pendingAudienceSpec}
+        <p id="audience-required" class="confirm__required" role="status">
+          Selecione ao menos uma pessoa ou grupo para continuar.
+        </p>
+      {/if}
     </div>
   </Card>
 {/if}
@@ -64,5 +74,11 @@
     justify-content: flex-end;
     gap: var(--space-3);
     flex-wrap: wrap;
+  }
+  .confirm__required {
+    margin: calc(var(--space-2) * -1) 0 0;
+    text-align: right;
+    color: var(--destructive);
+    font-size: 0.8rem;
   }
 </style>

@@ -62,7 +62,7 @@
   // --- assign form -------------------------------------------------------------
   // G1: the assigned person is PICKED from the workspace directory (`/api/principals?kind=user`),
   // never a typed email. `UserOption` carries the real email through unchanged from `Principal`
-  // (Picker itself only reads/writes id/label/sublabel) — see AccessSpecForm's PrincipalOption for
+  // (Picker itself only reads/writes id/label/sublabel) — see AudienceSpecForm's PrincipalOption for
   // the same pattern. `githubUsername` stays free text: it's an EXTERNAL GitHub identity, not a
   // Databricks-workspace-listable principal, so there's no directory to pick it from.
   type UserOption = PickerOption & { email: string };

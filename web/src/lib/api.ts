@@ -4,7 +4,7 @@
  * NO token is ever handled client-side.
  */
 import type {
-  AccessSpec,
+  AudienceSpec,
   Whoami,
   PromotableResource,
   Review,
@@ -137,7 +137,7 @@ export interface PromoteResult {
  */
 export async function postPromote(
   resource: PromotableResource,
-  accessSpec?: AccessSpec,
+  audienceSpec?: AudienceSpec,
   prodTitle?: string,
   tableMapping?: Record<string, string>
 ): Promise<PromoteResult> {
@@ -148,7 +148,7 @@ export async function postPromote(
       space_id: resource.id,
       resource_title: prodTitle?.trim() || resource.title,
       resource_kind: resource.kind,
-      ...(accessSpec ? { access_spec: accessSpec } : {}),
+      ...(audienceSpec ? { audience_spec: audienceSpec } : {}),
       ...(tableMapping && Object.keys(tableMapping).length > 0 ? { table_mapping: tableMapping } : {}),
     }),
   });
@@ -175,6 +175,7 @@ export interface PromotionSummary {
    * Promotion, independent of the `.mapping.json` sidecar's own PR/branch lifetime — so reopening
    * shows exactly what was declared. Empty/null means no overrides (plain dev_->prod_ defaults). */
   table_mapping: Record<string, string> | null;
+  audience_spec: AudienceSpec | null;
 }
 
 /** One append-only audit event (LB4). `actor_github_login` is the AUTHORITATIVE governance identity;

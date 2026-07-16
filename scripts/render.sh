@@ -47,11 +47,14 @@ for src in src/genie/*.serialized_space.json; do
     # by matching this title via genie.list_spaces() (the id isn't in bundle summary / the payload).
     cp "src/genie/${slug}.title" "build/genie/${slug}.title"
   fi
-  # Optional per-space AccessSpec sidecar (F2 — committed by the app, mirrors .title). It carries
-  # only principal names (no env-scoped catalog refs), so it's copied as-is (no pre_render rebind
-  # needed) to build/genie/ where check_grants.py (GRANT-01) and apply_access.py (governed
-  # enforcement) look it up by convention: <slug>.access.json next to the rendered space.
-  if [ -f "src/genie/${slug}.access.json" ]; then
+  # Canonical AudienceSpec. During the expand/switch window also materialize a BUILD-ONLY copy at
+  # the legacy filename so the not-yet-switched content workflow still invokes the compatibility
+  # entrypoints. The git writer never emits this filename and the payload remains AudienceSpec.
+  if [ -f "src/genie/${slug}.audience.json" ]; then
+    cp "src/genie/${slug}.audience.json" "build/genie/${slug}.audience.json"
+    cp "src/genie/${slug}.audience.json" "build/genie/${slug}.access.json"
+  elif [ -f "src/genie/${slug}.access.json" ]; then
+    # Read-only legacy input until the content-repo atomic switch (ADR-0009).
     cp "src/genie/${slug}.access.json" "build/genie/${slug}.access.json"
   fi
 done

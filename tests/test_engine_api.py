@@ -253,6 +253,7 @@ _FAKE_REVIEW = {
     "timeline": [{"key": "checks", "label": "...", "status": "pass"}],
     "allowlist_violations": [],
     "consumer_group": "account users",
+    "audience_spec": None,
     "access_spec": {"space_permissions": [], "uc_principals": []},  # F2: no access declared
     "prod_serialized": {"huge": "payload", "should": "not be returned"},
 }
@@ -273,7 +274,7 @@ def test_review_threads_token_and_returns_ui_fields(monkeypatch):
     body = r.json()
     assert captured == {"space_id": "01f16e83", "user_token": "tok-r"}
     assert set(body.keys()) == {"findings", "gate", "eval", "timeline",
-                                "allowlist_violations", "consumer_group", "access_spec"}
+                                "allowlist_violations", "consumer_group", "audience_spec", "access_spec"}
     assert "prod_serialized" not in body  # large payload dropped
     assert body["gate"]["conclusion"] == "failure"
 
@@ -289,40 +290,88 @@ _ACCESS_SPEC_WIRE = {
     "space_permissions": [{"principal": "data_analysts", "is_group": True, "level": "CAN_RUN"}],
     "uc_principals": [{"principal": "ana@x.com", "is_group": False}],
 }
+_AUDIENCE_SPEC_WIRE = {
+    "principals": [
+        {"principal": "ana@x.com", "is_group": False},
+        {"principal": "data_analysts", "is_group": True},
+    ]
+}
 
 
-def test_review_threads_declared_access_spec_into_the_engine(monkeypatch):
+def test_review_threads_declared_audience_spec_into_the_engine(monkeypatch):
     captured = {}
 
-    def fake_review_space(space_id, *a, access_spec_=None, **k):
-        captured["access_spec_"] = access_spec_
+    def fake_review_space(space_id, *a, audience_spec_=None, **k):
+        captured["audience_spec_"] = audience_spec_
         out = dict(_FAKE_REVIEW)
-        out["access_spec"] = access_spec_.to_dict() if access_spec_ else out["access_spec"]
+        out["audience_spec"] = audience_spec_.to_dict() if audience_spec_ else None
         return out
 
     monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-    r = client.post("/review", json={"space_id": "01f16e83", "access_spec": _ACCESS_SPEC_WIRE},
+    r = client.post("/review", json={"space_id": "01f16e83", "audience_spec": _AUDIENCE_SPEC_WIRE},
                     headers={"x-forwarded-access-token": "tok-r"})
     assert r.status_code == 200
-    assert captured["access_spec_"] is not None
-    assert captured["access_spec_"].to_dict() == _ACCESS_SPEC_WIRE
-    assert r.json()["access_spec"] == _ACCESS_SPEC_WIRE
+    assert captured["audience_spec_"] is not None
+    assert captured["audience_spec_"].to_dict() == _AUDIENCE_SPEC_WIRE
+    assert r.json()["audience_spec"] == _AUDIENCE_SPEC_WIRE
 
 
-def test_review_without_access_spec_passes_none_through(monkeypatch):
+def test_review_rejects_empty_audience_and_author_selected_permission_level(monkeypatch):
+    monkeypatch.setattr(
+        engine_api.app_logic,
+        "review_space",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("invalid input reached engine")),
+    )
+    headers = {"x-forwarded-access-token": "tok-r"}
+    empty = client.post(
+        "/review", json={"space_id": "s", "audience_spec": {"principals": []}}, headers=headers
+    )
+    selected_level = client.post(
+        "/review",
+        json={
+            "space_id": "s",
+            "audience_spec": {
+                "principals": [
+                    {"principal": "users", "is_group": True, "level": "CAN_VIEW"}
+                ]
+            },
+        },
+        headers=headers,
+    )
+    assert empty.status_code == 422
+    assert selected_level.status_code == 422
+
+
+def test_review_without_audience_spec_passes_none_during_compatibility_window(monkeypatch):
     """The pre-F2 contract ({space_id} only) must still work — no AccessSpec declared -> None,
     never an empty-but-truthy sentinel that would confuse a downstream check."""
     captured = {}
 
-    def fake_review_space(space_id, *a, access_spec_=None, **k):
-        captured["access_spec_"] = access_spec_
+    def fake_review_space(space_id, *a, audience_spec_=None, **k):
+        captured["audience_spec_"] = audience_spec_
         return dict(_FAKE_REVIEW)
 
     monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
     r = client.post("/review", json={"space_id": "01f16e83"},
                     headers={"x-forwarded-access-token": "tok-r"})
     assert r.status_code == 200
-    assert captured["access_spec_"] is None
+    assert captured["audience_spec_"] is None
+
+
+def test_review_legacy_access_spec_is_read_only_translated_to_audience(monkeypatch):
+    captured = {}
+
+    def fake_review_space(space_id, *a, audience_spec_=None, **k):
+        captured["audience"] = audience_spec_
+        return dict(_FAKE_REVIEW)
+
+    monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
+    r = client.post("/review", json={"space_id": "s", "access_spec": _ACCESS_SPEC_WIRE},
+                    headers={"x-forwarded-access-token": "tok-r"})
+    assert r.status_code == 200
+    assert captured["audience"].to_dict() == {
+        "principals": [{"principal": "data_analysts", "is_group": True}]
+    }
 
 
 # --- S7b: /review and /promote thread this space's in-scope, enabled KA endpoints through ------
@@ -980,41 +1029,39 @@ def test_promote_persists_promotion_snapshot_and_requested_event(monkeypatch, st
     assert events[0].actor_app_email == "ana@x"  # display-only attribution
 
 
-def test_promote_threads_access_spec_to_the_engine_and_persists_it(monkeypatch, store):
-    """F2: the declared AccessSpec is (1) threaded into app_logic.request_promotion — the app-direct
-    DECLARATION step (no live grant/permission call happens here, that's the CI-run governed path)
-    — and (2) persisted WITH the Promotion, independent of the review snapshot."""
+def test_promote_threads_audience_spec_to_the_engine_and_persists_it(monkeypatch, store):
     captured = {}
 
-    def fake_request_promotion(space_id, *a, access_spec_=None, **k):
-        captured["access_spec_"] = access_spec_
+    def fake_request_promotion(space_id, *a, audience_spec_=None, **k):
+        captured["audience_spec_"] = audience_spec_
         review = {"gate": {"conclusion": "success", "summary": "ok"}, "findings": [],
                  "eval": {"status": "pass", "summary": "n/a"}, "timeline": [],
-                 "access_spec": access_spec_.to_dict() if access_spec_ else {"space_permissions": [], "uc_principals": []}}
+                 "audience_spec": audience_spec_.to_dict() if audience_spec_ else None}
         return {"review": review, "pr": {"number": 42, "url": "https://gh/pr/42"}}
 
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake_request_promotion)
-    r = client.post("/api/promote", json={"space_id": "s1", "access_spec": _ACCESS_SPEC_WIRE},
+    r = client.post("/api/promote", json={"space_id": "s1", "audience_spec": _AUDIENCE_SPEC_WIRE},
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     assert r.status_code == 200
-    assert captured["access_spec_"].to_dict() == _ACCESS_SPEC_WIRE
+    assert captured["audience_spec_"].to_dict() == _AUDIENCE_SPEC_WIRE
 
     pid = r.json()["promotion_id"]
     p = store.get_promotion(pid)
-    assert p.access_spec == _ACCESS_SPEC_WIRE
+    assert p.audience_spec == _AUDIENCE_SPEC_WIRE
+    assert p.access_spec is None
 
     # the Steward-facing recovery payload (get_promotion) echoes the SAME declaration
     detail = client.get(f"/api/promotions/{pid}",
                         headers={"x-forwarded-access-token": "tok"}).json()
-    assert detail["promotion"]["access_spec"] == _ACCESS_SPEC_WIRE
+    assert detail["promotion"]["audience_spec"] == _AUDIENCE_SPEC_WIRE
 
 
-def test_promote_without_access_spec_persists_none(monkeypatch, store):
+def test_promote_without_audience_spec_persists_none_during_compatibility(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
     r = client.post("/api/promote", json={"space_id": "s1"},
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     pid = r.json()["promotion_id"]
-    assert store.get_promotion(pid).access_spec is None
+    assert store.get_promotion(pid).audience_spec is None
 
 
 # --- G7: the declared prod name + table de-para thread into request_promotion + persist ----------
@@ -1072,14 +1119,11 @@ def test_promote_rerequest_adds_snapshot_and_re_reviewed_to_same_promotion(monke
     assert [e.event_type for e in store.list_audit_events(pid1)] == ["requested", "re_reviewed"]
 
 
-def _fake_request_promotion_echoing_access_spec(number: int):
-    """Mirrors `app_logic.request_promotion`'s real contract: the reviewed AccessSpec rides back on
-    `review["access_spec"]`, keyed off whatever `access_spec_` the caller threaded in."""
-    def fn(space_id, *a, access_spec_=None, **k):
+def _fake_request_promotion_echoing_audience(number: int):
+    def fn(space_id, *a, audience_spec_=None, **k):
         review = {"gate": {"conclusion": "success", "summary": "ok"}, "findings": [],
                  "eval": {"status": "pass", "summary": "n/a"}, "timeline": [],
-                 "access_spec": access_spec_.to_dict() if access_spec_
-                 else {"space_permissions": [], "uc_principals": []}}
+                 "audience_spec": audience_spec_.to_dict() if audience_spec_ else None}
         return {"review": review, "pr": {"number": number, "url": f"https://gh/pr/{number}"}}
     return fn
 
@@ -1089,7 +1133,7 @@ def test_promote_rerequest_updates_the_stored_declarations(monkeypatch, store):
     the first must refresh the stored Promotion row — otherwise the history/recovery view keeps
     showing the FIRST request's now-stale declarations forever."""
     monkeypatch.setattr(engine_api.app_logic, "request_promotion",
-                        _fake_request_promotion_echoing_access_spec(7))
+                        _fake_request_promotion_echoing_audience(7))
     h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
     pid = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis v1"},
                       headers=h).json()["promotion_id"]
@@ -1097,19 +1141,19 @@ def test_promote_rerequest_updates_the_stored_declarations(monkeypatch, store):
 
     r2 = client.post("/api/promote", json={
         "space_id": "s1", "resource_title": "Recebíveis v2",
-        "access_spec": _ACCESS_SPEC_WIRE, "table_mapping": _TABLE_MAPPING_WIRE}, headers=h)
+        "audience_spec": _AUDIENCE_SPEC_WIRE, "table_mapping": _TABLE_MAPPING_WIRE}, headers=h)
     assert r2.json()["promotion_id"] == pid  # same Promotion (1:1 with the PR)
 
     p = store.get_promotion(pid)
     assert p.resource_title == "Recebíveis v2"
-    assert p.access_spec == _ACCESS_SPEC_WIRE
+    assert p.audience_spec == _AUDIENCE_SPEC_WIRE
     assert p.table_mapping == _TABLE_MAPPING_WIRE
 
     # the Steward-facing recovery payload echoes the UPDATED declarations, not the first round's
     detail = client.get(f"/api/promotions/{pid}",
                         headers={"x-forwarded-access-token": "tok"}).json()
     assert detail["promotion"]["resource_title"] == "Recebíveis v2"
-    assert detail["promotion"]["access_spec"] == _ACCESS_SPEC_WIRE
+    assert detail["promotion"]["audience_spec"] == _AUDIENCE_SPEC_WIRE
     assert detail["promotion"]["table_mapping"] == _TABLE_MAPPING_WIRE
 
 
@@ -1117,20 +1161,19 @@ def test_promote_rerequest_clearing_a_declaration_persists_none_not_the_stale_va
     """Declare-latest-wins: a re-request that DROPS a previously-declared AccessSpec/table_mapping
     must clear it on the stored Promotion, never keep echoing the first round's value."""
     monkeypatch.setattr(engine_api.app_logic, "request_promotion",
-                        _fake_request_promotion_echoing_access_spec(8))
+                        _fake_request_promotion_echoing_audience(8))
     h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
-    pid = client.post("/api/promote", json={"space_id": "s1", "access_spec": _ACCESS_SPEC_WIRE,
+    pid = client.post("/api/promote", json={"space_id": "s1", "audience_spec": _AUDIENCE_SPEC_WIRE,
                                              "table_mapping": _TABLE_MAPPING_WIRE},
                       headers=h).json()["promotion_id"]
-    assert store.get_promotion(pid).access_spec == _ACCESS_SPEC_WIRE
+    assert store.get_promotion(pid).audience_spec == _AUDIENCE_SPEC_WIRE
 
     client.post("/api/promote", json={"space_id": "s1"}, headers=h)  # re-request, nothing declared
     p = store.get_promotion(pid)
     # access_spec's source is the review's OWN echo, which — like the create path — always carries
     # `spec.to_dict()` (never a bare None, even for an empty spec); the point is it's the FRESH
     # empty shape, not the stale first-round declaration.
-    assert p.access_spec == {"space_permissions": [], "uc_principals": []}
-    assert p.access_spec != _ACCESS_SPEC_WIRE
+    assert p.audience_spec is None
     # table_mapping's source is the request body directly (not echoed by the review), so an omitted
     # one on re-request really is a bare None.
     assert p.table_mapping is None
@@ -1140,18 +1183,18 @@ def test_promote_rerequest_records_the_new_declarations_on_the_re_reviewed_audit
     """The re_reviewed event's `detail` carries the declarations THIS request made (rather than a
     distinct `declarations_updated` event type — see `_persist_promotion`'s docstring for why)."""
     monkeypatch.setattr(engine_api.app_logic, "request_promotion",
-                        _fake_request_promotion_echoing_access_spec(9))
+                        _fake_request_promotion_echoing_audience(9))
     h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
     pid = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
     client.post("/api/promote", json={"space_id": "s1", "resource_title": "Novo nome",
-                                      "access_spec": _ACCESS_SPEC_WIRE}, headers=h)
+                                      "audience_spec": _AUDIENCE_SPEC_WIRE}, headers=h)
 
     events = store.list_audit_events(pid)
     requested = next(e for e in events if e.event_type == "requested")
     re_reviewed = next(e for e in events if e.event_type == "re_reviewed")
     assert "resource_title" not in requested.detail  # unchanged shape for the ORIGINAL request
     assert re_reviewed.detail["resource_title"] == "Novo nome"
-    assert re_reviewed.detail["access_spec"] == _ACCESS_SPEC_WIRE
+    assert re_reviewed.detail["audience_spec"] == _AUDIENCE_SPEC_WIRE
     assert re_reviewed.detail["table_mapping"] is None
 
 

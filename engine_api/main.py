@@ -43,7 +43,7 @@ from databricks.sdk.core import Config
 from databricks.sdk.errors import PermissionDenied, Unauthenticated
 from fastapi import APIRouter, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # Reuse the existing engine unchanged: app_logic resolves genie_reviewer/ + scripts/ itself.
 # NB: this relies on the app being deployed with the engine package (app/ + genie_reviewer/)
@@ -52,6 +52,7 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "app"))
 import app_logic  # noqa: E402  (MUST import before access_spec/github_app — it puts genie_reviewer/ on sys.path)
 import access_spec as access_spec_mod  # noqa: E402  (F2 — declared-access model)
+import audience_spec as audience_spec_mod  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
 import access_request_store  # noqa: E402  (F3 — self-service access requests: store + audit)
 import admin_inventory  # noqa: E402  (F4 — live-prod-inventory join, pure/offline-testable)
@@ -215,6 +216,10 @@ def _engine_call(label: str, fn: Callable):
     real error is logged server-side."""
     try:
         return fn()
+    except HTTPException:
+        # Boundary validation already chose the public status/detail (for example an invalid
+        # AudienceSpec). Do not relabel it as an upstream 502.
+        raise
     except Unauthenticated:
         logger.info("OBO auth failed in %s", label)
         raise HTTPException(status_code=401, detail="Sessão expirada — recarregue para reautenticar.")
@@ -523,8 +528,19 @@ class SpacePermissionIn(BaseModel):
 
 
 class PrincipalIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     principal: str
     is_group: bool = False
+
+
+class AudienceSpecIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    principals: list[PrincipalIn]
+
+    def to_engine(self) -> "audience_spec_mod.AudienceSpec":
+        return audience_spec_mod.AudienceSpec.from_dict(self.model_dump())
 
 
 class AccessSpecIn(BaseModel):
@@ -540,15 +556,29 @@ class AccessSpecIn(BaseModel):
 
 class ReviewRequest(BaseModel):
     space_id: str
-    # F2: the Requester's declared AccessSpec, previewed in the SAME review the Steward later sees
-    # (GRANT-01 checks every declared principal; a PII-01 interplay note may be added) — optional so
-    # the pre-F2 {space_id}-only contract still works and a review with no declared access is legal.
+    audience_spec: AudienceSpecIn | None = None
+    # Narrow read-only compatibility input. It is translated only when every Space entry is
+    # CAN_RUN; UC principals are discarded and never written/mutated.
     access_spec: AccessSpecIn | None = None
 
 
 # Only the UI-facing fields of the review result (drop the large prod_serialized payload).
 _REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group",
-                  "access_spec")
+                  "audience_spec", "access_spec")
+
+
+def _audience_from_request(audience: AudienceSpecIn | None,
+                           legacy: AccessSpecIn | None) -> "audience_spec_mod.AudienceSpec | None":
+    if audience is not None and legacy is not None:
+        raise HTTPException(status_code=422, detail="use audience_spec; do not send access_spec together")
+    try:
+        if audience is not None:
+            return audience.to_engine()
+        if legacy is not None:
+            return audience_spec_mod.from_legacy_access_spec(legacy.model_dump())
+        return None  # expand phase: old callers can read; canonical SPA writers always require it
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @api.post("/review")
@@ -565,7 +595,7 @@ def review(
         raise HTTPException(status_code=401, detail="user token required (OBO)")
 
     def _run() -> dict:
-        spec = body.access_spec.to_engine() if body.access_spec else None
+        audience = _audience_from_request(body.audience_spec, body.access_spec)
         # G2: the admin-configured rule overrides (None when no store — reviews with the hardcoded
         # handbook_rules.RULES, unchanged from before this slice).
         store = _rules_store()
@@ -578,12 +608,13 @@ def review(
         pt_store = _prompt_template_store()
         custom_pt = pt_store.get() if pt_store is not None else None
         persona_template = custom_pt.template_text if custom_pt is not None else None
-        result = app_logic.review_space(body.space_id, user_token=token, access_spec_=spec,
+        result = app_logic.review_space(body.space_id, user_token=token, audience_spec_=audience,
                                         rule_overrides=overrides, ka_endpoints=ka_endpoints,
                                         persona_template=persona_template)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
-        return {k: result[k] for k in _REVIEW_FIELDS}
+        return {k: (result.get(k) if k in {"audience_spec", "access_spec"} else result[k])
+                for k in _REVIEW_FIELDS}
 
     return _engine_call("review_space", _run)
 
@@ -595,9 +626,8 @@ class PromoteRequest(BaseModel):
     # legacy {space_id}-only contract still works.
     resource_title: str | None = None
     resource_kind: str | None = None
-    # F2: the same declared AccessSpec reviewed above, now carried through to the actual promotion
-    # request — persisted with the Promotion + committed to the PR as a sidecar (declaration is
-    # app-direct; enforcement is governed, see app_logic.request_promotion).
+    audience_spec: AudienceSpecIn | None = None
+    # Read-only expand/switch compatibility. Canonical writers must send audience_spec.
     access_spec: AccessSpecIn | None = None
     # G7: the Requester's declared table de-para (source DEV ref -> desired prod ref overrides),
     # keyed exactly like `/promote/preview`'s `source` field — only entries actually changed away
@@ -637,7 +667,8 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
                 # F2: persist the declared AccessSpec WITH the Promotion (echoed back by
                 # request_promotion's review payload) so it survives independently of the PR/branch
                 # and renders in the recovery/history view without re-parsing the sidecar from git.
-                access_spec=review.get("access_spec") or None,
+                access_spec=None,
+                audience_spec=review.get("audience_spec") or None,
                 # G7: persist the declared table de-para the SAME way — straight from the request
                 # body (unlike access_spec, `table_mapping` isn't part of the reviewer's own
                 # payload; it never rides the review, only the promotion request).
@@ -661,12 +692,13 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
     if event == "re_reviewed":
         # The (possibly changed) declarations this SAME request carried — recorded on the event so
         # the audit trail shows what a re-request declared, not just that one happened.
-        access_spec_ = review.get("access_spec") or None
+        audience_spec_ = review.get("audience_spec") or None
         table_mapping_ = body.table_mapping or None
-        detail.update(resource_title=body.resource_title, access_spec=access_spec_,
+        detail.update(resource_title=body.resource_title, audience_spec=audience_spec_,
                      table_mapping=table_mapping_)
         store.update_declarations(
-            promotion_id, resource_title=body.resource_title, access_spec=access_spec_,
+            promotion_id, resource_title=body.resource_title, access_spec=None,
+            audience_spec=audience_spec_,
             table_mapping=table_mapping_)
     # App-originated event. `actor_app_email` (display-only OBO email) is recorded on `requested`
     # per ADR-0005; governance identities come from GitHub via reconcile (LB4).
@@ -691,7 +723,7 @@ def promote(
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
-    spec = body.access_spec.to_engine() if body.access_spec else None
+    audience = _audience_from_request(body.audience_spec, body.access_spec)
     rules_store_ = _rules_store()
     overrides = rules_store_.list_all_dicts() if rules_store_ is not None else None
     # S7b: same in-scope/enabled KA endpoint lookup as /review, above.
@@ -705,7 +737,7 @@ def promote(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.space_id, user_token=token, requester_email=x_forwarded_email,
-            resource_title=body.resource_title, access_spec_=spec, rule_overrides=overrides,
+            resource_title=body.resource_title, audience_spec_=audience, rule_overrides=overrides,
             ka_endpoints=ka_endpoints, persona_template=persona_template,
             table_mapping=body.table_mapping),
     )
@@ -1114,8 +1146,8 @@ def _promotion_summary(p) -> dict:
             "pr_number": p.pr_number, "pr_url": p.pr_url,
             "current_phase": p.current_phase, "terminal": p.terminal,
             "created_at": p.created_at, "updated_at": p.updated_at,
-            # F2: the declared AccessSpec persisted with the Promotion (independent of the review
-            # snapshot, and of the sidecar's own PR/branch lifetime) — the Steward reviews this.
+            "audience_spec": p.audience_spec,
+            # Read-only compatibility until ADR-0009 Phase 2.
             "access_spec": p.access_spec,
             # G7: the declared table de-para, persisted the same way — reopening a promotion shows
             # exactly what was declared, without re-parsing the `.mapping.json` sidecar from git.

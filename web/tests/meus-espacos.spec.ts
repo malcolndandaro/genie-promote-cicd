@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { confirmPilotPromotion } from './promotion-helpers';
 
 // /whoami is needed on every page (header identity).
 test.beforeEach(async ({ page }) => {
@@ -75,7 +76,7 @@ test('confirming the panel shows a busy state while the promotion is in flight',
   });
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   // The confirm button goes busy; the OTHER space's card stays disabled (already was, on selection).
   await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
@@ -130,7 +131,7 @@ test('a no-op promotion (already in prod) shows a "nada a promover" notice, no p
   );
   await page.goto('/#/espacos');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
 
   await expect(page.getByText('Nada a promover')).toBeVisible();
   // no PR banner, and the (misleading) pipeline is suppressed on a no-op.

@@ -12,7 +12,7 @@
  * deep-links the Steward there + reflects the result. `approval` below is a faithful PREVIEW of
  * that policy (the documented future `/api/approve` would re-check it server-side from the token).
  */
-import type { AccessSpec, PromotableResource, Review } from './types';
+import type { AudienceSpec, PromotableResource, Review } from './types';
 import {
   postPromote,
   getPromoteStatus,
@@ -101,13 +101,13 @@ export class Promotion {
 
   /** Incremented on every `select()` call (same-space reselection included) — `MeusEspacos`
    * keys the confirmation panel off this, not `resource?.id`, so the declaration forms
-   * (AccessSpecForm/PromotionMappingForm) always remount fresh, even for the SAME space. */
+   * (AudienceSpecForm/PromotionMappingForm) always remount fresh, even for the SAME space. */
   selectionSeq = $state(0);
 
   /** Pick a resource. A new selection invalidates any prior verdict so nothing misleads — including
    * a RE-selection of the SAME space: a prior round's declared access/title/table-mapping must
    * never silently ride the next request (found live, PR #25 — a re-request of the same space still
-   * carried the previous AccessSpec because neither this reset nor a remount happened for the
+   * carried the previous declaration because neither this reset nor a remount happened for the
    * same-space case). `selectionSeq` additionally forces the declaration forms to remount, which is
    * what actually re-seeds PromotionMappingForm's title/table-mapping from the fresh preview. */
   select(resource: PromotableResource | null): void {
@@ -122,7 +122,7 @@ export class Promotion {
     this.requesterEmail = this.viewerEmail; // a fresh flow is requested by the viewer
     this.initiatedHere = false; // a bare selection isn't yet a requested promotion
     this.noChange = false;
-    this.pendingAccessSpec = undefined;
+    this.pendingAudienceSpec = undefined;
     this.pendingProdTitle = undefined;
     this.pendingTableMapping = undefined;
     this.selectionSeq += 1;
@@ -152,18 +152,16 @@ export class Promotion {
     }
   }
 
-  /** The Requester's declared access for the CURRENT flow (F2) — captured before requesting the
-   * promotion, so it rides along on the SAME request the review reflects. Undeclared (undefined)
-   * is legal: no AccessSpec means nothing beyond the base consumer_group is being asked for. */
-  pendingAccessSpec = $state<AccessSpec | undefined>(undefined);
+  /** Required Público do Space for the current flow. Every principal derives to CAN_RUN. */
+  pendingAudienceSpec = $state<AudienceSpec | undefined>(undefined);
 
-  /** G7: the editable prod Space name for the CURRENT flow — mirrors `pendingAccessSpec`, captured
+  /** G7: the editable prod Space name for the CURRENT flow — mirrors `pendingAudienceSpec`, captured
    * by `PromotionMappingForm` before requesting the promotion. Pre-filled with the dev title;
    * undefined falls back to the resource's own title (unchanged from before G7). */
   pendingProdTitle = $state<string | undefined>(undefined);
 
   /** G7: the Requester's declared table de-para for the CURRENT flow (source dev ref -> desired
-   * prod ref overrides) — mirrors `pendingAccessSpec`. Only entries actually changed away from the
+   * prod ref overrides) — mirrors `pendingAudienceSpec`. Only entries actually changed away from the
    * `/promote/preview` default need be present; undeclared (undefined/empty) means "use the plain
    * dev_->prod_ defaults", exactly as before G7. */
   pendingTableMapping = $state<Record<string, string> | undefined>(undefined);
@@ -174,6 +172,11 @@ export class Promotion {
    */
   async requestPromotion(): Promise<void> {
     if (!this.resource || this.phase === 'reviewing') return; // no double-submit
+    if (!this.pendingAudienceSpec) {
+      this.error = 'Selecione ao menos uma pessoa ou grupo para o Público do Space.';
+      this.phase = 'error';
+      return;
+    }
     const id = this.resource.id;
     this.phase = 'reviewing';
     this.initiatedHere = true; // user-initiated on this screen → its inline pipeline may show now
@@ -186,7 +189,7 @@ export class Promotion {
     try {
       const res = await postPromote(
         resource,
-        this.pendingAccessSpec,
+        this.pendingAudienceSpec,
         this.pendingProdTitle,
         this.pendingTableMapping
       );

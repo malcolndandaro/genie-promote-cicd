@@ -33,6 +33,8 @@ for _p in ("genie_reviewer", "scripts"):
 import base64  # noqa: E402
 
 import access_spec  # noqa: E402  (F2 — the declared-access model; Space perms + UC grants)
+import audience_check  # noqa: E402  (pilot AudienceSpec deterministic validation)
+import audience_spec  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
 import eval_gate  # noqa: E402
 import grant_check  # noqa: E402
@@ -100,6 +102,11 @@ def access_path_for(slug: str) -> str:
     return f"{GH_GENIE_SRC_DIR}/{slug}.access.json"
 
 
+def audience_path_for(slug: str) -> str:
+    """Canonical required Público do Space sidecar (ADR-0009)."""
+    return f"{GH_GENIE_SRC_DIR}/{slug}.audience.json"
+
+
 def mapping_path_for(slug: str) -> str:
     """G7: the per-space table de-para sidecar path — mirrors `.title`/`.access.json`: committed
     next to the artifact so CI's render.sh finds it by convention (`pre_render.py apply-mapping`,
@@ -108,7 +115,7 @@ def mapping_path_for(slug: str) -> str:
 
 # The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
 REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group",
-                 "access_spec")
+                 "audience_spec", "access_spec")
 
 # --- Cross-workspace client factory (ADR-0006 / A1) --------------------------------------------
 #
@@ -589,6 +596,33 @@ def _pii_access_findings(space: dict, spec: "access_spec.AccessSpec") -> list[di
     }]
 
 
+def _pii_audience_findings(space: dict, spec: "audience_spec.AudienceSpec | None") -> list[dict]:
+    """Advisory-only PII expansion note using the pilot's audience vocabulary."""
+    if spec is None:
+        return []
+    flagged_cols: list[str] = []
+    for table in (space.get("data_sources") or {}).get("tables", []) or []:
+        for column in table.get("column_configs") or []:
+            name = (column.get("column_name") or "").lower()
+            if any(term in name for term in handbook_rules.PII_SIGNAL_TERMS):
+                flagged_cols.append(f"{table.get('identifier', '')}.{column.get('column_name')}")
+    if not flagged_cols:
+        return []
+    return [{
+        "severity": "SUGGESTION", "rule_id": "PII-01",
+        "citation": "Genie Promotion Handbook › PII › PII-01",
+        "message": (f"o Público do Space ({', '.join(spec.names())}) alcança colunas com sinal de "
+                    f"PII/sigilo bancário ({', '.join(flagged_cols)}) — confirme máscaras e row filters."),
+        "suggestion": "Revise as proteções UC antes da aprovação; o app não concede acesso aos dados.",
+    }]
+
+
+def _audience_principal_exists(w: WorkspaceClient, name: str, is_group: bool) -> bool:
+    if is_group:
+        return bool(list(w.groups.list(filter=f'displayName eq "{name}"')))
+    return bool(list(w.users.list(filter=f'userName eq "{name}"')))
+
+
 def _non_grantable_declared_groups(gw: WorkspaceClient, spec: "access_spec.AccessSpec") -> list[str]:
     """G9: which of the AccessSpec's declared GROUP principals apply_access could never actually
     grant (workspace-local groups — UC grants reject those; `grant_check.is_uc_grantable_group`).
@@ -611,6 +645,7 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
                  consumer_group: str | None = None, grant_profile: str | None = None,
                  user_token: str | None = None,
                  access_spec_: "access_spec.AccessSpec | None" = None,
+                 audience_spec_: "audience_spec.AudienceSpec | None" = None,
                  rule_overrides: list[dict] | None = None,
                  ka_endpoints: list[dict] | None = None,
                  persona_template: str | None = None) -> dict:
@@ -659,7 +694,7 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     """
     consumer_group = consumer_group or os.environ.get("APP_CONSUMER_GROUP", "account users")
     grant_profile = grant_profile or os.environ.get("APP_PROD_PROFILE")  # None -> skip preview
-    spec = access_spec_ or access_spec.AccessSpec()
+    legacy_spec = access_spec_ or access_spec.AccessSpec()
     # export_serialized resolves its OWN transport: dev-sp + assert_can_access(verified identity)
     # when user_token is set (the only way to reach dev post-ADR-0006), else the local profile.
     dev_serialized = export_serialized(space_id, profile, user_token=user_token)
@@ -676,20 +711,32 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
          "suggestion": "Remover/pré-renderizar a referência de outro ambiente."}
         for v in violations
     ]
-    # GRANT-01 preview (G9): consumer_group stays the BASELINE class (missing SELECT -> BLOCKER,
+    # AUDIENCE-01 is the pilot path. Missing SELECT is informational; invalid live inputs block;
+    # inspection outages are operational. The old GRANT-01 branch remains read-only compatibility
+    # for direct legacy callers during the expand/switch window.
+    if grant_profile and audience_spec_ is not None:
+        gw = _client(grant_profile)
+        deterministic += audience_check.check_audience(
+            prod_space, audience_spec_,
+            lambda fq: _effective_grants(grant_profile, fq, client=gw),
+            principal_exists=lambda name, is_group: _audience_principal_exists(gw, name, is_group),
+            table_exists=lambda fq: bool(gw.tables.exists(full_name=fq)),
+        )
+    # GRANT-01 preview (legacy compatibility): consumer_group stays the BASELINE class (missing SELECT -> BLOCKER,
     # unchanged); every principal the AccessSpec declares (F2) is checked SEPARATELY as the
     # DECLARED class (missing SELECT -> non-blocking SUGGESTION — apply_access grants these at
     # deploy, so blocking pre-merge on it would be contradictory).
-    if grant_profile:  # only preview when a reachable prod target is configured (else CI owns it)
+    elif grant_profile and access_spec_ is not None:
         try:
             gw = _client(grant_profile)  # built here so a bad/unreachable prod profile can't break the review
-            non_grantable = _non_grantable_declared_groups(gw, spec)
+            non_grantable = _non_grantable_declared_groups(gw, legacy_spec)
             deterministic += grant_check.check_grants(
                 prod_space, consumer_group, lambda fq: _effective_grants(grant_profile, fq, client=gw),
-                declared_principals=spec.all_principals(), non_grantable_principals=non_grantable)
+                declared_principals=legacy_spec.all_principals(), non_grantable_principals=non_grantable)
         except Exception:  # noqa: BLE001 — grant check is best-effort; never break the review
             pass
-    deterministic += _pii_access_findings(prod_space, spec)
+    deterministic += (_pii_audience_findings(prod_space, audience_spec_)
+                      if audience_spec_ is not None else _pii_access_findings(prod_space, legacy_spec))
 
     # G2: the EFFECTIVE rule set (hardcoded RULES + admin overrides/custom rules) grounds the
     # prompt; EVAL-01's threshold/severity backstop is resolved the same way (finalize_findings
@@ -741,7 +788,9 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     return {
         "findings": findings, "gate": gate, "eval": eval_res,
         "allowlist_violations": violations, "consumer_group": consumer_group,
-        "access_spec": spec.to_dict(),
+        "audience_spec": audience_spec_.to_dict() if audience_spec_ is not None else None,
+        # Read-only compatibility for cached/tests until Phase 2. New writers never emit this.
+        "access_spec": legacy_spec.to_dict() if access_spec_ is not None else None,
         "timeline": build_timeline(not violations, gate, eval_res, approved=False, deployed=False),
         "prod_serialized": prod_space,
         # The DEV-shaped export (what the promotion PR commits to src/; CI rebinds dev_->prod_).
@@ -788,6 +837,7 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                       requester_email: str | None = None, resource_title: str | None = None,
                       domain: str = DOMAIN, github: GitHubApp | None = None,
                       access_spec_: "access_spec.AccessSpec | None" = None,
+                      audience_spec_: "audience_spec.AudienceSpec | None" = None,
                       rule_overrides: list[dict] | None = None,
                       ka_endpoints: list[dict] | None = None,
                       persona_template: str | None = None,
@@ -821,9 +871,16 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     Returns {review (UI fields), pr:{number,url}}. The PR opens regardless of findings — it's the
     fix/approval loop; pr-checks + the Steward gate (GH4) enforce the outcome.
     """
+    if audience_spec_ is None and access_spec_ is not None and not access_spec_.is_empty():
+        # Compatibility is read-only: translate the safe CAN_RUN subset; never write AccessSpec.
+        audience_spec_ = audience_spec.from_legacy_access_spec(
+            access_spec_.to_dict(), warn=lambda message: print(f"AudienceSpec legacy: {message}"))
     full = review_space(space_id, profile=profile, user_token=user_token, domain=domain,
-                        access_spec_=access_spec_, rule_overrides=rule_overrides,
+                        audience_spec_=audience_spec_, rule_overrides=rule_overrides,
                         ka_endpoints=ka_endpoints, persona_template=persona_template)
+    # Compatibility for injected reviewers/cached payloads created before the expand release.
+    full.setdefault("audience_spec", audience_spec_.to_dict() if audience_spec_ is not None else None)
+    full.setdefault("access_spec", None)
     review = {k: full[k] for k in REVIEW_FIELDS}
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the
@@ -843,20 +900,18 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     # the prod space keeps a friendly title). Committed next to the artifact; no shared manifest, so
     # concurrent per-space PRs never conflict.
     extra = {f"{GH_GENIE_SRC_DIR}/{slug}.title": prod_title + "\n"}
-    # G9 (found live, PR #25): a re-request on this SAME branch/PR that no longer declares an
-    # AccessSpec/table_mapping must CLEAR any sidecar a PRIOR round already committed there — extra
+    # A re-request on this SAME branch/PR must clear stale compatibility/table-mapping sidecars.
     # only ever UPSERTS, so without this a stale `.access.json`/`.mapping.json` would survive
     # forever once committed, and CI (check_grants.py/render.sh) would keep reading it.
     remove: list[str] = []
-    spec = access_spec_ or access_spec.AccessSpec()
-    if not spec.is_empty():
-        # The AccessSpec sidecar (F2): committed alongside the artifact so CI's render.sh copies it
-        # forward, check_grants.py (GRANT-01) verifies every declared principal, and
-        # apply_access.py (governed enforcement) applies UC grants + Space permissions directly to
-        # each declared principal — NEVER applied here (no app-direct prod mutation).
-        extra[access_path_for(slug)] = json.dumps(spec.to_dict(), ensure_ascii=False, indent=2) + "\n"
+    if audience_spec_ is not None:
+        extra[audience_path_for(slug)] = json.dumps(
+            audience_spec_.to_dict(), ensure_ascii=False, indent=2) + "\n"
     else:
-        remove.append(access_path_for(slug))
+        remove.append(audience_path_for(slug))
+    # The canonical writer never emits the legacy filename, and always clears one left by an old
+    # request on this branch.
+    remove.append(access_path_for(slug))
     if table_mapping:
         # The table de-para sidecar (G7): committed alongside the artifact so CI's render.sh applies
         # it (AFTER the dev_->prod_ rebind, BEFORE the strict allowlist check) — NEVER applied here.

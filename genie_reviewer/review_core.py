@@ -229,6 +229,12 @@ def raw_is_parseable(raw) -> bool:
 
 # --- Core 4: severity gate ------------------------------------------------------
 def decide_gate(findings: list[dict]) -> dict:
+    operational = [f for f in (findings or [])
+                   if isinstance(f, dict) and f.get("severity") == "OPERATIONAL"]
+    if operational:
+        return {"conclusion": "operational_failure", "blocker_count": 0,
+                "summary": (f"⚠️ Não foi possível concluir {len(operational)} validação(ões) "
+                            "operacional(is). A KIP deve restaurar o serviço e repetir.")}
     valid = [f for f in (findings or []) if isinstance(f, dict) and f.get("severity") in SEVERITIES]
     n = len(valid)
     n_block = sum(1 for f in valid if f["severity"] == "BLOCKER")

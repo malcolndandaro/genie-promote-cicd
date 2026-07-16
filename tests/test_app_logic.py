@@ -600,6 +600,7 @@ _FULL_REVIEW = {
     "timeline": [{"key": "checks", "label": "Checagens", "status": "pass"}],
     "allowlist_violations": [],
     "consumer_group": "account users",
+    "audience_spec": None,
     "access_spec": {"space_permissions": [], "uc_principals": []},  # F2: no access declared
     "prod_serialized": {"big": "payload should be dropped"},
     "dev_serialized": {"display_name": "Recebíveis", "n": 2},  # what the PR commits
@@ -668,9 +669,10 @@ def test_secret_decodes_base64_value():
     assert app_logic._secret(fake, "genie_promote", "github_app_id") == "hello"
 
 
-# --- F2: AccessSpec declared at promotion (app-direct declaration, governed enforcement) ---
+# --- Pilot AudienceSpec declared at promotion (app-direct declaration, governed enforcement) ---
 
 import access_spec  # noqa: E402
+import audience_spec  # noqa: E402
 
 
 def _spec_with_access():
@@ -683,59 +685,60 @@ def _spec_with_access():
     )
 
 
-def test_request_promotion_commits_access_sidecar_when_declared(monkeypatch):
-    """F2: a non-empty AccessSpec is committed as a per-space sidecar (mirrors .title) — the
-    DECLARATION is app-direct (this call), but nothing here touches a live grant/permission."""
+def _audience():
+    return audience_spec.AudienceSpec((
+        audience_spec.AudiencePrincipal("data_analysts", is_group=True),
+        audience_spec.AudiencePrincipal("ana@x.com"),
+    ))
+
+
+def test_request_promotion_commits_audience_sidecar_and_removes_legacy(monkeypatch):
     captured_spec = {}
 
-    def fake_review_space(space_id, *a, access_spec_=None, **k):
-        captured_spec["spec"] = access_spec_
+    def fake_review_space(space_id, *a, audience_spec_=None, **k):
+        captured_spec["spec"] = audience_spec_
         out = dict(_FULL_REVIEW)
-        out["access_spec"] = access_spec_.to_dict() if access_spec_ else out["access_spec"]
+        out["audience_spec"] = audience_spec_.to_dict() if audience_spec_ else None
         return out
 
     monkeypatch.setattr(app_logic, "review_space", fake_review_space)
     gh = _FakeGitHubApp()
-    spec = _spec_with_access()
+    spec = _audience()
     out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                      access_spec_=spec, github=gh)
-    sidecar_path = "src/genie/sp1.access.json"
+                                      audience_spec_=spec, github=gh)
+    sidecar_path = "src/genie/sp1.audience.json"
     assert sidecar_path in gh.promo["extra_files"]
     committed = json.loads(gh.promo["extra_files"][sidecar_path])
     assert committed == spec.to_dict()
     # the review payload the Steward sees carries the SAME declaration that was passed through
     assert captured_spec["spec"] is spec
-    assert out["review"]["access_spec"] == spec.to_dict()
+    assert out["review"]["audience_spec"] == spec.to_dict()
+    assert "src/genie/sp1.access.json" in gh.promo["remove_files"]
 
 
-def test_request_promotion_omits_access_sidecar_when_not_declared(monkeypatch):
-    """No AccessSpec declared (the pre-F2 / default case) -> no sidecar file, no noisy empty commit."""
+def test_request_promotion_omits_audience_sidecar_for_legacy_missing_declaration(monkeypatch):
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
-    assert "src/genie/sp1.access.json" not in gh.promo["extra_files"]
+    assert "src/genie/sp1.audience.json" not in gh.promo["extra_files"]
 
 
-def test_request_promotion_clears_a_stale_access_sidecar_when_re_requested_empty(monkeypatch):
-    """G9 (found live, PR #25): a re-request on the SAME branch/PR that no longer declares an
-    AccessSpec must ask GitHubApp to DELETE any `.access.json` a PRIOR round already committed
-    there — `extra_files` only ever upserts, so without `remove_files` a stale sidecar would survive
-    forever and CI would keep reading it."""
+def test_request_promotion_clears_stale_audience_and_access_sidecars_when_empty(monkeypatch):
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
     assert "src/genie/sp1.access.json" in gh.promo["remove_files"]
+    assert "src/genie/sp1.audience.json" in gh.promo["remove_files"]
 
 
-def test_request_promotion_never_removes_the_access_sidecar_when_still_declared(monkeypatch):
-    """The flip side: a request that DOES declare an AccessSpec must never ask for its own sidecar
-    to be removed (the committed file and the removal list are mutually exclusive)."""
+def test_request_promotion_keeps_canonical_audience_and_always_removes_legacy(monkeypatch):
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                access_spec_=_spec_with_access(), github=gh)
-    assert "src/genie/sp1.access.json" not in gh.promo["remove_files"]
-    assert "src/genie/sp1.access.json" in gh.promo["extra_files"]
+                                audience_spec_=_audience(), github=gh)
+    assert "src/genie/sp1.audience.json" not in gh.promo["remove_files"]
+    assert "src/genie/sp1.audience.json" in gh.promo["extra_files"]
+    assert "src/genie/sp1.access.json" in gh.promo["remove_files"]
 
 
 # --- G7: the declared prod Space name + table de-para (app-direct declaration, CI enforcement) ---
@@ -827,7 +830,7 @@ def test_request_promotion_never_calls_a_live_grant_or_permission_api(monkeypatc
     fake_client = NS(grants=NS(update=_boom), permissions=NS(update=_boom))
     monkeypatch.setattr(app_logic, "_client", lambda *a, **k: fake_client)
     out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                      access_spec_=_spec_with_access(), github=gh)
+                                      audience_spec_=_audience(), github=gh)
     assert out["pr"]["number"] == 7  # completed without ever invoking the fake grant/permission APIs
 
 

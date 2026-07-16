@@ -129,6 +129,7 @@ export const STATUS_LABEL: Record<StepStatus, string> = {
 /** Severity → badge tone (matches the retired AppKit SEVERITY_VARIANT mapping). */
 export function severityTone(severity: string): 'destructive' | 'warning' | 'neutral' {
   if (severity === 'BLOCKER') return 'destructive';
+  if (severity === 'OPERATIONAL') return 'destructive';
   if (severity === 'SUGGESTION') return 'warning';
   return 'neutral';
 }

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { confirmPilotPromotion } from './promotion-helpers';
 
 // UI4: the business-user home — explainer + 3-step flow + "Meus espaços" cards + "Promoções
 // recentes", the space-card promote that pre-selects the review flow, and the recent-promotion
@@ -74,7 +75,7 @@ test('a space card pre-selects the confirmation step on "Meus espaços" (G3)', a
   await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
   await expect(page.locator('.confirm').getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
 
-  await page.getByRole('button', { name: 'Confirmar promoção' }).click();
+  await confirmPilotPromotion(page);
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 });
 
