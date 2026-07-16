@@ -30,12 +30,10 @@ implementation details live in code + ADRs (`docs/adr/`).
   (below) resolved from the caller's platform-verified identity — there is no persona/self-declared
   toggle.
 
-- **Role** (Steward / Admin / Approver) — a DB-backed assignment (`app/roles_store.py`, Lakebase
-  `roles` table) gating what a caller sees *through the app* (the approval queue, the Admin/Config
-  screens) — distinct from GitHub's own Steward gate above, which is what actually releases the
-  merge/deploy. `APP_ADMINS`/`APP_STEWARD(S)` env vars are only the **bootstrap fallback** for a
-  brand-new deployment with an empty `roles` table; once any row exists, the store is authoritative.
-  "Approver" exists in the schema for a future finer-grained role; F3 approval is gated on Admin today.
+- **Role** (Steward / Admin) — an assignment that grants an app capability in addition to the
+  implicit Business User experience. Steward monitors promotions and approves through the Change
+  Request provider; Admin maintains app configuration and audit visibility. Access Approver is a
+  retired demo role, not part of the pilot language.
 
 - **App Maintainer (KIP)** — the team accountable for keeping the Promotion App operational and for
   its maintenance and future improvements. This is product/runtime ownership, distinct from deciding
@@ -136,6 +134,9 @@ so a family of terms exists for how the app reaches across that boundary safely.
 - **AccessSpec / Access Request (legacy)** — the demo-era model that combined Genie ACLs, UC grants
   and an approval queue. It is not part of the pilot domain and exists only through the explicit
   two-phase compatibility window while `.access.json` consumers and demo tables are removed.
+- **Compatibility Window** — the short migration state in which the new contract is authoritative
+  and legacy declarations may be translated read-only. It ends before the pilot and never permits
+  legacy writes or UC mutation.
 - **Rehydrate** — pulling an already-promoted **prod** Genie Space back into **dev**, with no git PR
   (A3/G6; `app/rehydrate.py`). Works for ANY prod Space the caller can access, not only ones this app
   promoted (the prod store starts empty per ADR-0006). Gated at BOTH blast sites with
@@ -146,7 +147,7 @@ so a family of terms exists for how the app reaches across that boundary safely.
 - **Rehydrate Event** — a standalone audit row (`promotion_store.RehydrateEvent` /
   `rehydrate_events` table) for a Rehydrate with no linkable Promotion — no FK, but the same
   acting-identity + "the dev SP holds a broad standing grant" facts as a Promotion-linked one.
-  Surfaced in the app under **Administração → "Exportações para dev"**.
+  Surfaced with the other admin audit evidence in **Auditoria**.
 - **Table de-para** — an optional, explicit remap of a source table reference to a different target
   (source ref → desired ref), reviewed by the caller before they commit. Two directions, two
   enforcement points: **rehydrate's** de-para (G6) widens Rehydrate's OWN dev-side allowlist to the
