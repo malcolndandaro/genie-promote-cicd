@@ -49,6 +49,18 @@ implementation details live in code + ADRs (`docs/adr/`).
   merged / awaiting deploy approval / deploying / deployed / failed). **Derived live from GitHub** —
   it reflects GitHub state, never asserts it.
 
+- **Deployment Attempt** — one approved execution of a Promotion's production workflow. A Promotion
+  can have multiple Attempts when an operational failure is retried; each Attempt records its exact
+  revision, completed stages and target identifiers. GitHub is authoritative for its live state.
+
+- **Preflight** — the mutation-free validation of the exact content, audience, identities and live
+  target assumptions an Attempt needs. It runs both on the PR and immediately after approval; any
+  failure here guarantees that production was not changed by that Attempt.
+
+- **Partial Deployment** — an Attempt that failed after at least one production mutation. It is
+  neither “not deployed” nor “deployed”: its completed stages and failed stage are shown explicitly,
+  and recovery replays the idempotent flow forward from Preflight.
+
 - **Audit Trail** — the append-only, ordered record of governance events for a Promotion (requested,
   PR opened, reviewed, merged, deploy approved, deployed, failed), each with actor + timestamp. The
   authoritative actors come from GitHub (the bot/the human GitHub logins), not the display-only OBO
