@@ -6,18 +6,23 @@ implementation details live in code + ADRs (`docs/adr/`).
 ## Core terms
 
 - **Promotion** — one governed attempt to move a resource (today a Genie Space) from a dev workspace
-  to prod, through: review → open PR → merge gate → deploy gate → deploy. **Grain: 1:1 with a PR.**
-  Re-requesting while the PR is open stays the SAME Promotion (adds a new Review Snapshot + a
-  `re-reviewed` audit event; PR updated in place). When the PR merges/closes the Promotion is
-  terminal; a later promotion of the same resource is a NEW Promotion (new PR). A Promotion may carry
-  multiple Review Snapshots over its life (latest shown; all retained for audit).
+  to prod, through: review → Change Request → merge gate → deploy gate → deploy. **Grain: 1:1 with a
+  Change Request.** Re-requesting while it is open stays the SAME Promotion (adds a new Review
+  Snapshot + a `re-reviewed` audit event; the Change Request is updated in place). Once it
+  merges/closes the Promotion is terminal; a later promotion of the same resource is a NEW
+  Promotion. A Promotion may carry multiple Review Snapshots over its life.
+
+- **Change Request** — the provider-owned, human-reviewed change unit for a Promotion. In the pilot
+  it is a GitHub pull request; a future provider can supply an equivalent without changing Promotion
+  semantics. The app stores a provider discriminator, opaque external id, URL and immutable content
+  + engine revisions rather than making a PR number the domain identity.
 
 - **Resource** — a promotable Databricks artifact (Genie Space today; AI/BI dashboards and others are
   anticipated via a kind registry). The thing a Promotion promotes.
 
 - **Requester** — the human who initiates a Promotion (the Author). In the app their identity is the
-  OBO email, which is **display-only**; the *authoritative* requester identity is the GitHub actor on
-  the PR/merge.
+  OBO email, which is **display-only**; the authoritative governance identity is the Change Request
+  provider's actor (a GitHub actor in the pilot).
 
 - **Steward** — the distinct approver under separation of duties (ADR-0002). Approves on GitHub (the
   PR review that allows the merge, and the prod deployment gate). The Steward is never the Requester;
