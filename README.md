@@ -1,331 +1,403 @@
-# genie-promote — promote Databricks Genie Spaces & AI/BI dashboards via reviewed CI/CD
+# Genie Promote
 
-A reference accelerator that lets a **business user author a Genie Space in a dev workspace and
-promote it to a prod workspace** through a governed CI/CD flow — with an **LLM reviewer agent**,
-deterministic governance checks, a real eval-run quality gate, **separation of duties**, self-service
-**access requests**, a **rehydrate** path back to dev, and a durable **audit trail** — all from a
-**single FastAPI + Svelte app**, itself hosted in the **prod workspace** as a durable control plane
-(ADR-0006), that acts on the user's own verified identity for every dev-touching action so
-non-technical users never touch Git or the CLI.
+Governed promotion for Databricks Genie Spaces—without asking business users to learn Git, CI/CD,
+or the Databricks CLI.
 
-Sample domain: `recebiveis` (Brazilian *receivables*) — swap it for your own (nothing is hardcoded).
+Business teams continue authoring in native Genie in a development workspace. When a Space is ready,
+they use one Databricks App to review it, request promotion, follow the approval, and see the production
+result. Behind the scenes, every production change is represented by a pull request, checked by policy
+and evaluation gates, approved by a separate Steward, and deployed by a dedicated service principal.
 
----
+This repository is the reusable **application and pipeline engine**. Promotable Genie and dashboard
+content lives in a separate content repository, such as
+[`genie-spaces-content`](https://github.com/malcolndandaro/genie-spaces-content).
 
-## Architecture at a glance
+> The included `recebiveis` domain is a working example. Replace it with your own domain, identities,
+> workspaces, repositories, and Knowledge Assistants during setup.
+
+## What you get
+
+- A Databricks App with a FastAPI backend and Svelte interface.
+- Native DEV Genie authoring with guided promotion to PROD.
+- Fresh LLM review plus deterministic environment, grant, and evaluation checks.
+- Optional Agent Bricks Knowledge Assistants for grounded, advisory feedback.
+- GitHub pull requests, required checks, and a human production approval gate.
+- Declared Genie and Unity Catalog access applied by the deployment pipeline.
+- A controlled PROD → DEV rehydrate flow.
+- Durable Lakebase state for promotions, audit, roles, rules, and access requests.
+- Persona-aware experiences for Authors, Stewards, Approvers, and Platform Admins.
+
+## How it works
 
 ```mermaid
 flowchart LR
-  author(["Author<br/>(business user)"])
-  steward(["Steward / Admin<br/>(distinct approver)"])
-
-  subgraph prod["Prod workspace — Databricks (durable control plane, ADR-0006)"]
-    fm[["Foundation Model endpoint<br/>databricks-claude-opus-4-8 (Claude)"]]
-    lakebase[("Lakebase · Postgres<br/>schema genie_promote — promotions, AccessSpecs,<br/>access requests, roles, rule overrides, audit")]
-    subgraph app["genie-promote-app — Databricks App (FastAPI + Svelte SPA, one origin)"]
-      spa["Svelte SPA<br/>(Meus Espaços / Acesso / Rehidratar / Admin / Config)"]
-      engine["Engine: app_logic + genie_reviewer<br/>+ authz.assert_can_access (the confused-deputy guard)"]
-    end
-    prodres[("Promoted Genie Space + dashboard<br/>prod_recebiveis — DABs resources")]
-  end
-
-  subgraph devws["Dev workspace(s) — Databricks (FEVM, ~7-day wipe)"]
-    genie[("Dev Genie Space(s)<br/>dev_recebiveis")]
-  end
-
-  devsp[["dev-reader/writer SP<br/>(standing, Genie-scoped only — ADR-0006)"]]
-
-  subgraph gh["GitHub — source of truth for verdicts"]
-    src[("src/genie/&lt;slug&gt;.serialized_space.json<br/>+ .title / .access.json / .mapping.json sidecars")]
-    pr["Promotion PR<br/>head: promote/&lt;slug&gt;"]
-    checks{{"pr-checks (branch-protected, per changed space)<br/>validate (prod): render+allowlist · bundle validate · GRANT-01 · EVAL-01 count · pytest<br/>eval-run (dev): eval-run pass-rate"}}
-    deploy{{"deploy.yml<br/>+ prod Environment gate<br/>+ apply_access (direct-to-principal)"}}
-  end
-
-  runner[["Self-hosted runner<br/>(workspaces enforce IP ACLs)"]]
-
-  author -->|"authors (native Genie UI)"| genie
-  author -->|"Solicitar promoção · Declarar acesso · Trazer de volta"| spa
-  spa --> engine
-  engine -->|"per-user, fail-closed ACL check (never cached)"| devsp
-  devsp -->|"list/export/rehydrate — reaches EVERY dev Space<br/>by platform necessity; gated by the check above"| genie
-  engine -->|"app SP — LLM review + REST eval-run"| fm
-  engine -->|"app SP — persist state + audit (OAuth, no static password)"| lakebase
-  engine -->|"bot 'genie-promote-bot' — open PR + comment ('Revisão #N')"| pr
-  pr --> src
-  pr ==>|triggers| checks
-  checks -.->|runs on| runner
-  steward -->|"approve PR review (merge gate)"| pr
-  pr ==>|"merge to main"| deploy
-  steward -->|"approve Environment gate (deploy)"| deploy
-  deploy -.->|runs on| runner
-  deploy ==>|"CI/CD SP — bundle deploy -t prod + apply_access"| prodres
-  engine <-->|"bot — poll status → reconcile"| pr
-  engine -.->|"cache status + append audit"| lakebase
+  author([Business Author]) -->|authors normally| dev[DEV Genie Space]
+  dev -->|select and review| app[Genie Promote App<br/>PROD control plane]
+  app --> review[Rules + LLM reviewer<br/>+ advisory KAs]
+  review -->|approved request| pr[Content repository PR]
+  engine[Engine repository<br/>this repo] -. pipeline logic .-> checks
+  pr --> checks[Render + ENV + GRANT<br/>+ EVAL + tests]
+  checks --> steward{Steward approval}
+  steward --> deploy[CI service principal]
+  deploy --> prod[Managed PROD Genie Space]
+  deploy --> access[Declared access]
+  app <--> lakebase[(Lakebase<br/>workflow state + audit)]
+  prod -. authorized rehydrate .-> app
+  app -. guarded DEV write .-> dev
 ```
 
-### Who acts as what (identities & auth)
+The user journey is deliberately simple:
 
-Every action runs as a **specific identity** — this is the security model, not just plumbing.
+1. **Author in DEV.** A business user creates and tests a Genie Space in the native Databricks UI.
+2. **Prepare the promotion.** In the app, the user selects the Space and can adjust its production
+   title, table mapping, and intended access.
+3. **Review before creating a PR.** The app verifies the caller, checks their live Space access,
+   runs deterministic rules, invokes the reviewer model, consults any in-scope Knowledge Assistants,
+   and runs the configured Genie evaluation.
+4. **Create a reviewed change.** A GitHub App writes the serialized Space and its sidecars to a
+   per-Space branch in the content repository and opens or updates a pull request.
+5. **Run authoritative gates.** GitHub Actions renders DEV references for PROD, rejects foreign
+   catalogs, checks grants and benchmarks, re-runs the DEV evaluation, and validates the bundle.
+6. **Separate approval from deployment.** A Steward approves the protected PROD Environment. A
+   dedicated CI service principal then deploys the Space and applies its declared access.
+7. **Keep the full history.** The app reflects GitHub status and stores workflow history and audit
+   facts in Lakebase. Authorized users can also rehydrate a PROD Space back into DEV.
 
-| Identity | Used for | How it authenticates |
-|---|---|---|
-| **Signed-in user (OBO)** | Authorization input ONLY, never the transport: the app resolves a **platform-verified identity** from the forwarded token (`authz.verify_identity`) and gates every dev-touching call on it (`authz.assert_can_access`) | `x-forwarded-access-token` injected by the Databricks Apps proxy, read **in-process**; verified against the workspace (`current_user.me()`), never trusted as-is |
-| **dev-reader/writer SP** (standing) | The actual TRANSPORT for every dev-side Genie call (list/export/rehydrate) — OBO cannot span workspaces once the app is prod-hosted (ADR-0006). Scoped to Genie APIs only; reaches *every* dev Space by platform necessity, which is exactly why `assert_can_access` gates it on the caller's verified identity first | Standing OAuth M2M creds in a Databricks secret scope (`APP_DEV_SP_SECRET_SCOPE`), re-assertable via `scripts/provision_dev_sp.sh` (self-heals workspace-local grants lost on a dev wipe) |
-| **App service principal** | The **LLM reviewer**, the REST eval-run gate, the prod-grant preview, the **GitHub bot** (reads the secret scope), **Lakebase writes** | App SP env auto-injected by the platform; Lakebase via short-lived **OAuth** (no static password) |
-| **GitHub App bot** (`genie-promote-bot`) | Opens/updates the promotion PR, posts the attributed review comment (`Revisão #N`), reads PR/CI/deploy status | App JWT → installation token; creds in a Databricks secret scope (app SP has READ). **Never approves.** |
-| **Steward / Admin** (a *distinct* human) | Approves the **PR review** (merge gate) **and** the **deploy Environment gate** on GitHub; in-app, approves self-service access requests and manages roles/rules — role is DB-backed (`roles_store`), env vars are only the bootstrap fallback for an empty store | GitHub identity for the two gates (`prevent_self_review` enforces requester ≠ approver); in-app identity from the platform-verified OBO email |
-| **CI/CD service principal (prod)** | `bundle validate` + GRANT-01 (baseline) in `pr-checks`, `bundle deploy -t prod` on merge, and `apply_access` (direct-to-principal UC grants + Space permissions for every declared AccessSpec principal) | OAuth M2M in the GitHub workflows; needs UC **MANAGE** on the domain catalog to grant *other* principals (workspace-admin alone does not imply this) |
+## What lives where
 
-### What's stored where
-
-GitHub is the **source of truth for verdicts**; Lakebase is a durable **index + audit log + status
-cache** over it (it never overrides a live GitHub read; ADR-0005).
-
-| GitHub (authoritative) | Lakebase / Postgres (index · audit · cache) |
+| Area | Responsibility |
 |---|---|
-| The promoted artifact: `src/genie/<slug>.serialized_space.json` (+ dashboard `.lvdash.json`), versioned | `promotions` — one row per PR (1:1): resource, requester, PR #, branch, `current_phase`, cached `live_status`, `terminal`, plus the requester-declared `access_spec`/`table_mapping` (echoed back for the Steward's review) |
-| A promotion's declared access (`<slug>.access.json`) and table de-para (`<slug>.mapping.json`) sidecars, and the prod title (`<slug>.title`) — all committed next to the artifact, per-space, so concurrent promotions never collide | `review_snapshots` — the reviewer's findings/gate/eval/timeline **at request time** (so recovery never re-runs the LLM); `rule_overrides` + `rule_audit_events` — admin-configured rule severities/custom rules (G2); `access_requests` + their audit events — the F3 self-service grant lifecycle; `roles` — Steward/Admin/Approver assignments (F5) |
-| The **PR**, its **checks**, the **PR-review** decision (merge gate), and — post-merge — the ACTUAL grant/permission mutation (`scripts/apply_access.py`, direct-to-principal, run by the prod SP) | `audit_events` — append-only, **GitHub-attributed** trail (requested → pr_opened → pr_review_approved → merged → deploy_approved → deployed/failed/rehydrated); `rehydrate_events` — standalone rows for a rehydrate with no linkable Promotion (most prod Spaces have none — the prod store starts empty, ADR-0006) |
+| **DEV workspace** | Native Genie authoring, benchmark questions, development data, and DEV evaluations. |
+| **PROD workspace** | The Databricks App, Lakebase, reviewer endpoints, managed PROD Spaces, and production data. |
+| **Engine repository** | This repository: app code, reviewer, policy checks, render logic, tests, and DABs configuration. |
+| **Content repository** | Serialized Genie Spaces, titles, mappings, declared access, dashboards, and the promotion workflows. |
+| **GitHub App** | Creates branches and PRs, posts review comments, and reads check/deployment status. It never approves. |
+| **Self-hosted runners** | Execute validation and deployment where workspace IP access policies require an allowlisted host. |
 
----
+## Roles and identities
 
-## The promotion lifecycle (end to end)
+The security model is easier to understand when humans and machine identities are kept separate.
 
-```mermaid
-sequenceDiagram
-  actor A as Author
-  participant App as genie-promote-app (in prod)
-  participant DevSP as dev-reader/writer SP
-  participant Dev as Dev workspace
-  participant FM as Claude FM endpoint
-  participant LB as Lakebase
-  participant Bot as GitHub App bot
-  participant GH as GitHub
-  participant R as Self-hosted runner
-  actor S as Steward
-  participant Prod as Prod workspace
+| Actor | What it does |
+|---|---|
+| **Author** | Authors a DEV Space and requests promotion. Needs `CAN_USE` on the app and access to their DEV Space. |
+| **Steward** | Reviews evidence and approves the GitHub PROD Environment. Cannot self-approve their own request. |
+| **Approver** | Reviews self-service access requests in the app. |
+| **Platform Admin** | Configures roles, rules, Knowledge Assistants, and operational access. |
+| **App service principal** | Runs the PROD-hosted app, queries reviewer endpoints, reads PROD state, and connects to Lakebase. |
+| **DEV reader/writer SP** | Transports cross-workspace Genie calls. Every call is gated against the verified human's live ACL. |
+| **CI service principal** | Validates and deploys the bundle, grants declared access, and gives the app access to deployed Spaces. |
 
-  A->>App: "Solicitar promoção" (OBO token)
-  App->>App: authz.verify_identity(token) -> platform-verified identity
-  App->>DevSP: assert_can_access(identity, space_id) — fail-closed, never cached
-  DevSP->>Dev: export space (only after the check above passes)
-  App->>App: pre-render dev_→prod_ + ENV-01 allowlist
-  App->>FM: LLM review (app SP)
-  FM-->>App: findings + severity gate
-  App->>DevSP: REST eval-run (create + poll genie_get_eval_run)
-  DevSP->>Dev: run benchmark questions
-  App->>LB: persist promotion + AccessSpec + table_mapping + snapshot + 'requested' (app SP)
-  App->>Bot: open/update PR + attributed comment ("Revisão #N")
-  Bot->>GH: PR on promote/<slug> (+ .access.json / .mapping.json / .title sidecars)
-  GH->>R: pr-checks (validate · GRANT-01 baseline · pytest)
-  R-->>GH: checks pass/fail
-  S->>GH: approve PR review (merge gate)
-  GH->>GH: merge to main
-  GH->>R: deploy.yml → prod Environment gate (waiting)
-  S->>GH: approve deploy gate
-  R->>Prod: CI/CD SP — bundle deploy -t prod
-  R->>Prod: apply_access.py — direct-to-principal UC grants + Space permissions
-  loop status poll (open panel) + scheduled reconciler
-    App->>Bot: get_status
-    Bot->>GH: read PR / checks / deploy
-    App->>LB: reconcile → append audit + refresh cache (app SP)
-  end
+The forwarded OBO token proves **who the caller is**. It is not used as a cross-workspace transport.
+For DEV operations, the app compares the platform-verified user and groups with the target Space's
+live ACL, fails closed on any error, and only then uses the DEV service principal. See the
+[threat model](docs/security/assert-can-access-threat-model.md) for the detailed reasoning.
+
+## Try it locally
+
+Local validation does not require a live Databricks workspace:
+
+```bash
+git clone https://github.com/malcolndandaro/genie-promote-cicd.git
+cd genie-promote-cicd
+
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt pytest
+python3 -m pytest tests/ -q
+
+cd web
+npm ci
+npm run check
+npm run build
 ```
 
-1. **Author** requests a promotion in the app. The app resolves a **platform-verified identity**
-   from the OBO token (`authz.verify_identity`) and gates the export with `assert_can_access`
-   *before* ever reaching dev — the actual transport is the standing **dev-reader/writer SP**
-   (OBO cannot span workspaces once the app is prod-hosted, ADR-0006). It then pre-renders
-   `dev_<domain>` → `prod_<domain>` and runs the deterministic **ENV-01** allowlist.
-2. The **reviewer agent** (LLM) scores it against the (admin-configurable, G2) handbook rules;
-   **GRANT-01** and **EVAL-01** are deterministic and own the gate verdict. GRANT-01 has **two
-   severities**: a missing grant on the *baseline* consumer group is a BLOCKER; a missing grant on
-   an author-*declared* `AccessSpec` principal is a non-blocking SUGGESTION, since `apply_access`
-   grants it at deploy anyway. A REST **eval-run** (`genie_create_eval_run`/`genie_get_eval_run`,
-   polled with a bounded wait budget) runs against the dev-sp transport; a below-threshold pass-rate
-   (`block`) becomes an **EVAL-RUN BLOCKER** that fails the app's gate, while an eval-run that can't
-   complete in time degrades to advisory — never a hard block on eval infra. In-scope **Knowledge
-   Assistant** endpoints (Assistente de Conhecimento) are also consulted here as ADDITIVE advisory
-   findings (never a BLOCKER, D5).
-3. The **bot** opens a real PR editing `src/genie/<slug>.serialized_space.json` (+ the declared
-   `.access.json`/`.mapping.json`/`.title` sidecars) and posts the attributed review comment
-   (`Revisão #N`, one per re-review — never edited in place); the app **persists** the promotion +
-   AccessSpec + snapshot + `requested` audit event to Lakebase.
-4. `pr-checks` (in the content repo `genie-spaces-content`, checking out this repo for the pipeline
-   logic) runs on the **self-hosted runner**, gating ONLY the spaces the PR changed (`git diff` vs
-   the PR base). Two required-check jobs enforce the merge under **branch protection** (both required,
-   strict, enforce_admins): `bundle validate (prod)` — as the prod SP: `bundle validate` + baseline
-   **GRANT-01** + **EVAL-01** (benchmark-count floor, `scripts/check_eval.py`) — and
-   **`eval-run pass-rate (dev)`** — as the dev-reader SP: the eval-run pass-rate gate
-   (`scripts/check_eval_run.py`), which blocks the merge on a below-threshold score.
-5. The **Steward/Admin** approves the **prod Environment gate** (deploy), distinct from the requester
-   (`prevent_self_review`) — the human SoD gate. (Branch protection requires the checks, not a PR
-   review, so the bot-opened PR doesn't need a separate human merge approval.)
-6. On merge, `deploy.yml` deploys the Genie Space + dashboard to prod as **DABs resources** via the
-   **CI/CD SP**, which then runs `apply_access.py`: every declared AccessSpec principal gets its UC
-   SELECT grant and Genie Space permission applied **directly** (no intermediate group — a
-   per-Space account-level group can't be created from a workspace context; see below).
-7. Throughout, the app **reconciles** live GitHub state into the Lakebase **audit trail + status
-   cache** — on every status read *and* via a scheduled reconciler, so the record is complete even
-   when no one is watching.
+This validates the Python engine, API contracts, Svelte types, and production frontend build. Live
+workspace, GitHub, model-serving, and Lakebase operations are intentionally exercised only after the
+deployment prerequisites below are configured.
 
-> The pipeline rebinds `dev_<domain>` → `prod_<domain>` at deploy because DABs `${var}` doesn't reach
-> inside the serialized space (see `docs/adr/0003`). Catalogs are workspace-isolated per environment.
+## Guided deployment
 
-## Where the reviewer agent runs
+The setup is easiest when completed in order. Finish the verification under each step before moving
+to the next one.
 
-**On Databricks — nothing leaves the platform.** The reviewer (`genie_reviewer/`) executes **inside
-the `genie-promote-app` Databricks App**, authenticating as the **app service principal**, and the
-LLM inference runs on a **Databricks Foundation Model serving endpoint** (`databricks-claude-opus-4-8`,
-Claude — configurable via `APP_LLM_ENDPOINT`). A standalone **MLflow `ResponsesAgent`**
-(`genie_reviewer/agent.py`) packages the same reviewer for independent Model Serving deployment. The
-**deterministic ENV-01 / GRANT-01 (baseline)** checks are re-run **authoritatively in CI** on the
-runner as the prod SP, so a soft or omitted LLM answer can never flip a broken space to "pass".
+### Before you begin
 
-The **eval-run** gate also runs for real from the app itself now (`genie_reviewer/eval_gate.py::
-run_eval_gate_rest`) — the typed Genie eval-run API (`genie_create_eval_run`/`genie_get_eval_run`),
-polled against the dev-sp transport with a bounded wait budget (`APP_EVAL_WAIT_SEC`, default ~45s).
-It NEVER blocks a review: no benchmark questions, an unreachable endpoint, or a run still going past
-the wait budget all degrade to the same advisory result the CLI-based `run_eval_gate` used to return
-unconditionally (that CLI path is kept only for local/script use — the Apps container has no
-`databricks` binary, which is why the app never ran a real eval-run before).
+Collect these values first:
 
----
-
-## Layout
-
-| Path | What |
+| Value | Example |
 |---|---|
-| `databricks.yml` | DABs bundle: dev/prod targets. **Prod** now hosts the `genie-promote-app` App + its **Lakebase** instance (ADR-0006), plus the `genie_spaces`/`dashboards` promotion resources (generated per-space, `build/resources.gen.yml`). **Dev** keeps only the `setup` seed job. |
-| `genie_reviewer/` | the reviewer agent — `review_core`, `handbook_rules`, `access_spec` (F2 declared-access model), `grant_check` (GRANT-01, two-class severity), `eval_gate` (`run_eval_gate_rest` — REST eval-run, W2), `fix_core`, `agent` (MLflow), `github_app` (the bot; PR comments, `Revisão #N`), `github_drift` (F5 read-only GitHub-gate drift), `promotion_comment`, `rules_config` (G2 effective-rules merge) |
-| `app/` | `app_logic.py` (the engine: cross-workspace `_client(scope=...)`, review, request_promotion, status), `authz.py` (A2 — `verify_identity` + the single fail-closed `assert_can_access` guard), `rehydrate.py` (A3/G6 — prod→dev, table de-para), `promotion_store.py` (Lakebase: promotions/snapshots/audit/rehydrate events), `access_request_store.py` (F3 self-service requests), `roles_store.py` (F5 DB-backed Steward/Admin/Approver roles), `rules_store.py` (G2 rule overrides), `admin_inventory.py` (F4 live-prod × Lakebase join), `reconcile.py` (GitHub→audit) |
-| `engine_api/` | the FastAPI app: JSON API (`/api/*`, OBO in-process) + serves the built Svelte SPA + the Lakebase startup migration + the scheduled reconciler |
-| `web/` | Svelte 5 + Vite SPA — **Início** (home) / **Meus Espaços** (promote) / **Minhas Promoções** (history + audit + shareable detail) / **Acesso** (F3 self-service requests + approval queue) / **Trazer de volta para o dev** (A3/G6 rehydrate + de-para) / **Administração** (F4 inventory, access-request queue, cross-promotion audit, dev exports) / **Configurações** (F5 roles, GitHub drift, G2 rules) |
-| `scripts/` | `pre_render.py`, `render.sh`, `build_promote_app.sh`, `deploy_dev.sh`, `provision_ci.sh`, `provision_dev_sp.sh` (A2 dev-SP self-heal bootstrap), `apply_access.py` (F2/G9 governed, direct-to-principal grant enforcement), `check_grants.py`, `verify_*.py` (incl. `verify_lakebase*.py`) |
-| `resources/`, `src/` | DABs resources, setup/seed job, the serialized_space + dashboard artifacts + per-space `.title`/`.access.json`/`.mapping.json` sidecars |
-| `.github/workflows/` | `pr-checks.yml` (validate + GRANT-01 baseline + tests on every PR) · `deploy.yml` (merge → prod, behind the Environment gate, runs `apply_access.py`) |
-| `tests/` | offline unit tests (engine, stores, reconcile, github bot/drift, engine API, rehydrate, access spec/requests, roles, rules; no live workspace/DB) |
-| `docs/adr/` | architecture decisions (ADR-0004: portable by construction; ADR-0005: Lakebase as index/audit over GitHub-as-truth; **ADR-0006: the app relocates to prod + reaches into dev via a standing dev-reader/writer SP, cross-workspace client factory**) |
-| `docs/security/` | `assert-can-access-threat-model.md` — the confused-deputy threat model the A2 guard closes |
+| Engine repository | `your-org/genie-promote-cicd` |
+| Content repository | `your-org/genie-spaces-content` |
+| DEV / PROD CLI profiles | `customer-dev` / `customer-prod` |
+| DEV / PROD workspace URLs | `https://...cloud.databricks.com` |
+| DEV / PROD SQL warehouse IDs | one warehouse in each workspace |
+| Domain and catalogs | `sales`, `dev_sales`, `prod_sales` |
+| Baseline consumer group | an account-level group visible to Unity Catalog |
+| Steward | a Databricks email and a distinct GitHub login |
+| Author group | the group that receives `CAN_USE` on the app |
 
-## Durable state (Lakebase)
+You also need:
 
-Promotions, review snapshots, and an append-only **audit trail** live in **Lakebase (Databricks
-Postgres)** — a durable index + audit log + status cache over GitHub-as-truth (it never overrides a
-live read; **reflect, never assert**). It is a **hard dependency** of the app (fails fast at startup
-if misconfigured), provisioned all-DABs (**prod target** — ADR-0006, since dev is wiped on a ~7-day
-cycle and durable governance state can't live there), config-driven (`lakebase_*` vars +
-`APP_LAKEBASE_SCHEMA`), and the app connects as its **SP via short-lived OAuth** — no static
-password. A reload **recovers** a promotion from its stored snapshot **without re-running the LLM**.
-See `SETUP.md` → *Lakebase* for the config knobs, the connectivity smoke, and the scheduled-reconciler
-design.
+- Databricks CLI `1.4.0` with authenticated DEV and PROD profiles.
+- Workspace/account administration rights for initial identity and permission setup.
+- GitHub CLI access to both repositories.
+- A self-hosted runner registered to each repository. The supplied workflows use
+  `runs-on: self-hosted`.
 
-## Governance console: app-in-prod, cross-workspace reach (ADR-0006)
+### Step 1 — Create the two repositories
 
-The app itself now runs **in the prod workspace** (a durable control plane) and reaches **into dev**
-for every Genie-API operation that must run there — exporting an authored Space at promotion time,
-listing an author's own Spaces, and rehydrating a promoted prod Space back into dev (A3/G6, live, not
-a future slice). Everything else is prod-local. Full rationale, the standing dev-reader/writer SP
-trust relationship, the considered 3rd-control-plane-workspace alternative, and the dev-Lakebase
-fresh-start decision are in **`docs/adr/0006-app-in-prod-cross-workspace-reach.md`**.
+Fork or copy both repositories into the GitHub owner that will operate the accelerator:
 
-- **Cross-workspace client factory** — `app/app_logic.py::_client(scope=...)` is the single tested
-  place target/credential selection lives: `scope="prod"` (default) behaves exactly as before (OBO /
-  local profile / app SP); `scope="dev-sp"` authenticates as the standing dev-reader/writer service
-  principal against `APP_DEV_HOST`, with credentials read from the `APP_DEV_SP_SECRET_SCOPE` secret
-  scope (never a bundle variable) and re-assertable at any time via `scripts/provision_dev_sp.sh`
-  (a **self-heal** bootstrap, since dev's workspace-local grants don't survive its periodic wipe —
-  the SP's account-level identity does).
-- **The confused-deputy guard is the real security boundary, not the SP's restraint** —
-  `app/authz.py::assert_can_access` is a fail-closed, never-cached, per-user ACL check run before
-  *every* dev-touching call (`list_spaces`/`export_serialized`/`review_space`/`rehydrate_space`): the
-  dev SP itself can reach every dev Space by platform necessity (Genie has no per-Space delegation),
-  so without this guard any authenticated app user could ask the app to read/overwrite ANY dev Space
-  via the SP's reach. See `docs/security/assert-can-access-threat-model.md` for the full threat model.
-- **Least privilege for Authors** — a business user needs **`CAN_USE` on the `genie-promote-app` App
-  resource only**, no broad prod catalog/schema grant (standard Apps OBO). Apply it per workspace
-  after deploy, e.g.:
-  `databricks apps update-permissions genie-promote-app -p <prod-profile> --json '{"access_control_list":[{"group_name":"<authors-group>","permission_level":"CAN_USE"}]}'`
-- **Prod Lakebase direct-access control** — only the app's own SP and the emails/SPs listed in the
-  `lakebase_direct_access_admins` bundle variable may connect to the prod Lakebase instance
-  *directly* (bypassing the app). This is separate from the app's in-app role-gating (Steward/Admin)
-  and is an incident-response escape hatch, not a workflow — see ADR-0006 §7 for the enforcement
-  mechanism and its current manual-step caveat.
+- **Engine:** `genie-promote-cicd`
+- **Content:** `genie-spaces-content`
 
-## Access & governance console (F2–F5, G1–G9)
+In both content-repository workflows, set `APP_REPO` to your engine repository. The app's
+`APP_GH_REPO` must point to your content repository.
 
-The app is a **governance console**, not just a one-way promote button. The Svelte SPA has a sidebar
-with seven screens:
+**Done when:** the content workflow can check out the engine repository.
 
-| Route | Screen | What |
-|---|---|---|
-| `#/inicio` | **Início** | business-user home: explainer, 3-step flow, "Meus espaços" + "Promoções recentes" |
-| `#/espacos` | **Meus Espaços** | pick a dev Space → declare access (`AccessSpecForm`) → review → request promotion |
-| `#/promocoes` (+ `#/promocoes/:id`) | **Minhas Promoções** | history (mine, or all — admin-gated) + a shareable promotion detail that recovers the stored snapshot **without re-running the LLM** |
-| `#/acesso` | **Acesso** | F3 self-service: "Solicitar acesso" (any user), "Minhas solicitações" (status), "Fila de aprovação" (admin-only, server-gated) |
-| `#/rehidratar` | **Trazer de volta para o dev** | A3/G6: pick ANY live prod Space (not only ones this app promoted), preview + edit the table de-para and the dev title, then create/overwrite in dev |
-| `#/admin` | **Administração** | F4, admin-only: live-prod × Lakebase inventory (drift: an untracked live Space, or a Promotion whose Space is gone), the access-request queue, cross-promotion audit, and "Exportações para dev" (the rehydrate history) |
-| `#/configuracoes` | **Configurações** | F5, admin-only: role assignments (Steward/Admin/Approver — DB-backed, `roles_store`), read-only GitHub-gate drift, and G2 rule overrides |
+### Step 2 — Replace the sample configuration
 
-Key mechanics behind those screens:
+Start with the smallest configuration and add optional features later.
 
-- **AccessSpec (F2) — declare vs. enforce, always split.** A Requester (or an approved F3 access
-  request) only ever **declares** access — Genie Space permissions (`CAN_RUN`/`CAN_VIEW`) and/or UC
-  `SELECT` grants — into a committed `<slug>.access.json` sidecar. The app **never** calls
-  `w.grants.update`/`w.permissions.update` itself; the actual mutation is **governed**:
-  `scripts/apply_access.py` runs in CI, as the prod SP, behind `pr-checks` + the Steward's deploy
-  gate. This split is why F2/F3 can never be an app-direct prod-mutation path.
-- **Direct-to-principal grants — no per-Space group.** `apply_access.py` grants each declared
-  principal **directly** (UC `SELECT`/`USE_CATALOG`/`USE_SCHEMA` + the Genie Space ACL entry), not
-  via an intermediate group. An earlier per-Space-group design failed live in prod:
-  `w.groups.create` from a workspace context creates a **workspace-local** group, and UC grants only
-  accept **account-level** principals (`NotFound: Could not find principal with name grp_genie_...`).
-  A declared GROUP that turns out to be workspace-local still gets its Genie Space permission (that
-  ACL *does* accept workspace-local groups) but its UC grant is **skipped with a loud warning**,
-  never silently dropped.
-- **GRANT-01 has two severities (G9).** A missing `SELECT` on the **baseline** consumer group (e.g.
-  `account users`) is a **BLOCKER** — the pipeline never grants the baseline for you. A missing grant
-  on an author-**declared** `AccessSpec` principal is a non-blocking **SUGGESTION** — `apply_access`
-  is going to grant it at deploy anyway, so blocking the PR on it would be contradictory. A declared
-  principal that could *never* be granted (a workspace-local group) gets its own advisory instead of
-  a promise the pipeline can't keep.
-- **Rehydrate + table de-para (A3/G6).** Bringing a prod Space back into dev is gated at **both**
-  blast sites with the same `assert_can_access` guard — the source (prod) read, and (on overwrite)
-  the target (dev) Space — so a caller can never clobber a dev Space they personally can't reach,
-  even though the standing dev SP could. An optional table de-para (source ref → desired dev ref) is
-  previewed read-only first (`preview_rehydrate`) and refused outright if a mapped target resolves
-  back to the prod catalog. The same de-para pattern promotes forward too (G7, `<slug>.mapping.json`
-  sidecar, applied by CI's `render.sh` — never by the app).
-- **Rules are admin-configurable (G2).** An admin can override severity/content on any of the 9
-  hardcoded handbook rules, or add a fully custom one, from **Configurações**. GRANT-01 stays
-  non-configurable (CI has no Lakebase access to read overrides); EVAL-01's benchmark-count floor is
-  the one deterministic exception with a tunable parameter (`min_benchmarks`).
-- **Check/deploy failures render in-app (G8).** The promotion pipeline view expands failed steps
-  inline (name, conclusion, summary, a "Ver log no GitHub ↗" link) instead of GitHub's generic
-  "Process completed with exit code 1." — both `check_grants.py`/GRANT-01 and `apply_access.py` emit
-  `::error::` workflow-command annotations so a failure reason survives into the check-run detail.
+| File | Values to review |
+|---|---|
+| `databricks.yml` | `domain`, `consumer_group`, `dev_host`, `dev_warehouse_id`, and Lakebase names. |
+| `scripts/provision_ci.sh` | PROD profile/host, CI SP name, PROD catalog, warehouse, and GitHub repository. |
+| `scripts/build_promote_app.sh` | Steward/Admin emails, content repo, domain, slug map, and optional KA seed. |
+| Content `.github/workflows/*.yml` | `APP_REPO` and any pinned `APP_SPACE_SLUGS`. |
 
-## Use it on your workspaces
+For a first deployment, use an empty slug map and no Knowledge Assistants:
 
-1. **Set your workspaces** — `DATABRICKS_HOST` (env) or a CLI profile per target; `warehouse_id` is a
-   DABs var (CI injects it via repo variables). Nothing else is workspace-pinned (ADR-0004).
-2. **Pre-create the domain catalogs** `dev_<domain>` / `prod_<domain>` (UI → Default Storage).
-3. **Go live (CI)** — see `SETUP.md` for the full bootstrap order (ADR-0006): `scripts/provision_ci.sh`
-   (CI/CD SP + **UC `MANAGE`** on the domain catalog + OAuth secret + repo vars + prod Environment),
-   the app + Lakebase deploy to `prod` (durable control plane, must come up **before** any governance
-   feature is usable), the GitHub App bot, and a **self-hosted runner** (workspaces with IP access
-   lists reject GitHub-hosted runners).
-4. **Bootstrap the dev-reader/writer SP** — `scripts/provision_dev_sp.sh` (a separate, later step:
-   unlocks the promotion export + rehydrate paths, not the app-in-prod milestone itself). Re-run it
-   after any dev workspace wipe — it's a self-heal, not a one-time script.
-5. **Run the tests** — `python3 -m pytest tests/ -q`.
+```text
+APP_SPACE_SLUGS={}
+APP_KA_SEED=[]
+```
 
-## Notes
-- The reviewer runs on a Databricks Foundation Model endpoint (Claude). Findings are in Portuguese (configurable).
-- Deterministic findings (GRANT-01, EVAL-01) own their gate verdict — the agent removes typing, not judgment;
-  GRANT-01 itself has two severities depending on whether the missing grant is on the baseline group or an
-  author-declared `AccessSpec` principal (see *Access & governance console* above).
-- The eval-run gate runs for real from the app (REST/SDK, `eval_gate.run_eval_gate_rest`), not only in CI —
-  it degrades to advisory, never a hard block, on no benchmarks / an unreachable endpoint / a wait-budget timeout.
-- Identities are config-driven (no hardcoded customer bindings); `recebiveis` is a *sample* domain.
+**Done when:** `rg 'malcolndandaro|cerc|recebiveis|01f[0-9a-f]+'` returns only examples you
+intentionally kept.
+
+### Step 3 — Prepare DEV and PROD
+
+1. Create `dev_<domain>` and `prod_<domain>` catalogs with managed storage.
+2. Create or select one SQL warehouse in each workspace.
+3. Confirm both CLI profiles can reach their workspace.
+
+```bash
+databricks current-user me -p <dev-profile>
+databricks current-user me -p <prod-profile>
+```
+
+**Done when:** both commands return the expected operator and both catalogs are visible.
+
+### Step 4 — Provision the PROD CI identity and GitHub variables
+
+After editing the configuration block in `scripts/provision_ci.sh`, run it for both repositories:
+
+```bash
+PROD_WAREHOUSE_ID=<prod-warehouse-id> STEWARD_GH=<steward-login> \
+  GH_REPO=<owner>/genie-promote-cicd bash scripts/provision_ci.sh
+
+PROD_WAREHOUSE_ID=<prod-warehouse-id> STEWARD_GH=<steward-login> \
+  GH_REPO=<owner>/genie-spaces-content bash scripts/provision_ci.sh
+```
+
+The script creates or reuses the CI service principal, grants its PROD catalog and warehouse access,
+sets GitHub variables/secrets, and configures the `prod` Environment reviewer.
+
+Set these DEV values on both repositories as well:
+
+```text
+DATABRICKS_DEV_HOST
+DATABRICKS_DEV_WAREHOUSE_ID
+```
+
+**Done when:** both repositories contain the five workspace variables and
+`DATABRICKS_PROD_SP_SECRET`; the content repository's `prod` Environment has a required reviewer and
+prevents self-review.
+
+> The CI identity currently needs PROD workspace-admin membership for the Databricks App ↔ Lakebase
+> binding, plus Unity Catalog `MANAGE` to grant access to other principals. Treat it as a deployment
+> identity and monitor it accordingly.
+
+### Step 5 — Register the runners and protect the content branch
+
+Register one self-hosted runner to each repository. The runner must be able to reach both Databricks
+workspace APIs.
+
+Protect the content repository's `main` branch with these required checks:
+
+```text
+bundle validate (prod)
+eval-run pass-rate (dev)
+```
+
+Enable strict checks and enforce them for administrators. Separation of duties is enforced by the
+content repository's protected `prod` Environment.
+
+**Done when:** both runners are online and a test content PR waits for both checks.
+
+### Step 6 — Deploy the PROD control plane
+
+Merge or push a harmless change to the content repository's `main` branch. Its deployment workflow
+checks out this engine, overlays the content, renders the bundle, builds the app, and pauses at the
+`prod` Environment.
+
+Approve the Environment deployment as the Steward. The first run creates:
+
+- the PROD Databricks App;
+- the Lakebase instance and app binding;
+- any content currently present in the content repository.
+
+**Done when:** `genie-promote-app` is running and Lakebase reports `AVAILABLE`.
+
+### Step 7 — Provision cross-workspace DEV access
+
+Run the self-healing DEV bootstrap from the engine repository:
+
+```bash
+DEV_PROFILE=<dev-profile> \
+DEV_CATALOG=dev_<domain> \
+DEV_WAREHOUSE_ID=<dev-warehouse-id> \
+DEV_SPACE_IDS=<comma-separated-existing-space-ids> \
+  bash scripts/provision_dev_sp.sh
+```
+
+Then complete the credential hand-off:
+
+1. Copy `dev_sp_client_id` and `dev_sp_client_secret` from the DEV `genie_promote` secret scope to
+   the scope with the same name in PROD.
+2. Grant the app service principal `READ` on the PROD scope.
+3. Set `DATABRICKS_DEV_SP_CLIENT_ID` and `DATABRICKS_DEV_SP_SECRET` on the content repository for the
+   live evaluation job.
+
+The exact secret-copy commands are in [SETUP.md](SETUP.md#dev-readerwriter-sp--bootstrap--secret-replication-a2-adr-0006).
+Re-run the bootstrap after a DEV workspace reset or when a new existing Space must be added.
+
+**Done when:** the app lists only DEV Spaces the signed-in user can access, and the content
+repository's DEV evaluation job authenticates successfully.
+
+### Step 8 — Connect the GitHub App
+
+Create a GitHub App with repository access to the **content repository**:
+
+- Contents: read/write
+- Pull requests: read/write
+- Issues: read/write
+- Actions and Deployments: read
+
+Generate a private key, install the App on the content repository, then run:
+
+```bash
+scripts/provision_github_app_secrets.sh \
+  <github-app-id> <path-to-private-key.pem> <prod-profile> <owner>/genie-spaces-content
+```
+
+The helper discovers the installation ID, writes the three credentials to the PROD secret scope,
+grants the current app SP access, and verifies that an installation token can be minted.
+
+**Done when:** the helper's final verification succeeds and the app can open a test promotion PR.
+
+### Step 9 — Grant application access
+
+Resolve the app service principal, then grant it:
+
+- `CAN_USE` on the PROD SQL warehouse;
+- `USE_CATALOG` and `USE_SCHEMA` on `prod_<domain>`;
+- `CAN_QUERY` on any configured Knowledge Assistant endpoints.
+
+```bash
+APP_SP=$(databricks apps get genie-promote-app -p <prod-profile> -o json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["service_principal_client_id"])')
+
+databricks warehouses update-permissions <prod-warehouse-id> -p <prod-profile> --json \
+  "{\"access_control_list\":[{\"service_principal_name\":\"$APP_SP\",\"permission_level\":\"CAN_USE\"}]}"
+
+databricks grants update catalog prod_<domain> -p <prod-profile> --json \
+  "{\"changes\":[{\"principal\":\"$APP_SP\",\"add\":[\"USE_CATALOG\",\"USE_SCHEMA\"]}]}"
+```
+
+Grant the author group permission to use the App:
+
+```bash
+databricks apps update-permissions genie-promote-app -p <prod-profile> --json \
+  '{"access_control_list":[{"group_name":"<authors-group>","permission_level":"CAN_USE"}]}'
+```
+
+The deployment pipeline grants the app SP `CAN_MANAGE` on each deployed PROD Genie Space.
+
+**Done when:** an Author can open the app, see their DEV Spaces, run a review, and request a
+promotion without direct PROD catalog access.
+
+### Step 10 — Run one end-to-end promotion
+
+Use a DEV Space with at least two benchmark questions:
+
+1. Request promotion in the app.
+2. Confirm the content PR contains the serialized Space and expected sidecars.
+3. Confirm both required checks pass.
+4. Merge the PR and approve the PROD Environment deployment.
+5. Confirm the PROD Space exists, declared access was applied, and the app shows the completed audit
+   timeline.
+
+Your installation is ready when that flow succeeds without using a human token for deployment.
+
+## Quality and governance model
+
+| Control | Behavior |
+|---|---|
+| **ENV-01** | Blocks references outside the target environment/domain allowlist. |
+| **GRANT-01** | Blocks a missing baseline consumer grant; declared grants remain advisory because the pipeline applies them. |
+| **EVAL-01** | Requires a configurable minimum number of benchmark questions. |
+| **Live eval-run** | Re-runs DEV benchmarks and blocks the content PR below the configured pass-rate. |
+| **LLM reviewer** | Produces structured findings from a protected prompt core and editable reviewer persona. |
+| **Knowledge Assistants** | Add grounded, cited advice. They are advisory-only and cannot block promotion. |
+| **PROD Environment** | Requires a distinct human approval before the deployment identity can mutate PROD. |
+
+## Repository tour
+
+| Path | Purpose |
+|---|---|
+| `engine_api/` | FastAPI routes, OBO boundary, startup migrations, and scheduled reconciliation. |
+| `web/` | Svelte application and persona-aware user experience. |
+| `app/` | Promotion, authorization, rehydrate, roles, rules, access requests, audit, and Lakebase stores. |
+| `genie_reviewer/` | Reviewer prompt, rules, evaluation, grant checks, GitHub App client, and MLflow agent wrapper. |
+| `scripts/` | Render, validate, build, provision, deploy, and post-deploy access helpers. |
+| `databricks.yml` | Portable DABs targets for the PROD control plane and DEV setup job. |
+| `docs/adr/` | Architectural decisions and trade-offs. |
+| `docs/security/` | Authorization threat model. |
+| `tests/` | Offline engine and API tests. |
+
+## Deeper reading
+
+- [Detailed operator notes](SETUP.md)
+- [ADR-0001: GitHub Actions as the CI engine](docs/adr/0001-github-actions-as-ci-engine.md)
+- [ADR-0003: pre-rendering serialized Genie Spaces](docs/adr/0003-prerender-serialized-space.md)
+- [ADR-0004: portable by construction](docs/adr/0004-portable-by-construction.md)
+- [ADR-0005: Lakebase state and audit](docs/adr/0005-lakebase-index-audit-over-github.md)
+- [ADR-0006: PROD-hosted control plane and cross-workspace reach](docs/adr/0006-app-in-prod-cross-workspace-reach.md)
+- [Authorization threat model](docs/security/assert-can-access-threat-model.md)
+
+## Contributing
+
+Keep changes in the repository that owns them:
+
+- Application, reviewer, policy, setup, or pipeline logic → this engine repository.
+- Serialized Genie Spaces, dashboards, seed data, and promotion workflows → the content repository.
+
+Before opening a PR:
+
+```bash
+python3 -m pytest tests/ -q
+bash scripts/render.sh prod
+mkdir -p build/promote_app
+databricks bundle validate -t prod --var warehouse_id=<prod-warehouse-id>
+
+cd web
+npm ci
+npm run check
+```
+
+The engine repository's CI validates engine deployability. Promotion gates and governed deployment
+run in the content repository.
