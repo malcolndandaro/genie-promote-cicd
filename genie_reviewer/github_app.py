@@ -389,18 +389,29 @@ class GitHubApp:
 
     def _deploy_status(self, merge_sha: str | None = None) -> dict:
         """THIS promotion's `deploy` run + whether its gate is waiting. Correlated to the PR's
-        merge commit so a concurrent/unrelated push to base can't be mistaken for our deploy;
-        falls back to the latest `deploy` run only when no merge-sha match is found."""
+        merge commit so a concurrent/unrelated push to base can't be mistaken for our deploy.
+
+        When a `merge_sha` is known (the PR is merged) but NO deploy run matches it yet, report NO
+        deploy (phase stays `merged`) instead of falling back to the latest run: right after a merge
+        there is a window where GitHub hasn't created THIS promotion's deploy run yet (webhook +
+        self-hosted-runner pickup latency), and the most-recent deploy run on `base` is a PRIOR
+        promotion's completed+success run — falling back to it made `_derive_phase` read `deployed`
+        (all steps green, "Implantado em produção") seconds before this promotion's gate even
+        appeared, then correct back down to `awaiting_approval`. Worse, a poll in that window let
+        `reconcile` persist a false terminal `deployed` + audit event. The latest-run fallback is
+        kept ONLY for the no-merge-sha case (defensive; also what the legacy merged-PR tests exercise)."""
         _, runs = self._api(
             "GET", self._repo_path(f"/actions/runs?branch={self.base}&event=push&per_page=20"),
             "actions runs")
         deploys = [r for r in (runs or {}).get("workflow_runs", [])
                    if "/deploy.yml" in (r.get("path") or "") or r.get("name") == "deploy"]
-        wf = None
         if merge_sha:
             wf = next((r for r in deploys if r.get("head_sha") == merge_sha), None)
-        if wf is None:
-            wf = deploys[0] if deploys else None  # fallback: most recent deploy run
+            if wf is None:
+                # Our run hasn't materialized yet — do NOT borrow a prior cycle's run (see docstring).
+                return dict(_NO_DEPLOY)
+        else:
+            wf = deploys[0] if deploys else None  # no merge sha: latest-run fallback (defensive)
         if not wf:
             return dict(_NO_DEPLOY)
         status = wf.get("status")  # queued | in_progress | completed | waiting (gate pending)

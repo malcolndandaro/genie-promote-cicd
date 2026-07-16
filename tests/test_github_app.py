@@ -750,6 +750,22 @@ def test_deploy_run_matched_by_merge_commit_sha_not_just_latest():
     assert s["deploy"]["run_url"] == "mine" and s["phase"] == "awaiting_approval"
 
 
+def test_just_merged_window_does_not_borrow_a_prior_completed_deploy_run():
+    # The bug: right after merge, GitHub hasn't created THIS promotion's deploy run yet, so the only
+    # deploy run on `main` is a PRIOR promotion's completed+success one (different head_sha). The
+    # merge_sha match fails; we must NOT fall back to that stale run (which read as `deployed` — all
+    # steps green — before the gate even appeared). Phase must stay `merged` until our run shows.
+    pr = {"number": 1, "state": "closed", "merged": True, "head": {"sha": "s"},
+          "merge_commit_sha": "MINE", "html_url": "u"}
+    runs = [
+        {"name": "deploy", "status": "completed", "conclusion": "success", "html_url": "prior",
+         "id": 9, "head_sha": "OTHER"},
+    ]
+    s = _status_transport(pr, [{"status": "completed", "conclusion": "success"}], runs).get_status(1)
+    assert s["deploy"]["status"] == "none"
+    assert s["phase"] == "merged"  # NOT "deployed" — the stale run must not be borrowed
+
+
 def test_aggregate_checks_edges():
     from github_app import _aggregate_checks
     assert _aggregate_checks([]) == "none"
