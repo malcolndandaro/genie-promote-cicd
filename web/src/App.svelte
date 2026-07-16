@@ -2,16 +2,10 @@
   import AppShell from './lib/components/AppShell.svelte';
   import type { NavSection } from './lib/components/Sidebar.svelte';
   import Topbar from './lib/components/Topbar.svelte';
-  import Home from './screens/Home.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
   import PromotionDetail from './screens/PromotionDetail.svelte';
-  import AcessoEspacos from './screens/AcessoEspacos.svelte';
-  import FilaAprovacao from './screens/FilaAprovacao.svelte';
   import RevisaoPromocoes from './screens/RevisaoPromocoes.svelte';
-  import Rehidratar from './screens/Rehidratar.svelte';
-  import Admin from './screens/Admin.svelte';
   import Auditoria from './screens/Auditoria.svelte';
-  import AssistenteConhecimento from './screens/AssistenteConhecimento.svelte';
   import Settings from './screens/Settings.svelte';
   import { getWhoami, type PromotionSummary } from './lib/api';
   import { Promotion } from './lib/promotion.svelte';
@@ -48,35 +42,14 @@
   // the exact target — running recover there would race it and could surface the WRONG promotion.
   if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  // S2: persona-sectioned nav (PT1's winning Variant A — grouped sections, always expanded,
-  // union of capabilities per D1). Every section a caller's persona flags unlock is shown
-  // simultaneously; sections for personas they don't hold are simply absent, never an empty
-  // header. The real per-request gate is always server-side (every F4/F3/S-slice endpoint
-  // 403s on the VERIFIED identity regardless) — this is purely a UX affordance so a caller
-  // never sees an entry point to a screen that would just error for them.
-  //
-  // "Aprovações de acesso" (Approver) is shown for is_approver OR is_admin (S5's backend gate is
-  // a superset for backward compat — an existing admin-only deployment keeps this capability).
-  //
-  // S3: "Minhas promoções" is gone as a nav item — its history list merged into "Meus espaços"
-  // (D3). The `promocoes` route still exists for the `#/promocoes/:id` shareable deep-link
-  // (PromotionDetail), just with no nav entry pointing at it anymore.
+  // S7 pilot IA: one author surface, one Steward queue and two Admin surfaces. Promotion detail
+  // stays a shareable deep link but never becomes a fifth navigation entry. Server-side gates are
+  // still authoritative; this merely prevents retired demo surfaces from being discoverable.
   const NAV_SECTIONS: NavSection[] = $derived([
     {
       title: 'Meu trabalho',
-      items: [
-        { id: 'inicio', label: 'Início', icon: 'home' },
-        { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
-        { id: 'acesso', label: 'Acesso', icon: 'check-circle' },
-        { id: 'rehidratar', label: 'Exportar Prod → Dev', icon: 'download' },
-      ],
+      items: [{ id: 'espacos', label: 'Meus espaços', icon: 'grid' }],
     },
-    ...(who?.is_approver || who?.is_admin
-      ? [{
-          title: 'Aprovações de acesso',
-          items: [{ id: 'aprovacoes' as const, label: 'Fila de aprovação', icon: 'check-circle' as const }],
-        }]
-      : []),
     ...(who?.is_steward
       ? [{
           title: 'Revisão de promoções',
@@ -87,36 +60,20 @@
       ? [{
           title: 'Administração',
           items: [
-            { id: 'admin' as const, label: 'Administração', icon: 'shield' as const },
-            { id: 'auditoria' as const, label: 'Auditoria', icon: 'grid' as const },
-            { id: 'assistente-conhecimento' as const, label: 'Assistente de Conhecimento', icon: 'external' as const },
             { id: 'configuracoes' as const, label: 'Configurações', icon: 'settings' as const },
+            { id: 'auditoria' as const, label: 'Auditoria', icon: 'grid' as const },
           ],
         }]
       : []),
   ]);
 
   const SECTION_TITLE: Record<RouteId, string> = {
-    inicio: 'Início',
     espacos: 'Meus espaços',
     promocoes: 'Detalhe da promoção',
-    acesso: 'Acesso',
-    aprovacoes: 'Aprovações de acesso',
     revisao: 'Revisão de promoções',
-    rehidratar: 'Exportar Prod → Dev',
-    admin: 'Administração',
     auditoria: 'Auditoria',
-    'assistente-conhecimento': 'Assistente de Conhecimento',
     configuracoes: 'Configurações',
   };
-
-  // Choose a space (from Home or "Meus espaços") and land on the confirmation step there (G3):
-  // select() only — the panel bound to the chosen space (optional access declaration → "Confirmar
-  // promoção") is what actually fires requestPromotion().
-  function promoteSpace(resource: PromotableResource): void {
-    promotion.select(resource);
-    router.navigate('espacos');
-  }
 
   // Open a promotion's detail via its shareable deep-link (#/promocoes/:id) — the detail view loads
   // the STORED snapshot (no reviewer re-run).
@@ -130,13 +87,7 @@
     <Topbar title={SECTION_TITLE[router.route.id]} {who} {open} onToggle={toggle} />
   {/snippet}
 
-  {#if router.route.id === 'inicio'}
-    <Home
-      onPromote={promoteSpace}
-      onOpenPromotion={openPromotion}
-      promoting={promotion.phase === 'reviewing'}
-    />
-  {:else if router.route.id === 'espacos'}
+  {#if router.route.id === 'espacos'}
     <MeusEspacos
       {promotion}
       {who}
@@ -151,20 +102,10 @@
       detailId={router.route.param}
       onBack={() => router.navigate('espacos')}
     />
-  {:else if router.route.id === 'acesso'}
-    <AcessoEspacos />
-  {:else if router.route.id === 'aprovacoes'}
-    <FilaAprovacao />
   {:else if router.route.id === 'revisao'}
     <RevisaoPromocoes />
-  {:else if router.route.id === 'rehidratar'}
-    <Rehidratar devHost={who?.dev_host ?? null} />
-  {:else if router.route.id === 'admin'}
-    <Admin devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'auditoria'}
-    <Auditoria />
-  {:else if router.route.id === 'assistente-conhecimento'}
-    <AssistenteConhecimento />
+    <Auditoria devHost={who?.dev_host ?? null} />
   {:else if router.route.id === 'configuracoes'}
     <Settings />
   {/if}

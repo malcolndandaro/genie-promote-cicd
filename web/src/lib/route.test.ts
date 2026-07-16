@@ -14,16 +14,10 @@ describe('parseHash', () => {
   });
 
   it('parses each known top-level route', () => {
-    expect(parseHash('#/inicio')).toEqual({ id: 'inicio' });
     expect(parseHash('#/espacos')).toEqual({ id: 'espacos' });
     expect(parseHash('#/promocoes')).toEqual({ id: 'promocoes' });
-    expect(parseHash('#/acesso')).toEqual({ id: 'acesso' });
-    expect(parseHash('#/aprovacoes')).toEqual({ id: 'aprovacoes' });
     expect(parseHash('#/revisao')).toEqual({ id: 'revisao' });
-    expect(parseHash('#/rehidratar')).toEqual({ id: 'rehidratar' });
-    expect(parseHash('#/admin')).toEqual({ id: 'admin' });
     expect(parseHash('#/auditoria')).toEqual({ id: 'auditoria' });
-    expect(parseHash('#/assistente-conhecimento')).toEqual({ id: 'assistente-conhecimento' });
     expect(parseHash('#/configuracoes')).toEqual({ id: 'configuracoes' });
   });
 
@@ -37,18 +31,18 @@ describe('parseHash', () => {
 
   it('ignores stray params on routes that do not take one', () => {
     expect(parseHash('#/espacos/whatever')).toEqual({ id: 'espacos' });
-    expect(parseHash('#/inicio/x')).toEqual({ id: 'inicio' });
+    expect(parseHash('#/auditoria/x')).toEqual({ id: 'auditoria' });
   });
 
   it('tolerates a leading hash with or without the slash', () => {
-    expect(parseHash('#inicio')).toEqual({ id: 'inicio' });
-    expect(parseHash('#/inicio')).toEqual({ id: 'inicio' });
+    expect(parseHash('#espacos')).toEqual({ id: 'espacos' });
+    expect(parseHash('#/espacos')).toEqual({ id: 'espacos' });
   });
 });
 
 describe('formatHash', () => {
   it('formats top-level routes', () => {
-    expect(formatHash({ id: 'inicio' })).toBe('#/inicio');
+    expect(formatHash({ id: 'espacos' })).toBe('#/espacos');
     expect(formatHash({ id: 'promocoes' })).toBe('#/promocoes');
   });
 
@@ -63,17 +57,11 @@ describe('formatHash', () => {
 
 describe('round-trip', () => {
   const routes: Route[] = [
-    { id: 'inicio' },
     { id: 'espacos' },
     { id: 'promocoes' },
     { id: 'promocoes', param: 'p-9' },
-    { id: 'acesso' },
-    { id: 'aprovacoes' },
     { id: 'revisao' },
-    { id: 'rehidratar' },
-    { id: 'admin' },
     { id: 'auditoria' },
-    { id: 'assistente-conhecimento' },
     { id: 'configuracoes' },
   ];
   it('parseHash(formatHash(r)) === r for every route', () => {
@@ -86,6 +74,6 @@ describe('sameRoute', () => {
     expect(sameRoute({ id: 'promocoes' }, { id: 'promocoes' })).toBe(true);
     expect(sameRoute({ id: 'promocoes', param: 'a' }, { id: 'promocoes', param: 'a' })).toBe(true);
     expect(sameRoute({ id: 'promocoes', param: 'a' }, { id: 'promocoes', param: 'b' })).toBe(false);
-    expect(sameRoute({ id: 'inicio' }, { id: 'espacos' })).toBe(false);
+    expect(sameRoute({ id: 'auditoria' }, { id: 'espacos' })).toBe(false);
   });
 });

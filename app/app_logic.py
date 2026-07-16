@@ -61,10 +61,6 @@ GH_SECRET_SCOPE = os.environ.get("APP_GH_SECRET_SCOPE", "genie_promote")
 # keeps "receivables" so its existing file/PR/resource are preserved; otherwise the slug is derived
 # from the id (prefixed so it's a valid branch + DABs resource key).
 GH_PROMOTION_BRANCH_PREFIX = os.environ.get("APP_GH_PROMOTION_BRANCH_PREFIX", "promote")
-# F3: a distinct branch prefix for access-request grant PRs — separate from a space's own
-# promote/<slug> branch so an in-flight promotion and an in-flight access request on the SAME space
-# never collide on one branch/PR (each is independently reviewable + mergeable).
-GH_ACCESS_BRANCH_PREFIX = os.environ.get("APP_GH_ACCESS_BRANCH_PREFIX", "access")
 GH_GENIE_SRC_DIR = "src/genie"
 try:
     _SPACE_SLUGS = json.loads(os.environ.get("APP_SPACE_SLUGS") or "{}")
@@ -84,12 +80,6 @@ def space_slug(space_id: str) -> str:
 
 def branch_for(slug: str) -> str:
     return f"{GH_PROMOTION_BRANCH_PREFIX}/{slug}"
-
-
-def access_branch_for(slug: str) -> str:
-    """F3: the branch an approved access request's sidecar update PR opens on — distinct from
-    ``branch_for`` (a space's own promotion branch) so the two flows never collide."""
-    return f"{GH_ACCESS_BRANCH_PREFIX}/{slug}"
 
 
 def src_path_for(slug: str) -> str:
@@ -977,85 +967,3 @@ def promotion_status(number: int, profile: str | None = None, *, github: GitHubA
     (app SP) — no user token needed, the bot reads GitHub regardless of which user is viewing."""
     gh = github or _github_app(profile)
     return gh.get_status(number, approved_revisions=approved_revisions)
-
-
-# --- F3: self-service access requests — GOVERNED grant application ----------
-#
-# An APPROVED access request must land its grant through the SAME governed path F2 already proved
-# out (declare -> commit a sidecar -> bot PR -> scripts/apply_access.py runs the actual UC
-# grant/Space-permission mutation, as the prod SP, behind pr-checks + the Steward's deploy gate).
-# This module NEVER calls `w.grants`/`w.permissions` directly for an access request — doing so
-# would be an app-direct prod mutation, exactly what F2/F3 exist to avoid. The only novelty here
-# versus F2's promotion-time declaration is that the sidecar may ALREADY exist (from a prior
-# promotion or a prior granted request) and must be MERGED into, never overwritten — an approved
-# request should only ever ADD a principal, never silently drop one a promotion already declared.
-
-
-def _merge_access_spec(existing: "access_spec.AccessSpec", *, principal_email: str,
-                       want_space_permission: bool, space_permission_level: str,
-                       want_uc_select: bool) -> "access_spec.AccessSpec":
-    """Add ``principal_email`` to ``existing`` for whichever system(s) the request declared,
-    without dropping anything already there (F3 acceptance: approval only ever GROWS access, same
-    "never remove a declared principal" convention F2's own enforcement follows). Idempotent
-    on the principal: re-approving/re-applying the same request twice is a no-op diff."""
-    space_perms = list(existing.space_permissions)
-    if want_space_permission and not any(
-            sp.principal.name == principal_email and not sp.principal.is_group for sp in space_perms):
-        space_perms.append(access_spec.SpacePermission(
-            principal=access_spec.Principal(name=principal_email, is_group=False),
-            level=space_permission_level))
-    uc_principals = list(existing.uc_principals)
-    if want_uc_select and not any(
-            p.name == principal_email and not p.is_group for p in uc_principals):
-        uc_principals.append(access_spec.Principal(name=principal_email, is_group=False))
-    return access_spec.AccessSpec(space_permissions=tuple(space_perms), uc_principals=tuple(uc_principals))
-
-
-def apply_access_request(*, space_id: str, principal_email: str, want_space_permission: bool,
-                         space_permission_level: str, want_uc_select: bool,
-                         resource_title: str | None = None, approver_email: str | None = None,
-                         profile: str | None = None, github: GitHubApp | None = None) -> dict:
-    """F3: apply an APPROVED access request via the GOVERNED path — commit the requesting
-    principal into the target Space's ``<slug>.access.json`` sidecar (F2's declared-access model)
-    and open/update a bot PR, so the ACTUAL grant/Space-permission mutation happens ONLY via
-    ``scripts/apply_access.py`` in CI (behind pr-checks + the Steward's prod deploy gate) — never
-    here. This function is app-direct ONLY in the git-committing sense (same split F2 already
-    established between "declare" and "enforce"); it makes no `w.grants`/`w.permissions` call.
-
-    Reads the sidecar's CURRENT content off ``main`` (if any — a space may already have one from a
-    prior F2 promotion-time declaration, or a prior granted access request) and merges the new
-    principal in via ``_merge_access_spec`` so nothing already declared is dropped. Opens on its
-    OWN branch (``access_branch_for``, distinct from a promotion's ``branch_for``) so an in-flight
-    promotion and an in-flight access request on the same Space never collide.
-
-    Returns ``{pr: {number, url}, branch, access_spec}`` (the access_spec is the FULL merged
-    dict, for the caller to persist/echo back). Raises ``GitHubError`` on any GitHub failure —
-    callers must treat that as "approval recorded, application NOT yet done" (see
-    ``access_request_store.mark_apply_failed``), never as a silent success.
-    """
-    gh = github or _github_app(profile)
-    slug = space_slug(space_id)
-    path = access_path_for(slug)
-    branch = access_branch_for(slug)
-
-    current_raw = gh.get_file_content(path)  # None if no sidecar exists yet on main
-    current = access_spec.AccessSpec.from_dict(json.loads(current_raw)) if current_raw else access_spec.AccessSpec()
-    merged = _merge_access_spec(
-        current, principal_email=principal_email, want_space_permission=want_space_permission,
-        space_permission_level=space_permission_level, want_uc_select=want_uc_select)
-    content = json.dumps(merged.to_dict(), ensure_ascii=False, indent=2) + "\n"
-
-    safe_id = "".join(c for c in space_id if c.isalnum() or c in "-_")
-    who = approver_email or "um Steward"
-    pr = gh.open_or_update_promotion(
-        branch=branch, path=path, content=content,
-        title=f"Conceder acesso a {principal_email} em {resource_title or safe_id}",
-        body=(f"Solicitação de acesso self-service aprovada por **{who}**. Adiciona "
-              f"**{principal_email}** ao AccessSpec declarado do Espaço `{safe_id}` "
-              f"(`{path}`). A concessão real (permissão do Espaço / GRANT SELECT no UC) só é "
-              f"aplicada por `scripts/apply_access.py`, executado pelo pipeline de CI/CD como o "
-              f"service principal de produção, atrás do gate de deploy do Steward — este PR "
-              f"apenas declara o acesso; nenhuma mutação de produção acontece aqui."),
-    )
-    return {"pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch,
-            "access_spec": merged.to_dict()}

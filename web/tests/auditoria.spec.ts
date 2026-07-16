@@ -15,6 +15,7 @@ const EVENTS = [
 function routes(page, { isAdmin = true }: { isAdmin?: boolean } = {}) {
   page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: 'admin@databricks.com', steward: 'pedro@databricks.com', is_admin: isAdmin } }));
+  page.route('**/api/admin/rehydrate-events**', (r) => r.fulfill({ json: { events: [] } }));
 }
 
 test('a non-admin cannot reach the Auditoria section (no nav entry)', async ({ page }) => {

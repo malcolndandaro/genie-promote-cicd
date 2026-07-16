@@ -1,7 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-// S7a (app-ux-overhaul, D5/GR1): the KA endpoint registration admin screen — own nav item,
-// separate from Configurações' rules. Covers: admin-only nav, register global/scoped endpoints
+// The KA registry is embedded in the single Admin Configurações route. Covers registration,
 // (serving endpoint picked from a live list, never typed), list + toggle + remove.
 
 function routes(page, { isAdmin = true } = {}) {
@@ -11,12 +10,17 @@ function routes(page, { isAdmin = true } = {}) {
     r.fulfill({ json: { endpoints: [{ name: 'ka-handbook' }, { name: 'databricks-claude-opus-4-8' }] } }));
   page.route('**/api/spaces', (r) =>
     r.fulfill({ json: { spaces: [{ space_id: 's1', title: 'Recebíveis' }] } }));
+  page.route('**/api/admin/roles', (r) => r.fulfill({ json: { roles: [], bootstrap_env: { admins: [], stewards: [] } } }));
+  page.route('**/api/admin/drift', (r) => r.fulfill({ json: { has_drift: false, has_unknown: false, findings: [] } }));
+  page.route('**/api/admin/rules', (r) => r.fulfill({ json: { effective: [], overrides: [], hardcoded: [] } }));
+  page.route('**/api/admin/prompt-template', (r) => r.fulfill({ json: { effective_text: 'padrão', default_text: 'padrão', custom: null } }));
 }
 
-test('a non-admin sees no "Assistente de Conhecimento" nav entry', async ({ page }) => {
+test('there is no standalone KA entry; Configurações remains admin-only', async ({ page }) => {
   routes(page, { isAdmin: false });
   await page.goto('/');
   await expect(page.getByRole('link', { name: 'Assistente de Conhecimento' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Configurações' })).toHaveCount(0);
 });
 
 test('registers a GLOBAL endpoint, submitting the right body', async ({ page }) => {
@@ -32,7 +36,7 @@ test('registers a GLOBAL endpoint, submitting the right body', async ({ page }) 
       is_global: true, scope_space_ids: [], enabled: true, created_by: 'admin@x',
       created_at: '2026-07-14T00:00:00Z', updated_at: '2026-07-14T00:00:00Z' } } });
   });
-  await page.goto('/#/assistente-conhecimento');
+  await page.goto('/#/configuracoes');
 
   await page.getByLabel('Nome').fill('Handbook KA');
   await page.getByRole('combobox', { name: 'Serving endpoint' }).click();
@@ -49,7 +53,7 @@ test('registering a SCOPED endpoint requires at least one space', async ({ page 
   routes(page);
   page.route('**/api/admin/ka-endpoints', (route) =>
     route.request().method() === 'GET' ? route.fulfill({ json: { endpoints: [] } }) : route.fallback());
-  await page.goto('/#/assistente-conhecimento');
+  await page.goto('/#/configuracoes');
 
   await page.getByLabel('Nome').fill('Scoped KA');
   await page.getByRole('combobox', { name: 'Serving endpoint' }).click();
@@ -80,7 +84,7 @@ test('lists registered endpoints with scope + enabled state, and can toggle/remo
   });
   await page.route('**/api/admin/ka-endpoints/e1/delete', (route) => route.fulfill({ json: { ok: true } }));
 
-  await page.goto('/#/assistente-conhecimento');
+  await page.goto('/#/configuracoes');
   await expect(page.getByText('Handbook KA')).toBeVisible();
   await expect(page.getByText('Todos os espaços', { exact: true })).toBeVisible();
   await expect(page.getByText('Ativo', { exact: true })).toBeVisible();
@@ -95,6 +99,6 @@ test('an empty registry shows a clear message', async ({ page }) => {
   routes(page);
   page.route('**/api/admin/ka-endpoints', (route) =>
     route.request().method() === 'GET' ? route.fulfill({ json: { endpoints: [] } }) : route.fallback());
-  await page.goto('/#/assistente-conhecimento');
+  await page.goto('/#/configuracoes');
   await expect(page.getByText('Nenhum endpoint registrado ainda.')).toBeVisible();
 });

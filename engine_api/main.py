@@ -54,8 +54,6 @@ import app_logic  # noqa: E402  (MUST import before access_spec/github_app — i
 import access_spec as access_spec_mod  # noqa: E402  (F2 — declared-access model)
 import audience_spec as audience_spec_mod  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
-import access_request_store  # noqa: E402  (F3 — self-service access requests: store + audit)
-import admin_inventory  # noqa: E402  (F4 — live-prod-inventory join, pure/offline-testable)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
@@ -82,12 +80,7 @@ async def _lifespan(app: FastAPI):
     app.state.store = promotion_store.build_store_from_env()  # raises (fail-fast) if Lakebase is down
     logger.info("Lakebase store: %s",
                 "initialized (migrations applied)" if app.state.store else "absent (no PGHOST — local/test)")
-    # F3: the access-request store — independent tables/pool, same hard-dependency contract (fails
-    # fast + loud if PGHOST is set but unreachable; None locally/offline with no PGHOST).
-    app.state.access_store = access_request_store.build_store_from_env()
-    logger.info("Access-request store: %s",
-                "initialized (migrations applied)" if app.state.access_store else "absent (no PGHOST — local/test)")
-    # F5: the roles store — Steward/Admin/approver + email<->GitHub-username mapping, same
+    # The roles store — Steward/Admin + email<->GitHub-username mapping, same
     # hard-dependency contract. `whoami`/`_is_admin` read it with the env vars as a bootstrap
     # fallback (see `_admin_emails`/`_steward_emails` below) so a fresh install with an empty store
     # keeps working exactly as before F5.
@@ -146,8 +139,6 @@ async def _lifespan(app: FastAPI):
                 pass
         if app.state.store is not None:
             app.state.store.close()  # release the connection pool on graceful shutdown
-        if app.state.access_store is not None:
-            app.state.access_store.close()
         if app.state.roles_store is not None:
             app.state.roles_store.close()
         if app.state.rules_store is not None:
@@ -199,7 +190,6 @@ def _start_scheduled_reconciler(store):
 app = FastAPI(title="genie-promote app", lifespan=_lifespan)
 # Default so requests before/without lifespan (e.g. module-level TestClient) see a defined attribute.
 app.state.store = None
-app.state.access_store = None  # F3
 app.state.roles_store = None  # F5
 app.state.rules_store = None  # G2
 app.state.ka_endpoints_store = None  # S7a
@@ -241,15 +231,6 @@ def _engine_call(label: str, fn: Callable):
         # from a 403: the caller isn't denied, the dev environment needs a re-bootstrap.
         logger.warning("dev environment not bootstrapped in %s (%s)", label, e)
         raise HTTPException(status_code=503, detail=str(e))
-    except access_request_store.SelfApprovalError as e:
-        # F3 SoD: a caller tried to approve/deny their own access request — server-enforced,
-        # never just a UI affordance. A plain 403, distinct from authz.AccessDenied (that's about
-        # RESOURCE access; this is about WHO may decide on THIS request).
-        logger.info("self-approval rejected in %s (%s)", label, e)
-        raise HTTPException(status_code=403, detail=str(e))
-    except access_request_store.InvalidTransition as e:
-        logger.info("invalid access-request transition in %s (%s)", label, e)
-        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         # A deterministic, caller-input refusal (e.g. rehydrate's reverse-allowlist leak or a G6
         # table_mapping override pointing back at the prod catalog) is the CALLER's problem to fix,
@@ -318,15 +299,12 @@ def _admin_emails() -> frozenset[str]:
     gated endpoints — lowercased. F5: the roles store is authoritative (unioning its `admin` +
     `steward` role rows) once it holds ANY role rows at all; `APP_ADMINS` + `APP_STEWARDS` +
     `APP_STEWARD` (comma-separated) is the BOOTSTRAP FALLBACK for a fresh/unconfigured store — so
-    an existing env-only deployment keeps working unchanged, and changing an approver in-app takes
+    an existing env-only deployment keeps working unchanged, and changing a role in-app takes
     effect with NO redeploy once at least one role has been configured. Fails closed either way: an
     empty store AND empty/unset env vars yields an EMPTY set (`roles_store.effective_emails`'s own
     contract), never "everyone" and never a silently-open gate. NO hardcoded identities (ADR-0004).
 
-    Deliberately does NOT union in `approver` (S1/D1 of the app-ux-overhaul persona model):
-    Approver is a distinct persona gating access-request approval specifically, not blanket
-    admin-console/cross-promotion power — folding it in here would silently re-collapse the two
-    personas the wayfinder map explicitly decided to keep separate."""
+    The pilot role model contains only Steward and Admin."""
     store = _roles_store()
     env_fallback = _env_emails("APP_ADMINS", "APP_STEWARDS", "APP_STEWARD")
     if store is None:
@@ -334,20 +312,6 @@ def _admin_emails() -> frozenset[str]:
     admins = store.effective_emails("admin", env_fallback=env_fallback)
     stewards = store.effective_emails("steward", env_fallback=env_fallback)
     return admins | stewards
-
-
-def _approver_emails() -> frozenset[str]:
-    """The effective set of Approver emails (S1: the app-ux-overhaul persona model) — gates
-    access-request approval specifically (F3's `decide` endpoint, wired in a later slice), never
-    the broader admin surface `_admin_emails` gates. Same store-over-env precedence as
-    `_steward_emails`/`_admin_emails`: the roles store is authoritative once it holds ANY role
-    rows at all; `APP_APPROVERS` (comma-separated) is the bootstrap fallback for a fresh/
-    unconfigured store. Fails closed: empty store AND empty/unset env yields an EMPTY set."""
-    store = _roles_store()
-    env_fallback = _env_emails("APP_APPROVERS")
-    if store is None:
-        return env_fallback
-    return store.effective_emails("approver", env_fallback=env_fallback)
 
 
 def _verified_email(x_forwarded_access_token: str | None, authorization: str | None) -> str | None:
@@ -386,13 +350,6 @@ def _is_steward(email: str | None) -> bool:
     email for the SV4 self-review UI). A caller can hold Steward alongside other personas
     (union of capabilities, D1) — this is additive, never exclusive."""
     return bool(email) and email.strip().lower() in _steward_emails()
-
-
-def _is_approver(email: str | None) -> bool:
-    """Whether the VERIFIED caller holds the Approver persona (S1) — gates access-request
-    approval specifically (a later slice wires this into F3's `decide` endpoint), never the
-    broader admin surface. Additive: a caller can hold Approver alongside Steward/Admin/neither."""
-    return bool(email) and email.strip().lower() in _approver_emails()
 
 
 def _steward_display() -> str | None:
@@ -440,9 +397,8 @@ def whoami(
     match `dev_host`'s bare-URL shape; exposed purely so the SPA can build an "Abrir Genie em
     produção" deep-link once a promotion reaches `deployed` (see `_with_prod_space_id`).
 
-    `is_steward`/`is_approver` (S1, app-ux-overhaul persona model): whether the caller's OWN
-    verified identity holds those personas, additive to `is_admin` — a caller can hold any
-    combination (union of capabilities, D1), computed the exact same way as `is_admin` (the
+    `is_steward`: whether the caller's OWN verified identity holds that persona, additive to
+    `is_admin`, computed the exact same way as `is_admin` (the
     request's verified identity against a store-backed, fail-closed effective-email set, never
     the display-only `x-forwarded-email`). Business User isn't a stored role at all — every
     caller implicitly holds it, so there's no `is_business_user` flag to compute.
@@ -450,7 +406,7 @@ def whoami(
     verified = _verified_email(x_forwarded_access_token, authorization)
     return {"email": x_forwarded_email, "steward": _steward_display(),
             "is_admin": _is_admin(verified), "is_steward": _is_steward(verified),
-            "is_approver": _is_approver(verified), "repo_url": _repo_url(),
+            "repo_url": _repo_url(),
             "dev_host": os.environ.get("APP_DEV_HOST"),
             "prod_host": (Config().host or "").rstrip("/") or None}
 
@@ -501,12 +457,11 @@ def principals(
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """G1: users + groups of the workspace directory, for every principal picker in the app (F2
-    access declarations, F3 access requests, F5 role assignment) — the app must never accept a
+    """Users + groups of the workspace directory, for audience and role pickers — never accept a
     free-typed email/username as the SUBMITTED value; this is the one endpoint every such picker
     calls. Gated the same as `/spaces` (any authenticated OBO caller): directory listing isn't
     itself a security boundary here — the ACTION each picker feeds is separately gated (F2 is a
-    declaration applied only via the governed pipeline; F3/F5 require admin approval server-side).
+    declaration applied only via the governed pipeline; role changes require Admin server-side).
 
     TRANSPORT NOTE (found live): the SCIM read runs as the APP SP, not the caller's OBO token —
     the Apps-forwarded user token is DOWNSCOPED to the app's `user_api_scopes` (today only
@@ -971,196 +926,6 @@ def rehydrate(
     return _engine_call("rehydrate_space", _run)
 
 
-# --- F3: self-service access requests ---------------------------------------
-#
-# Request -> SoD-clean approval -> GOVERNED grant application (F2's sidecar->PR->apply_access.py
-# path, never an app-direct w.grants/w.permissions call) -> audit. Mirrors the promotion
-# endpoints' shape (persist via an injectable store; identity ALWAYS from the verified OBO token,
-# never a header) but uses its OWN store/tables (`access_request_store`) — see that module's
-# docstring for why it isn't folded into `promotion_store.audit_events`.
-
-
-def _require_access_store():
-    store = getattr(app.state, "access_store", None)
-    if store is None:
-        raise HTTPException(status_code=503, detail="Persistência (Lakebase) indisponível.")
-    return store
-
-
-def _access_request_summary(r) -> dict:
-    return {"id": r.id, "space_id": r.space_id, "space_title": r.space_title,
-            "requester_email": r.requester_email, "note": r.note,
-            "want_space_permission": r.want_space_permission,
-            "space_permission_level": r.space_permission_level, "want_uc_select": r.want_uc_select,
-            "state": r.state, "decided_by": r.decided_by, "decided_at": r.decided_at,
-            "decision_note": r.decision_note, "pr_number": r.pr_number, "pr_url": r.pr_url,
-            "created_at": r.created_at, "updated_at": r.updated_at}
-
-
-def _access_audit_event(e) -> dict:
-    return {"seq": e.seq, "event_type": e.event_type, "occurred_at": e.occurred_at,
-            "actor_email": e.actor_email, "detail": e.detail}
-
-
-class AccessRequestIn(BaseModel):
-    space_id: str
-    space_title: str | None = None
-    note: str | None = None
-    want_space_permission: bool = True
-    space_permission_level: str = "CAN_RUN"
-    want_uc_select: bool = False
-
-
-@api.post("/access-requests")
-def create_access_request(
-    body: AccessRequestIn,
-    x_forwarded_access_token: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """A user who lacks access to a prod Space requests it. The requester identity is the caller's
-    platform-VERIFIED identity (A2) — never a display header — so the SoD check on approval has a
-    trustworthy value to compare against."""
-    token = _user_token(x_forwarded_access_token, authorization)
-    if not token:
-        raise HTTPException(status_code=401, detail="user token required (OBO)")
-    store = _require_access_store()
-
-    def _run() -> dict:
-        identity = authz.verify_identity(token, host=Config().host)
-        req = store.create_request(
-            space_id=body.space_id, space_title=body.space_title,
-            requester_email=identity.user_name, note=body.note,
-            want_space_permission=body.want_space_permission,
-            space_permission_level=body.space_permission_level, want_uc_select=body.want_uc_select)
-        return {"request": _access_request_summary(req)}
-
-    return _engine_call("create_access_request", _run)
-
-
-@api.get("/access-requests")
-def list_access_requests(
-    scope: str = "mine",
-    x_forwarded_access_token: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """`scope=mine` (default): the caller's own requests, any state — their status view.
-    `scope=pending` (the approver queue): EVERY requester's `requested`-state requests — ROLE-GATED
-    to a configured Steward/Admin (verified identity), same gate as promotions' `scope=all` (LB5).
-    """
-    store = _require_access_store()
-    verified = _verified_email(x_forwarded_access_token, authorization)
-    if scope == "mine":
-        if verified is None:
-            requests = store.list_requests()  # local/offline (no OBO token) — pre-A2 ergonomics
-        else:
-            requests = store.list_requests(requester_email=verified)
-    elif scope == "pending":
-        # S1/S5 (app-ux-overhaul): gated on the real Approver persona now, not just is_admin — an
-        # Admin retains this too (superset, backward compatible with pre-S1 behavior), but a
-        # dedicated Approver no longer needs the broader admin-console surface to see this queue.
-        if not (_is_approver(verified) or _is_admin(verified)):
-            raise HTTPException(status_code=403,
-                                detail="Apenas Approvers/Admins veem a fila de aprovação.")
-        requests = store.list_requests(state="requested")
-    else:
-        raise HTTPException(status_code=400, detail="scope inválido; use 'mine' ou 'pending'")
-    return {"requests": [_access_request_summary(r) for r in requests]}
-
-
-def _visible_access_request_or_403(store, request_id: str, verified_email: str | None):
-    r = store.get_request(request_id)
-    if r is None:
-        raise HTTPException(status_code=404, detail="solicitação de acesso não encontrada")
-    if verified_email is None or _is_admin(verified_email) or (
-            r.requester_email.lower() == verified_email.lower()):
-        return r
-    raise HTTPException(status_code=403, detail="Sem permissão para esta solicitação.")
-
-
-@api.get("/access-requests/{request_id}")
-def get_access_request(
-    request_id: str,
-    x_forwarded_access_token: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """A single request + its append-only audit trail. Owner-or-admin only (A2)."""
-    store = _require_access_store()
-    verified = _verified_email(x_forwarded_access_token, authorization)
-    r = _visible_access_request_or_403(store, request_id, verified)
-    return {"request": _access_request_summary(r),
-            "audit": [_access_audit_event(e) for e in store.list_audit_events(request_id)]}
-
-
-class AccessDecisionIn(BaseModel):
-    approve: bool
-    note: str | None = None
-
-
-@api.post("/access-requests/{request_id}/decide")
-def decide_access_request(
-    request_id: str,
-    body: AccessDecisionIn,
-    x_forwarded_access_token: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """Approve or deny an access request. Approver authority is EXPLICIT: only a configured
-    Approver/Admin (by VERIFIED identity, A2) may decide at all — a random authenticated user
-    cannot self-serve their own approval by simply calling this endpoint. SoD is then enforced a
-    SECOND time, server-side, inside the store itself (`AccessRequestStore.decide`): the approver's
-    verified identity is compared against the REQUEST's OWN recorded `requester_email` (never a
-    client-supplied value) and a match raises `SelfApprovalError` -> 403 (mirrors
-    `prevent_self_review`; caught centrally in `_engine_call`).
-
-    On approval, the grant is applied via the GOVERNED path ONLY (F2's sidecar -> bot PR ->
-    `scripts/apply_access.py`, run by CI as the prod SP behind the Steward's deploy gate) — this
-    endpoint never calls `w.grants`/`w.permissions`. A failure opening the PR after the decision is
-    recorded is NOT silently swallowed: the request stays `approved` (not `applied`), an
-    `apply_failed` audit event captures the reason, and the HTTP call itself surfaces the error
-    (502/503 via `_engine_call`) so the Steward sees the grant did NOT land and can retry.
-    """
-    token = _user_token(x_forwarded_access_token, authorization)
-    if not token:
-        raise HTTPException(status_code=401, detail="user token required (OBO)")
-    store = _require_access_store()
-    # Resolved + role-checked BEFORE _engine_call (not inside `_run`): _engine_call's broad
-    # `except Exception` would otherwise catch this HTTPException and remap it to a generic 502,
-    # hiding the real 403 from the caller.
-    try:
-        identity = authz.verify_identity(token, host=Config().host)
-    except authz.AccessDenied:
-        raise HTTPException(status_code=401, detail="Sessão expirada — recarregue para reautenticar.")
-    # S1/S5 (app-ux-overhaul): gated on the real Approver persona, not just is_admin (superset —
-    # an Admin can still decide, same as before S1).
-    if not (_is_approver(identity.user_name) or _is_admin(identity.user_name)):
-        raise HTTPException(status_code=403,
-                            detail="Apenas Approvers/Admins aprovam ou negam solicitações de acesso.")
-    if store.get_request(request_id) is None:
-        raise HTTPException(status_code=404, detail="solicitação de acesso não encontrada")
-
-    def _run() -> dict:
-        req = store.decide(request_id, approve=body.approve, approver_email=identity.user_name,
-                           decision_note=body.note)
-        if not body.approve:
-            return {"request": _access_request_summary(req)}
-        # Approved -> apply via the governed path (sidecar -> bot PR). A failure here must NOT look
-        # like a silent success: record apply_failed and let the exception surface to the caller.
-        try:
-            applied = app_logic.apply_access_request(
-                space_id=req.space_id, principal_email=req.requester_email,
-                want_space_permission=req.want_space_permission,
-                space_permission_level=req.space_permission_level,
-                want_uc_select=req.want_uc_select, resource_title=req.space_title,
-                approver_email=identity.user_name)
-        except Exception as e:  # noqa: BLE001 — record the failure, then re-raise for _engine_call
-            store.mark_apply_failed(request_id, actor_email=identity.user_name, reason=str(e))
-            raise
-        req = store.mark_applied(request_id, actor_email=identity.user_name,
-                                 pr_number=applied["pr"]["number"], pr_url=applied["pr"]["url"])
-        return {"request": _access_request_summary(req), "pr": applied["pr"]}
-
-    return _engine_call("decide_access_request", _run)
-
-
 # --- LB3: durable history + recover-on-open (no reviewer re-run) ------------
 
 
@@ -1232,8 +997,7 @@ def list_promotions(
     yet merged) or `awaiting_approval` (the prod deploy gate). Excludes `checks_failed`
     (the requester's problem to fix, nothing for the Steward to do until it passes),
     `deploying` (gate already passed), and every terminal phase. Gated on `is_steward OR
-    is_admin` (S1's real Steward persona, superset with Admin for backward compat, mirroring
-    S5's Approver gate)."""
+    is_admin`."""
     store = _require_store()
     verified = _verified_email(x_forwarded_access_token, authorization)
     if scope == "mine":
@@ -1314,11 +1078,9 @@ def get_promotion_audit(
     return {"audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)]}
 
 
-# --- F4: admin console — live prod inventory + access-request queue + cross-Promotion audit -------
+# --- Admin governance: configuration + cross-Promotion audit -------------------------------------
 #
-# One source of truth over prod (US-27..31): all three surfaces are READ-ONLY aggregation over data
-# this app already owns (the Lakebase promotion + access-request stores) plus a live prod Genie read
-# — F4 never mutates prod or a grant itself. Every endpoint here is gated the SAME way: resolve the
+# Every endpoint here is gated the SAME way: resolve the
 # caller's PLATFORM-VERIFIED identity (`_verified_email`, never `x-forwarded-email`) and require
 # `_is_admin` on it, else 403 — server-side, so an admin-only surface can't be reached by simply
 # hiding a UI affordance.
@@ -1335,40 +1097,6 @@ def _require_admin(x_forwarded_access_token: str | None, authorization: str | No
     if not _is_admin(verified):
         raise HTTPException(status_code=403, detail="Apenas Stewards/Admins acessam o console de administração.")
     return verified
-
-
-@api.get("/admin/inventory")
-def admin_inventory_endpoint(
-    x_forwarded_access_token: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """US-27/US-30: every prod-deployed Genie Space (owner, declared access, current phase),
-    reflecting LIVE prod state — `app_logic.list_prod_spaces` is called fresh on this request (never
-    served from a cache), then joined against the Lakebase promotion index by `admin_inventory`. A
-    live Space with no matching Promotion still appears (owner/access/phase all null → the UI
-    renders "—"); a Promotion whose Space is no longer live is returned separately as
-    `orphaned_promotions`, never silently dropped or crashed on."""
-    _require_admin(x_forwarded_access_token, authorization)
-    store = _require_store()
-
-    def _run() -> dict:
-        return admin_inventory.load_inventory(app_logic.list_prod_spaces, store.list_promotions(None))
-
-    return _engine_call("admin_inventory", _run)
-
-
-@api.get("/admin/access-requests")
-def admin_access_requests(
-    x_forwarded_access_token: str | None = Header(default=None),
-    authorization: str | None = Header(default=None),
-) -> dict:
-    """US-28: every access request in ANY state (pending/approved/denied/applied), newest first, in
-    one place — reuses `AccessRequestStore.list_requests()` with no filters (already returns every
-    requester/every state; F3's `scope=pending` narrows to `requested`-only for the approver's
-    action queue, this is the admin's full-history view)."""
-    _require_admin(x_forwarded_access_token, authorization)
-    store = _require_access_store()
-    return {"requests": [_access_request_summary(r) for r in store.list_requests()]}
 
 
 def _parse_iso_dt(value: str | None, *, field: str) -> datetime | None:
@@ -1480,7 +1208,7 @@ def list_roles(
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """US-32/US-33: every configured role assignment (Steward/Admin/approver) + its GitHub-username
+    """Every configured role assignment (Steward/Admin) + its GitHub-username
     mapping. Admin-gated (A2-hardened verified identity, same as every other F4/F5 admin endpoint)."""
     _require_admin(x_forwarded_access_token, authorization)
     store = _require_roles_store()
@@ -1493,7 +1221,7 @@ def list_roles(
 
 class RoleAssignIn(BaseModel):
     email: str
-    role: str  # "steward" | "admin" | "approver"
+    role: str  # "steward" | "admin"
     github_username: str | None = None
 
 
@@ -1503,7 +1231,7 @@ def assign_role(
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """US-32: set who is Steward/Admin/approver, in-app, with NO redeploy. Idempotent upsert keyed
+    """Set who is Steward/Admin, in-app, with NO redeploy. Idempotent upsert keyed
     on (email, role) — re-assigning the same role just refreshes the GitHub-username mapping."""
     _require_admin(x_forwarded_access_token, authorization)
     store = _require_roles_store()

@@ -1,5 +1,5 @@
 <script lang="ts">
-  // F5 Phase 1 — Settings: configurable roles (Steward/Admin/approver, Lakebase-backed, no redeploy)
+  // Settings: configurable Steward/Admin roles (Lakebase-backed, no redeploy)
   // + the email<->GitHub-username mapping, plus the READ-ONLY GitHub drift panel (US-32..34). Every
   // call here hits a server endpoint gated on the A2-hardened VERIFIED identity — this screen is
   // only ever RENDERED for who?.is_admin (App.svelte), but the real gate is server-side.
@@ -14,6 +14,7 @@
   import Skeleton from '../lib/components/Skeleton.svelte';
   import DriftPanel from '../lib/components/DriftPanel.svelte';
   import Picker from '../lib/components/Picker.svelte';
+  import KaEndpointSettings from '../lib/components/KaEndpointSettings.svelte';
   import {
     getRoles,
     assignRole,
@@ -56,7 +57,6 @@
   const ROLE_LABEL: Record<RoleName, string> = {
     steward: 'Steward',
     admin: 'Admin',
-    approver: 'Aprovador',
   };
 
   // --- assign form -------------------------------------------------------------
@@ -352,7 +352,7 @@
 <div class="stack">
   <Card
     title="Papéis configurados"
-    subtitle="Quem é Steward, Admin ou Aprovador no app — mudanças aqui têm efeito imediato, sem redeploy."
+    subtitle="Quem é Steward ou Admin no app — mudanças aqui têm efeito imediato, sem redeploy."
   >
     {#snippet actions()}
       <button type="button" class="refresh" onclick={refresh}>Atualizar</button>
@@ -367,7 +367,6 @@
         <select class="field__input" bind:value={role}>
           <option value="steward">Steward</option>
           <option value="admin">Admin</option>
-          <option value="approver">Aprovador</option>
         </select>
       </label>
       <label class="field">
@@ -779,6 +778,8 @@
       <p class="error" role="alert">{errorText(err)}</p>
     {/await}
   </Card>
+
+  <KaEndpointSettings />
 </div>
 
 <style>

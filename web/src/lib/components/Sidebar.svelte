@@ -42,7 +42,7 @@
 </script>
 
 <aside id="sidebar-nav" class="sidebar" class:sidebar--open={mobileOpen} aria-label="Barra lateral">
-  <a class="brand" href={formatHash({ id: 'inicio' })} onclick={onNavigate}>
+  <a class="brand" href={formatHash({ id: 'espacos' })} onclick={onNavigate}>
     <span class="brand__mark" aria-hidden="true"></span>
     <span class="brand__name">{product}</span>
   </a>

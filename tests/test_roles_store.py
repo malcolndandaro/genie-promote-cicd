@@ -1,6 +1,6 @@
-"""Offline contract tests for roles_store (F5 Phase 1) — InMemoryBackend, NO live Lakebase.
+"""Offline contract tests for roles_store — InMemoryBackend, NO live Lakebase.
 
-Mirrors tests/test_access_request_store.py's conventions: asserts the store's external contract —
+Asserts the store's external contract —
 upsert-by-(email,role), idempotent revoke, the email<->GitHub-username mapping, and — the
 acceptance-criteria-bearing behavior — `effective_emails`'s store-over-env precedence, including
 the fail-closed "empty store AND empty env -> empty set" case.
@@ -111,18 +111,6 @@ def test_healthcheck_and_close_do_not_raise(store):
     store.close()
 
 
-def test_revoke_last_admin_steward_is_refused_when_store_nonempty(store):
-    # F5 review should-fix: revoking the last admin/steward while other rows remain would empty the
-    # admin-gate set (no env fallback for a non-empty store) -> lock everyone out. Refuse it.
-    from roles_store import LastAdminError
-    store.assign(email="pedro@acme.com", role="steward")
-    store.assign(email="ana@acme.com", role="approver")   # keeps the store non-empty after the revoke
-    with pytest.raises(LastAdminError):
-        store.revoke(email="pedro@acme.com", role="steward")
-    # still there — the revoke did not take effect
-    assert any(r.email == "pedro@acme.com" and r.role == "steward" for r in store.list_all())
-
-
 def test_revoke_admin_ok_when_a_replacement_admin_remains(store):
     store.assign(email="pedro@acme.com", role="steward")
     store.assign(email="malcoln@acme.com", role="admin")
@@ -140,8 +128,13 @@ def test_revoke_down_to_empty_store_is_allowed_env_fallback_applies(store):
     assert store.effective_emails("admin", env_fallback=frozenset({"boot@acme.com"})) == frozenset({"boot@acme.com"})
 
 
-def test_revoke_nonadmin_role_never_triggers_lockout_guard(store):
-    store.assign(email="pedro@acme.com", role="steward")
-    store.assign(email="ana@acme.com", role="approver")
-    store.revoke(email="ana@acme.com", role="approver")  # approver isn't an admin role -> always ok
-    assert any(r.role == "steward" for r in store.list_all())
+def test_migrate_removes_demo_approver_rows_idempotently():
+    backend = InMemoryBackend()
+    backend.upsert({
+        "id": "legacy", "email": "ana@acme.com", "role": "approver",
+        "github_username": None, "created_at": None, "updated_at": None,
+    })
+    store = RolesStore(backend)
+    store.migrate()
+    store.migrate()
+    assert store.list_all() == []

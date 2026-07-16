@@ -124,20 +124,6 @@ def test_admin_can_assign_list_and_revoke_a_role(monkeypatch, roles_store_fixtur
     assert [row["email"] for row in remaining] == ["admin@x"]
 
 
-def test_revoke_last_admin_returns_409_not_a_lockout(monkeypatch, roles_store_fixture):
-    # F5 review should-fix: removing the last admin/steward while the store stays non-empty would
-    # 403 EVERYONE out of the admin console (incl. this CRUD) — the endpoint refuses with 409.
-    _setup_admin(monkeypatch)
-    roles_store_fixture.assign(email="admin@x", role="admin")
-    roles_store_fixture.assign(email="ana@x", role="approver")  # keeps the store non-empty
-    r = client.post("/api/admin/roles/revoke", json={"email": "admin@x", "role": "admin"},
-                    headers=ADMIN_HEADERS)
-    assert r.status_code == 409
-    # the admin row survived -> the caller is NOT locked out
-    still = client.get("/api/admin/roles", headers=ADMIN_HEADERS).json()["roles"]
-    assert any(row["email"] == "admin@x" and row["role"] == "admin" for row in still)
-
-
 def test_assign_role_rejects_unknown_role(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
     r = client.post("/api/admin/roles", json={"email": "x@y", "role": "superuser"},
@@ -169,7 +155,7 @@ def test_is_admin_falls_back_to_env_when_store_empty(monkeypatch, roles_store_fi
 
 def test_is_admin_reads_the_store_once_configured_no_redeploy_needed(monkeypatch, roles_store_fixture):
     # APP_ADMINS names a DIFFERENT admin; once the store holds a role, it is authoritative — the
-    # acceptance criterion "changing an approver needs no redeploy".
+    # acceptance criterion "changing an admin needs no redeploy".
     monkeypatch.setenv("APP_ADMINS", "old-admin@x")
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_STEWARD", raising=False)
@@ -222,9 +208,7 @@ def test_role_gated_endpoints_still_work_when_roles_store_absent(monkeypatch):
     assert r.json()["is_admin"] is True
 
 
-# --- whoami / is_steward, is_approver: S1 persona model (app-ux-overhaul) -----------------------
-# Same store-over-env precedence + fail-closed contract as is_admin, verified independently per
-# persona, plus the union-of-capabilities case (D1: a caller can hold several personas at once).
+# --- whoami / is_steward: three-actor pilot capability model ------------------------------------
 
 
 def test_is_steward_falls_back_to_env_when_store_empty(monkeypatch, roles_store_fixture):
@@ -252,91 +236,29 @@ def test_is_steward_reads_the_store_once_configured(monkeypatch, roles_store_fix
     assert old.json()["is_steward"] is False  # env is not even set here — store is authoritative
 
 
-def test_is_approver_falls_back_to_env_when_store_empty(monkeypatch, roles_store_fixture):
-    monkeypatch.setenv("APP_APPROVERS", "approver@x")
-    monkeypatch.delenv("APP_ADMINS", raising=False)
+def test_is_steward_fails_closed_and_whoami_has_no_retired_approver_flag(monkeypatch, roles_store_fixture):
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_STEWARD", raising=False)
-    _verify_as(monkeypatch, {"tok-approver": "approver@x"})
-    r = client.get("/api/whoami",
-                   headers={"x-forwarded-access-token": "tok-approver", "x-forwarded-email": "approver@x"})
-    assert r.json()["is_approver"] is True
-
-
-def test_is_approver_reads_the_store_once_configured(monkeypatch, roles_store_fixture):
-    monkeypatch.delenv("APP_APPROVERS", raising=False)
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    _verify_as(monkeypatch, {"tok-approver": "approver@x"})
-    roles_store_fixture.assign(email="approver@x", role="approver")
-    r = client.get("/api/whoami",
-                   headers={"x-forwarded-access-token": "tok-approver", "x-forwarded-email": "approver@x"})
-    assert r.json()["is_approver"] is True
-
-
-def test_is_steward_and_is_approver_fail_closed_when_store_and_env_both_empty(monkeypatch, roles_store_fixture):
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    monkeypatch.delenv("APP_APPROVERS", raising=False)
     monkeypatch.delenv("APP_ADMINS", raising=False)
     _verify_as(monkeypatch, {"tok-a": "a@x"})
     r = client.get("/api/whoami", headers={"x-forwarded-access-token": "tok-a", "x-forwarded-email": "a@x"})
-    assert r.json()["is_steward"] is False  # never "everyone" — fail closed
-    assert r.json()["is_approver"] is False
-
-
-def test_approver_is_not_folded_into_admin_gate(monkeypatch, roles_store_fixture):
-    # D1: Approver is a DISTINCT persona — holding it must NOT grant the broader admin-console
-    # surface `_admin_emails`/`is_admin` gates.
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    _verify_as(monkeypatch, {"tok-approver": "approver-only@x"})
-    roles_store_fixture.assign(email="approver-only@x", role="approver")
-    r = client.get("/api/whoami",
-                   headers={"x-forwarded-access-token": "tok-approver", "x-forwarded-email": "approver-only@x"})
-    assert r.json()["is_approver"] is True
-    assert r.json()["is_admin"] is False
+    assert r.json()["is_steward"] is False
+    assert "is_approver" not in r.json()
 
 
 def test_a_caller_can_hold_multiple_personas_at_once(monkeypatch, roles_store_fixture):
-    # D1: union of capabilities — an Admin who is also an Approver sees BOTH flags true, and
-    # holding Approver doesn't add Steward (each flag is independent). Deliberately NOT using
-    # Steward here: `_admin_emails` has always unioned in `steward` (pre-existing, unchanged
-    # behavior — see `test_approver_is_not_folded_into_admin_gate` for the one role that must
-    # NOT leak into `is_admin`).
+    # An Admin can also be the Steward; both capabilities are reflected without a third role.
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_STEWARD", raising=False)
-    monkeypatch.delenv("APP_APPROVERS", raising=False)
     _verify_as(monkeypatch, {"tok-multi": "multi@x"})
     roles_store_fixture.assign(email="multi@x", role="admin")
-    roles_store_fixture.assign(email="multi@x", role="approver")
+    roles_store_fixture.assign(email="multi@x", role="steward")
     r = client.get("/api/whoami",
                    headers={"x-forwarded-access-token": "tok-multi", "x-forwarded-email": "multi@x"})
     body = r.json()
     assert body["is_admin"] is True
-    assert body["is_approver"] is True
-    assert body["is_steward"] is False  # holding two personas doesn't imply a third
-
-
-def test_a_caller_can_hold_all_three_extra_roles_at_once(monkeypatch, roles_store_fixture):
-    # D1: the full union — steward + admin + approver all assigned to the same person.
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    monkeypatch.delenv("APP_APPROVERS", raising=False)
-    _verify_as(monkeypatch, {"tok-all": "all@x"})
-    roles_store_fixture.assign(email="all@x", role="steward")
-    roles_store_fixture.assign(email="all@x", role="admin")
-    roles_store_fixture.assign(email="all@x", role="approver")
-    r = client.get("/api/whoami",
-                   headers={"x-forwarded-access-token": "tok-all", "x-forwarded-email": "all@x"})
-    body = r.json()
     assert body["is_steward"] is True
-    assert body["is_admin"] is True
-    assert body["is_approver"] is True
 
 
 # --- GitHub drift detection: read-only, graceful degradation ------------------------------------

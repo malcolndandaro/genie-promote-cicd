@@ -3,18 +3,13 @@
  * Kept identical to the engine API so the Svelte client is a faithful port of the AppKit app.
  */
 
-/** Who the platform forwarded (OBO) + the configured Steward (SoD) + whether the caller is an
- * Admin/Steward (drives the LB5 history `scope=all` toggle; the server re-checks the role). */
+/** Who the platform forwarded (OBO) + the configured Steward (SoD) + caller capabilities. */
 export interface Whoami {
   email: string | null;
   steward: string | null;
   is_admin: boolean;
-  /** S1 (app-ux-overhaul persona model): whether the verified caller holds the Steward persona.
-   * Additive to `is_admin`/`is_approver` — a caller can hold several personas at once. */
+  /** Whether the verified caller holds the Steward persona. */
   is_steward: boolean;
-  /** S1: whether the verified caller holds the Approver persona (access-request approval,
-   * distinct from `is_admin`'s broader admin-console gate). */
-  is_approver: boolean;
   /** The source/CI repo the header's GitHub link points to (config-driven; the SPA falls back to a
    * default if absent). */
   repo_url?: string | null;
@@ -175,65 +170,6 @@ export interface Review {
   audience_spec?: AudienceSpec | null;
 }
 
-/** F3: the self-service access-request state machine. `applied` is distinct from `approved` —
- * the grant is only actually queued once the governed sidecar PR has been opened. */
-export type AccessRequestState = 'requested' | 'approved' | 'denied' | 'applied';
-
-/** F3: one self-service access request — a user asking for access to a Space they can't use. */
-export interface AccessRequest {
-  id: string;
-  space_id: string;
-  space_title: string | null;
-  /** The requester's platform-VERIFIED identity at request time (never a display header). */
-  requester_email: string;
-  note: string | null;
-  want_space_permission: boolean;
-  space_permission_level: string; // 'CAN_RUN' | 'CAN_VIEW'
-  want_uc_select: boolean;
-  state: AccessRequestState;
-  decided_by: string | null;
-  decided_at: string | null;
-  decision_note: string | null;
-  /** The governed sidecar-update PR the approval opened (F2's apply path), once applied. */
-  pr_number: number | null;
-  pr_url: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-/** F3: one append-only access-request audit event. `actor_email` is ALWAYS the verified acting
- * identity (requester on `requested`, approver on `approved`/`denied`/`applied`/`apply_failed`). */
-export interface AccessRequestAuditEvent {
-  seq: number;
-  event_type: string;
-  occurred_at: string;
-  actor_email: string;
-  detail: Record<string, unknown> | null;
-}
-
-/** F4: one row in the admin's live prod inventory — a Space currently deployed in prod, joined
- * with whatever governance record (if any) matches it. `owner`/`phase`/`access_spec` are null when
- * no Promotion record matches this live Space (rendered "—" by the UI), never a crash. */
-export interface InventorySpace {
-  space_id: string;
-  title: string;
-  owner: string | null;
-  phase: string | null;
-  access_spec: AccessSpec | null;
-  promotion_id: string | null;
-  terminal: boolean | null;
-}
-
-/** F4: a Promotion whose target Space is no longer visible in the live prod listing (deleted,
- * renamed) — surfaced distinctly from a live inventory row. */
-export interface OrphanedPromotion {
-  promotion_id: string;
-  resource_id: string;
-  resource_title: string | null;
-  owner: string | null;
-  phase: string | null;
-}
-
 /** F4: one cross-Promotion audit row — the same shape as a per-promotion audit event, plus which
  * Promotion/resource it belongs to (so the admin can trace an action back to its Promotion). */
 export interface AdminAuditRow {
@@ -264,9 +200,9 @@ export interface RehydrateEventRow {
   created_at: string;
 }
 
-/** F5 Phase 1: a configurable role — who is Steward/Admin/approver, in-app (Lakebase-backed), plus
+/** A configurable role — who is Steward/Admin, in-app (Lakebase-backed), plus
  * the email<->GitHub-username mapping used by drift detection. */
-export type RoleName = 'steward' | 'admin' | 'approver';
+export type RoleName = 'steward' | 'admin';
 
 export interface RoleAssignment {
   id: string;

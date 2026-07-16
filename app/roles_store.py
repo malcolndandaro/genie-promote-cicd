@@ -1,5 +1,4 @@
-"""roles_store — F5 Phase 1: the durable, Lakebase-backed roles configuration (Steward/approver/
-Admin) + the email<->GitHub-username mapping per approver.
+"""Durable Lakebase-backed Steward/Admin configuration and GitHub identity mapping.
 
 Mirrors `access_request_store.py`'s pattern EXACTLY (own tables, `InMemoryBackend` for offline
 tests, `PgBackend` for Lakebase, the same OAuth-refreshing connection-pool recipe): a `RolesStore`
@@ -9,7 +8,7 @@ an injectable backend.
 Why a NEW store rather than folding roles into `promotion_store`/`access_request_store`: roles are
 not an audit trail of an event stream — they're a small, mutable CONFIGURATION set (who is
 Steward/Admin right now), read on nearly every request (`whoami`, every admin gate) and written
-rarely (an admin changes an approver). A dedicated table keeps that hot read-path a single
+rarely (an admin changes an assignment). A dedicated table keeps that hot read-path a single
 `SELECT *` with no joins, and keeps the CRUD semantics (upsert-by-email, delete) distinct from the
 append-only stores' contracts.
 
@@ -38,12 +37,8 @@ from typing import Callable, Optional, Protocol
 
 # --- domain model -------------------------------------------------------------
 
-# A role is one of these three. "steward" is the SoD approver (mirrors APP_STEWARD, singular by
-# convention today but modeled as a role so multiple stewards are representable); "admin" mirrors
-# APP_ADMINS (sees ALL promotions/console); "approver" (S1, app-ux-overhaul persona model) gates
-# F3's access-request approval specifically — a distinct persona from admin, per D1's decision to
-# keep it separate rather than fold it in (see `engine_api/main.py`'s `_approver_emails`).
-ROLES = ("steward", "admin", "approver")
+# Pilot roles: Steward owns promotion review; Admin owns configuration and audit.
+ROLES = ("steward", "admin")
 
 # The roles that grant admin-console/gate access (`_admin_emails` unions these). Removing the LAST
 # of these while the store is otherwise non-empty locks EVERYONE out (env fallback only applies to a
@@ -199,6 +194,9 @@ class InMemoryBackend:
 
     def migrate(self) -> None:
         self.migrated = True
+        # S7 cleanup is intentionally idempotent: demo-era Approver rows disappear on every
+        # startup, including in faithful in-memory migration tests.
+        self._rows = {key: row for key, row in self._rows.items() if row["role"] in ROLES}
 
     def upsert(self, row: dict) -> None:
         self._rows[(row["email"], row["role"])] = dict(row)
@@ -229,6 +227,9 @@ MIGRATIONS = (
         UNIQUE (email, role)
     )""",
     "CREATE INDEX IF NOT EXISTS ix_roles_role ON roles(role)",
+    # Demo-era Approver assignments have no capability in the three-actor pilot. Repeating this
+    # statement is harmless and makes upgrades converge before the stricter S8 schema constraint.
+    "DELETE FROM roles WHERE role = 'approver'",
 )
 
 _ROLE_COLS = ("id", "email", "role", "github_username", "created_at", "updated_at")
@@ -298,7 +299,7 @@ class PgBackend:
         self._pool.close()
 
 
-# --- startup wiring (mirrors access_request_store.build_store_from_env) --------
+# --- startup wiring ------------------------------------------------------------
 
 
 def _pg_backend_from_env(env: dict):

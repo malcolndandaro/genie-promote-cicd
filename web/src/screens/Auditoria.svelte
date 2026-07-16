@@ -7,9 +7,12 @@
   import Badge from '../lib/components/Badge.svelte';
   import Button from '../lib/components/Button.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
-  import { getAdminAudit, isAuthError, type AdminAuditQuery } from '../lib/api';
+  import { ApiError, getAdminAudit, getAdminRehydrateEvents, isAuthError, type AdminAuditQuery } from '../lib/api';
+  import { genieSpaceUrl } from '../lib/links';
   import { EVENT_LABEL, actorDisplay } from '../lib/status';
   import type { AdminAuditRow } from '../lib/types';
+
+  let { devHost = null }: { devHost?: string | null } = $props();
 
   const PAGE_SIZE = 50;
 
@@ -33,6 +36,7 @@
   }
 
   let rowsP = $state(getAdminAudit(buildQuery()));
+  let rehydrateP = $state(getAdminRehydrateEvents());
   // `hasMore` is a heuristic (a full page came back), not a real total count — no COUNT query
   // needed for an admin diagnostic tool at this app's scale.
   let hasMore = $state(false);
@@ -74,10 +78,15 @@
     return isNaN(d.getTime()) ? iso : d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
   }
 
+  const MODE_LABEL: Record<string, string> = { create: 'Criado', overwrite: 'Sobrescrito' };
+
   function errorText(err: unknown): string {
-    return isAuthError(err)
-      ? 'Sessão expirada — recarregue para reautenticar.'
-      : `Erro: ${err instanceof Error ? err.message : String(err)}`;
+    if (isAuthError(err)) {
+      return err instanceof ApiError && err.status === 403
+        ? 'Sem permissão — esta tela é restrita a Admins.'
+        : 'Sessão expirada — recarregue para reautenticar.';
+    }
+    return `Erro: ${err instanceof Error ? err.message : String(err)}`;
   }
 </script>
 
@@ -143,6 +152,44 @@
           {/if}
           <Button variant="outline" disabled={!hasMore} onclick={nextPage}>Próxima →</Button>
         </div>
+      {/if}
+    {:catch err}
+      <p class="error" role="alert">{errorText(err)}</p>
+    {/await}
+  </Card>
+
+  <Card
+    title="Exportações para dev"
+    subtitle="Todo Space prod→dev exportado por este app, mais recente primeiro."
+  >
+    {#await rehydrateP}
+      <Skeleton height="3rem" />
+      <Skeleton height="3rem" width="70%" />
+    {:then rows}
+      {#if rows.length === 0}
+        <p class="muted text-sm">Nenhuma exportação para dev ainda.</p>
+      {:else}
+        <ul class="row-list">
+          {#each rows as e (e.id)}
+            <li class="row">
+              <div class="row__main">
+                <strong>{e.resource_title ?? e.resource_id}</strong>
+                <span class="muted text-xs">exportado por {e.actor_email}</span>
+              </div>
+              <div class="row__meta">
+                <Badge tone={e.mode === 'overwrite' ? 'warning' : 'neutral'}>{MODE_LABEL[e.mode] ?? e.mode}</Badge>
+                {#if e.dev_space_id && devHost}
+                  <a class="dev-link" href={genieSpaceUrl(devHost, e.dev_space_id)} target="_blank" rel="noopener noreferrer">
+                    Abrir no dev ↗
+                  </a>
+                {:else if e.dev_space_id}
+                  <span class="muted text-xs">{e.dev_space_id}</span>
+                {/if}
+                <time class="muted text-xs">{when(e.created_at)}</time>
+              </div>
+            </li>
+          {/each}
+        </ul>
       {/if}
     {:catch err}
       <p class="error" role="alert">{errorText(err)}</p>
@@ -216,6 +263,11 @@
     align-items: center;
     gap: var(--space-2);
     flex-wrap: wrap;
+  }
+  .dev-link {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--accent-hover);
   }
   .pagination {
     display: flex;

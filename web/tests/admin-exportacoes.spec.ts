@@ -1,7 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-// Admin → "Exportações para dev": every prod->dev rehydrate this app has performed, surfaced
-// read-only (mirrors F4's inventory/queue/audit cards). Covers: listing newest-first, the
+// Auditoria → "Exportações para dev": every prod->dev rehydrate this app has performed. Covers:
 // create/overwrite mode badge, the "Abrir no dev" deep-link (only when dev_host is known), the
 // empty state, and a 403 surfacing as a clear error. The server is the real authority — these
 // tests only verify the UI round-trips through `/api/admin/rehydrate-events` correctly.
@@ -15,7 +14,7 @@ const EVENTS = [
     mode: 'create', dev_space_id: 'dev-1', detail: null, created_at: '2026-07-13T10:00:00Z' },
 ];
 
-function mockAdminScreen(page: import('@playwright/test').Page, opts: {
+function mockAuditScreen(page: import('@playwright/test').Page, opts: {
   devHost?: string | null;
   events?: Record<string, unknown>[];
   rehydrateStatus?: number;
@@ -29,9 +28,7 @@ function mockAdminScreen(page: import('@playwright/test').Page, opts: {
     r.fulfill({ json: { email: 'admin@databricks.com', steward: 'pedro@databricks.com', is_admin: true,
                         dev_host: devHost } }),
   );
-  page.route('**/api/admin/inventory', (r) => r.fulfill({ json: { spaces: [], orphaned_promotions: [] } }));
-  page.route('**/api/admin/access-requests', (r) => r.fulfill({ json: { requests: [] } }));
-  page.route('**/api/admin/audit', (r) => r.fulfill({ json: { audit: [] } }));
+  page.route('**/api/admin/audit**', (r) => r.fulfill({ json: { audit: [] } }));
   page.route('**/api/admin/rehydrate-events**', (route) => {
     if (opts.rehydrateStatus) {
       return route.fulfill({ status: opts.rehydrateStatus,
@@ -46,8 +43,8 @@ function exportsCard(page: import('@playwright/test').Page) {
 }
 
 test('lists rehydrate events newest first with mode badge', async ({ page }) => {
-  mockAdminScreen(page);
-  await page.goto('/#/admin');
+  mockAuditScreen(page);
+  await page.goto('/#/auditoria');
   await expect(page.getByRole('heading', { name: 'Exportações para dev' })).toBeVisible();
 
   const rows = exportsCard(page).locator('li');
@@ -59,8 +56,8 @@ test('lists rehydrate events newest first with mode badge', async ({ page }) => 
 });
 
 test('shows an "Abrir no dev" link when the dev host is known', async ({ page }) => {
-  mockAdminScreen(page, { devHost: 'dev.cloud.databricks.com' });
-  await page.goto('/#/admin');
+  mockAuditScreen(page, { devHost: 'dev.cloud.databricks.com' });
+  await page.goto('/#/auditoria');
 
   const row = exportsCard(page).locator('li').filter({ hasText: 'Recebíveis' });
   const link = row.getByRole('link', { name: 'Abrir no dev ↗' });
@@ -69,8 +66,8 @@ test('shows an "Abrir no dev" link when the dev host is known', async ({ page })
 });
 
 test('falls back to the bare dev_space_id when the dev host is unknown', async ({ page }) => {
-  mockAdminScreen(page, { devHost: null });
-  await page.goto('/#/admin');
+  mockAuditScreen(page, { devHost: null });
+  await page.goto('/#/auditoria');
 
   const row = exportsCard(page).locator('li').filter({ hasText: 'Recebíveis' });
   await expect(row.getByRole('link', { name: 'Abrir no dev ↗' })).toHaveCount(0);
@@ -78,13 +75,13 @@ test('falls back to the bare dev_space_id when the dev host is unknown', async (
 });
 
 test('shows an empty state when no exports have happened yet', async ({ page }) => {
-  mockAdminScreen(page, { events: [] });
-  await page.goto('/#/admin');
+  mockAuditScreen(page, { events: [] });
+  await page.goto('/#/auditoria');
   await expect(exportsCard(page).getByText('Nenhuma exportação para dev ainda.')).toBeVisible();
 });
 
 test('a 403 from the server surfaces as a clear error, not a silent empty card', async ({ page }) => {
-  mockAdminScreen(page, { rehydrateStatus: 403 });
-  await page.goto('/#/admin');
+  mockAuditScreen(page, { rehydrateStatus: 403 });
+  await page.goto('/#/auditoria');
   await expect(exportsCard(page).getByText(/Sem permissão/)).toBeVisible();
 });

@@ -1,19 +1,16 @@
 <script lang="ts">
-  // S7a (app-ux-overhaul, D5/GR1): admin registry of Knowledge Assistant endpoints — an ADDITIVE
-  // advisory source the reviewer can consult (S7b wires the actual query-during-review), never a
-  // replacement for the rules in Configurações. Kept as its OWN screen/nav item rather than folded
-  // into Configurações — the original ask was "rules we create in the app" AND "a way to plug
-  // knowledge assistant endpoints" as two distinct things, not one crowded screen.
-  import Card from '../lib/components/Card.svelte';
-  import Button from '../lib/components/Button.svelte';
-  import Badge from '../lib/components/Badge.svelte';
-  import Skeleton from '../lib/components/Skeleton.svelte';
-  import Picker from '../lib/components/Picker.svelte';
+  // S7 pilot contraction: the KA registry remains fully functional but lives inside the single
+  // Admin Configurações route instead of adding another product surface.
+  import Card from './Card.svelte';
+  import Button from './Button.svelte';
+  import Badge from './Badge.svelte';
+  import Skeleton from './Skeleton.svelte';
+  import Picker from './Picker.svelte';
   import {
     getKaEndpoints, createKaEndpoint, updateKaEndpoint, deleteKaEndpoint,
     getServingEndpoints, getResources, isAuthError, ApiError,
-  } from '../lib/api';
-  import type { PickerOption } from '../lib/picker';
+  } from '../api';
+  import type { PickerOption } from '../picker';
 
   let endpointsP = $state(getKaEndpoints());
 

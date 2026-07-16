@@ -7,16 +7,10 @@
  * that touches `window.location`/`hashchange` lives in `router.svelte.ts`.
  */
 export type RouteId =
-  | 'inicio'
   | 'espacos'
   | 'promocoes'
-  | 'acesso'
-  | 'aprovacoes'
   | 'revisao'
-  | 'rehidratar'
-  | 'admin'
   | 'auditoria'
-  | 'assistente-conhecimento'
   | 'configuracoes';
 
 export interface Route {
@@ -26,16 +20,10 @@ export interface Route {
 }
 
 export const ROUTE_IDS: readonly RouteId[] = [
-  'inicio',
   'espacos',
   'promocoes',
-  'acesso',
-  'aprovacoes',
   'revisao',
-  'rehidratar',
-  'admin',
   'auditoria',
-  'assistente-conhecimento',
   'configuracoes',
 ];
 

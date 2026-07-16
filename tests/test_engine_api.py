@@ -57,7 +57,7 @@ def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False,
-                        "is_steward": False, "is_approver": False,
+                        "is_steward": False,
                         "repo_url": "https://gh/acme/repo", "dev_host": None,
                         "prod_host": "https://prod.example.com"}
 
@@ -72,7 +72,7 @@ def test_whoami_steward_none_when_unset(monkeypatch):
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
     assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False,
-                        "is_steward": False, "is_approver": False,
+                        "is_steward": False,
                         "repo_url": "https://gh/acme/repo", "dev_host": None,
                         "prod_host": "https://prod.example.com"}
 
@@ -788,7 +788,7 @@ def test_api_prefix_whoami(monkeypatch):
     _fake_config(monkeypatch, "https://prod.example.com")
     r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
     assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x",
-                                                 "is_admin": False, "is_steward": False, "is_approver": False,
+                                                 "is_admin": False, "is_steward": False,
                                                  "repo_url": "https://gh/acme/repo",
                                                  "dev_host": None, "prod_host": "https://prod.example.com"}
 

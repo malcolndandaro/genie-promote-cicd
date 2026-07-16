@@ -16,35 +16,33 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
 });
 
-test('lands on the default route with the sidebar nav and an active item', async ({ page }) => {
+test('a Business User sees only Meus espaços and lands there', async ({ page }) => {
   await page.goto('/');
-  // The Business User's "Meu trabalho" section destinations are present as nav links.
-  for (const label of ['Início', 'Meus espaços', 'Acesso', 'Exportar Prod → Dev']) {
-    await expect(page.getByRole('link', { name: label })).toBeVisible();
+  await expect(page.getByRole('navigation').getByRole('link')).toHaveCount(1);
+  await expect(page.getByRole('link', { name: 'Meus espaços' })).toBeVisible();
+  await expect(page).toHaveURL(/#\/espacos$/);
+  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
+});
+
+test('retired standalone hashes fall back to Meus espaços', async ({ page }) => {
+  for (const id of ['inicio', 'acesso', 'aprovacoes', 'rehidratar', 'admin', 'assistente-conhecimento']) {
+    await page.goto(`/#/${id}`);
+    await expect(page).toHaveURL(/#\/espacos$/);
   }
-  // Meus Espaços is the business-user home.
-  await expect(page).toHaveURL(/#\/espacos$/);
-  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
 });
 
-test('sidebar navigation switches the screen AND the URL hash', async ({ page }) => {
+test('a Steward+Admin capability union sees exactly the four pilot entries', async ({ page }) => {
+  await page.unroute('**/api/whoami');
+  await page.route('**/api/whoami', (r) => r.fulfill({ json: {
+    email: 'pedro@databricks.com', steward: 'pedro@databricks.com',
+    is_admin: true, is_steward: true,
+  } }));
   await page.goto('/');
-
-  await page.getByRole('link', { name: 'Início' }).click();
-  await expect(page).toHaveURL(/#\/inicio$/);
-  await expect(page.getByText('Autoria no dev')).toBeVisible(); // the home's 3-step flow
-  await expect(page.getByRole('link', { name: 'Início' })).toHaveAttribute('aria-current', 'page');
-
-  await page.getByRole('link', { name: 'Meus espaços' }).click();
-  await expect(page).toHaveURL(/#\/espacos$/);
-  await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
-});
-
-test('a deep-linked hash lands on the right screen on load', async ({ page }) => {
-  await page.goto('/#/acesso');
-  await expect(page.getByRole('heading', { name: 'Solicitar acesso' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Acesso' })).toHaveAttribute('aria-current', 'page');
+  const nav = page.getByRole('navigation');
+  await expect(nav.getByRole('link')).toHaveCount(4);
+  for (const label of ['Meus espaços', 'Aguardando minha revisão', 'Configurações', 'Auditoria']) {
+    await expect(nav.getByRole('link', { name: label })).toBeVisible();
+  }
 });
 
 test('a bare #/promocoes (no id) redirects to Meus espaços — there is no standalone list anymore', async ({ page }) => {
