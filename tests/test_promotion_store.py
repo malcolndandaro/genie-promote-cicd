@@ -165,6 +165,32 @@ def test_update_cache_refreshes_status(store):
     assert got.updated_at == got.last_reconciled_at  # one clock read -> the two timestamps agree
 
 
+def test_deployment_attempt_upserts_latest_provider_evidence(store):
+    p = _mk(store)
+    base = {
+        "attempt_id": "github:88:1", "run_attempt": 1,
+        "revisions": {"content_revision": "b" * 64, "engine_revision": "a" * 40},
+        "mutation_started": False, "completed_stages": ["preflight"],
+        "current_stage": "bundle_deploy", "failed_stage": None,
+        "target_ids": {}, "reason": None, "run_url": "https://gh/run/88",
+        "terminal_state": "running",
+    }
+    first = store.upsert_deployment_attempt(p.id, base)
+    assert first.external_run_id == "88" and first.terminal_state == "running"
+    store.upsert_deployment_attempt(p.id, {
+        **base, "mutation_started": True,
+        "completed_stages": ["preflight", "bundle_deploy", "resolve_space"],
+        "current_stage": "assert_app_manage", "failed_stage": "assert_app_manage",
+        "target_ids": {"receivables": "space-1"}, "reason": "permission timeout",
+        "terminal_state": "partial_failed",
+    })
+    attempts = store.list_deployment_attempts(p.id)
+    assert len(attempts) == 1
+    assert attempts[0].terminal_state == "partial_failed"
+    assert attempts[0].mutation_started is True
+    assert attempts[0].target_ids == {"receivables": "space-1"}
+
+
 def test_migrate_delegates(store):
     store.migrate()
     assert store._b.migrated is True

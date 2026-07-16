@@ -138,6 +138,28 @@ def test_deploy_failed_records_failed_and_is_terminal():
     assert s.get_promotion(p.id).terminal is True
 
 
+def test_reconcile_mirrors_partial_attempt_without_asserting_deployed():
+    s, p = _store()
+    attempt = {
+        "attempt_id": "github:8:1", "run_attempt": 1,
+        "revisions": {"content_revision": "b" * 64, "engine_revision": "a" * 40},
+        "mutation_started": True, "completed_stages": ["preflight", "bundle_deploy"],
+        "current_stage": "resolve_space", "failed_stage": "resolve_space",
+        "target_ids": {}, "reason": "space not visible", "run_url": "https://gh/run/8",
+        "terminal_state": "partial_failed",
+    }
+    deploy = {"status": "completed", "conclusion": "failure", "waiting_approval": False,
+              "approver": "PSPedro176", "attempt": attempt}
+    reconcile_mod.reconcile(
+        s, p, _status("deploy_failed", merged=True, checks="success",
+                      review_decision="approved", deploy=deploy),
+        _factory(_FakeGitHub({"merged_by": "PSPedro176"})))
+    mirrored = s.list_deployment_attempts(p.id)
+    assert len(mirrored) == 1 and mirrored[0].terminal_state == "partial_failed"
+    types = [event.event_type for event in s.list_audit_events(p.id)]
+    assert "failed" in types and "deployed" not in types
+
+
 def test_closed_pr_records_closed_event_and_is_terminal():
     s, p = _store()
     appended = reconcile_mod.reconcile(

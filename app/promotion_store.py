@@ -137,6 +137,27 @@ class RehydrateEvent:
     created_at: datetime
 
 
+@dataclasses.dataclass
+class DeploymentAttempt:
+    """Canonical deployment evidence mirrored from the provider's live workflow annotations."""
+    id: str
+    promotion_id: str
+    provider: str
+    external_run_id: str
+    run_attempt: int
+    revisions: dict
+    mutation_started: bool
+    completed_stages: list
+    current_stage: Optional[str]
+    failed_stage: Optional[str]
+    target_ids: dict
+    reason: Optional[str]
+    run_url: Optional[str]
+    terminal_state: str
+    observed_at: datetime
+    updated_at: datetime
+
+
 class LakebaseUnavailable(RuntimeError):
     """Raised at startup when Lakebase is a hard dependency but unreachable/misconfigured."""
 
@@ -180,6 +201,8 @@ class StoreBackend(Protocol):
     # Standalone rehydrate audit (F1 follow-up) — NO FK to promotions, see RehydrateEvent.
     def insert_rehydrate_event(self, row: dict) -> None: ...
     def list_rehydrate_events(self, resource_id: Optional[str], limit: int) -> list[dict]: ...  # newest first
+    def upsert_deployment_attempt(self, row: dict) -> None: ...
+    def list_deployment_attempts(self, promotion_id: str) -> list[dict]: ...
     def healthcheck(self) -> None: ...
     def close(self) -> None: ...
 
@@ -383,6 +406,37 @@ class PromotionStore:
                               limit: int = 200) -> list[RehydrateEvent]:
         return [_as(RehydrateEvent, r) for r in self._b.list_rehydrate_events(resource_id, limit)]
 
+    # -- deployment attempts (provider-observed, mutable mirror of latest stage evidence) --------
+    def upsert_deployment_attempt(self, promotion_id: str, evidence: dict,
+                                  *, provider: str = "github") -> DeploymentAttempt:
+        """Mirror one canonical provider Attempt. This never decides success; callers pass only
+        evidence observed from the provider's workflow annotations."""
+        attempt_id = str(evidence.get("attempt_id") or "")
+        if not attempt_id:
+            raise ValueError("deployment attempt_id is required")
+        terminal_state = str(evidence.get("terminal_state") or "running")
+        if terminal_state not in {"running", "operational_failed", "partial_failed", "succeeded"}:
+            raise ValueError(f"unknown deployment terminal_state {terminal_state!r}")
+        now = self._clock()
+        row = dataclasses.asdict(DeploymentAttempt(
+            id=attempt_id, promotion_id=promotion_id, provider=provider,
+            external_run_id=attempt_id.split(":")[-2] if ":" in attempt_id else attempt_id,
+            run_attempt=int(evidence.get("run_attempt") or 1),
+            revisions=dict(evidence.get("revisions") or {}),
+            mutation_started=bool(evidence.get("mutation_started")),
+            completed_stages=list(evidence.get("completed_stages") or []),
+            current_stage=evidence.get("current_stage"), failed_stage=evidence.get("failed_stage"),
+            target_ids=dict(evidence.get("target_ids") or {}), reason=evidence.get("reason"),
+            run_url=evidence.get("run_url"), terminal_state=terminal_state,
+            observed_at=now, updated_at=now,
+        ))
+        self._b.upsert_deployment_attempt(row)
+        return _as(DeploymentAttempt, row)
+
+    def list_deployment_attempts(self, promotion_id: str) -> list[DeploymentAttempt]:
+        return [_as(DeploymentAttempt, row)
+                for row in self._b.list_deployment_attempts(promotion_id)]
+
 
 def _as(cls, row: Optional[dict]):
     """Build a dataclass from a backend row dict (only the dataclass's own fields)."""
@@ -405,6 +459,7 @@ class InMemoryBackend:
         self._snapshots: list[dict] = []
         self._events: list[dict] = []
         self._rehydrate_events: list[dict] = []
+        self._deployment_attempts: dict[str, dict] = {}
         self.migrated = False
 
     def migrate(self) -> None:
@@ -508,6 +563,18 @@ class InMemoryBackend:
         rows.sort(key=lambda r: r["created_at"], reverse=True)  # newest first
         return rows[: max(0, limit)]
 
+    def upsert_deployment_attempt(self, row: dict) -> None:
+        self._require_promotion(row["promotion_id"])
+        existing = self._deployment_attempts.get(row["id"])
+        if existing and existing["promotion_id"] != row["promotion_id"]:
+            raise ValueError("deployment attempt belongs to another promotion")
+        self._deployment_attempts[row["id"]] = dict(row)
+
+    def list_deployment_attempts(self, promotion_id: str) -> list[dict]:
+        rows = [dict(row) for row in self._deployment_attempts.values()
+                if row["promotion_id"] == promotion_id]
+        return sorted(rows, key=lambda row: (row["updated_at"], row["id"]))
+
     def healthcheck(self) -> None:
         return None
 
@@ -604,10 +671,32 @@ MIGRATIONS = (
         created_at     timestamptz NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS ix_rehydrate_events_resource ON rehydrate_events(resource_id)",
+    """CREATE TABLE IF NOT EXISTS deployment_attempts (
+        id                 text PRIMARY KEY,
+        promotion_id       text NOT NULL REFERENCES promotions(id),
+        provider           text NOT NULL,
+        external_run_id    text NOT NULL,
+        run_attempt        integer NOT NULL,
+        revisions          jsonb NOT NULL,
+        mutation_started   boolean NOT NULL DEFAULT false,
+        completed_stages   jsonb NOT NULL,
+        current_stage      text,
+        failed_stage       text,
+        target_ids         jsonb NOT NULL,
+        reason             text,
+        run_url            text,
+        terminal_state     text NOT NULL,
+        observed_at        timestamptz NOT NULL,
+        updated_at         timestamptz NOT NULL,
+        UNIQUE (promotion_id, provider, external_run_id, run_attempt)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_deployment_attempts_promotion "
+    "ON deployment_attempts(promotion_id, updated_at)",
 )
 
 # Columns that hold JSON blobs (wrapped as jsonb on write).
-_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec", "audience_spec", "table_mapping"}
+_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec", "audience_spec", "table_mapping",
+              "revisions", "completed_stages", "target_ids"}
 _PROMO_COLS = ("id", "resource_id", "resource_kind", "resource_title", "requester_email",
                "pr_number", "pr_url", "branch", "current_phase", "live_status", "terminal",
                "last_reconciled_at", "created_at", "updated_at", "access_spec", "audience_spec",
@@ -619,6 +708,9 @@ _EVENT_COLS = ("id", "promotion_id", "seq", "occurred_at", "event_type", "actor_
                "actor_app_email", "github_event_at", "detail")
 _REHYDRATE_COLS = ("id", "resource_id", "resource_title", "actor_email", "mode", "dev_space_id",
                    "detail", "created_at")
+_ATTEMPT_COLS = ("id", "promotion_id", "provider", "external_run_id", "run_attempt", "revisions",
+                 "mutation_started", "completed_stages", "current_stage", "failed_stage",
+                 "target_ids", "reason", "run_url", "terminal_state", "observed_at", "updated_at")
 
 
 import re as _re
@@ -794,6 +886,26 @@ class PgBackend:
         return self._all(
             "SELECT * FROM rehydrate_events WHERE resource_id = %s ORDER BY created_at DESC LIMIT %s",
             (resource_id, max(0, limit)))
+
+    def upsert_deployment_attempt(self, row: dict) -> None:
+        vals = [self._jsonb(row.get(col)) if col in _JSON_COLS else row.get(col)
+                for col in _ATTEMPT_COLS]
+        placeholders = ", ".join(["%s"] * len(_ATTEMPT_COLS))
+        updates = ", ".join(
+            f"{col} = EXCLUDED.{col}" for col in _ATTEMPT_COLS
+            if col not in {"id", "promotion_id", "provider", "external_run_id", "run_attempt"}
+        )
+        sql = (
+            f"INSERT INTO deployment_attempts ({', '.join(_ATTEMPT_COLS)}) "
+            f"VALUES ({placeholders}) ON CONFLICT (id) DO UPDATE SET {updates}"
+        )
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(sql, vals)
+
+    def list_deployment_attempts(self, promotion_id: str) -> list[dict]:
+        return self._all(
+            "SELECT * FROM deployment_attempts WHERE promotion_id = %s "
+            "ORDER BY updated_at, id", (promotion_id,))
 
     def healthcheck(self) -> None:
         with self._pool.connection() as conn, conn.cursor() as cur:

@@ -82,6 +82,7 @@ class DeploymentObservation:
     run_id: int | None
     approver: str | None
     revisions: RevisionPair | None = None
+    attempt: Mapping | None = None
     rejected: bool = False
     rejection_reason: str | None = None
 

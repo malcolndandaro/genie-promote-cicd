@@ -46,6 +46,8 @@ class GitHubError(RuntimeError):
 
 _NO_DEPLOY = {"status": "none", "conclusion": None, "waiting_approval": False, "run_url": None,
               "run_id": None, "approver": None, "source_sha": None}
+_ATTEMPT_PREFIX = "DEPLOY_ATTEMPT:"
+_ATTEMPT_STATES = {"running", "operational_failed", "partial_failed", "succeeded"}
 
 
 def _aggregate_checks(runs: list) -> str:
@@ -102,6 +104,32 @@ def _truncate(text: str, limit: int = 500) -> str:
     """Sane truncation for a check-run summary (G8) — never dump an unbounded log into the app."""
     text = (text or "").strip()
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _parse_deployment_attempt_annotations(annotations: list) -> dict | None:
+    """Return the newest valid canonical Attempt payload from GitHub check annotations."""
+    candidates: list[dict] = []
+    for annotation in annotations:
+        message = str(annotation.get("message") or "")
+        marker = message.find(_ATTEMPT_PREFIX)
+        if marker < 0:
+            continue
+        try:
+            payload = json.loads(message[marker + len(_ATTEMPT_PREFIX):])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict) or not payload.get("attempt_id"):
+            continue
+        if payload.get("terminal_state") not in _ATTEMPT_STATES:
+            continue
+        if not isinstance(payload.get("completed_stages"), list):
+            continue
+        candidates.append(payload)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (
+        int(item.get("run_attempt") or 0), int(item.get("sequence") or 0)
+    ))
 
 
 def _derive_phase(pr_state: str | None, merged: bool, checks: str, deploy: dict) -> str:
@@ -343,6 +371,7 @@ class GitHubApp:
         # calls below). Only fetched on a failing verdict, so the happy-path poll pays nothing extra.
         checks_detail = self._checks_detail(runs) if checks == "failure" else None
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
+        attempt = self._deployment_attempt(deploy["run_id"]) if deploy.get("run_id") else None
         # Fix C: WHY the DEPLOY failed (e.g. apply_access.py crashing on real declared access) —
         # same "only on a failing verdict" gating as checks_detail, no new bot permission
         # (actions:read already covers /jobs; annotations reuse the checks_detail scope).
@@ -369,6 +398,7 @@ class GitHubApp:
             run_id=deploy["run_id"],
             approver=deploy["approver"],
             revisions=deploy_revisions,
+            attempt=attempt,
         )
         observation = ChangeRequestObservation(
             provider="github",
@@ -549,6 +579,25 @@ class GitHubApp:
                 }
             return None
         except Exception:  # noqa: BLE001 — a detail-fetch hiccup must not break the status read
+            return None
+
+    def _deployment_attempt(self, run_id: int) -> dict | None:
+        """Best-effort canonical staged-deploy evidence from this workflow run's annotations."""
+        try:
+            _, body = self._api(
+                "GET", self._repo_path(f"/actions/runs/{run_id}/jobs"), "workflow run jobs")
+            annotations: list = []
+            for job in (body or {}).get("jobs", []):
+                check_run_url = job.get("check_run_url") or ""
+                check_id = check_run_url.rstrip("/").rsplit("/", 1)[-1]
+                if not check_id:
+                    continue
+                _, found = self._api(
+                    "GET", self._repo_path(f"/check-runs/{check_id}/annotations"),
+                    "deployment attempt annotations")
+                annotations.extend(found or [])
+            return _parse_deployment_attempt_annotations(annotations)
+        except Exception:  # noqa: BLE001 — evidence enrichment never breaks the status poll
             return None
 
     def _job_annotations_summary(self, job: dict) -> str:

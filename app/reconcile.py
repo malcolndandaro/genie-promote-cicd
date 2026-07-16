@@ -81,6 +81,13 @@ def reconcile(store: PromotionStore, promotion, status: dict,
     """Append any newly-reached audit events (idempotent) + refresh the status cache. Returns the
     list of event types appended this run (empty when nothing changed)."""
     existing = {e.event_type for e in store.list_audit_events(promotion.id)}
+    deployment = status.get("deployment") or status.get("deploy") or {}
+    attempt = deployment.get("attempt")
+    if attempt:
+        # GitHub annotations are the source of truth. Lakebase only mirrors the latest evidence;
+        # it never advances a stage or asserts success on its own.
+        store.upsert_deployment_attempt(
+            promotion.id, attempt, provider=status.get("provider") or "github")
     reached = _reached(status)
     to_append = [m for m in MILESTONE_ORDER if m in reached and m not in existing]
 
@@ -98,10 +105,13 @@ def reconcile(store: PromotionStore, promotion, status: dict,
             "content_revision": promotion.content_revision,
             "engine_revision": promotion.engine_revision,
         }
+        detail = {"phase": status.get("phase"), "observed_at": _now_iso(),
+                  "revisions": revisions}
+        if event in {"deployed", "failed"} and attempt:
+            detail["deployment_attempt"] = attempt
         store.append_audit_event(
             promotion.id, event, actor_github_login=login, github_event_at=at,
-            detail={"phase": status.get("phase"), "observed_at": _now_iso(),
-                    "revisions": revisions})
+            detail=detail)
 
     # Only write the cache on an ACTUAL change (new events or a phase shift) — not on every steady
     # poll. This keeps `updated_at` meaningful (it tracks real activity, not the 5s ticker) and

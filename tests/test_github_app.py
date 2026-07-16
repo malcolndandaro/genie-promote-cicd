@@ -7,7 +7,9 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "genie_reviewer"))
-from github_app import GitHubApp, GitHubError, _summarize_annotations  # noqa: E402
+from github_app import (  # noqa: E402
+    GitHubApp, GitHubError, _parse_deployment_attempt_annotations, _summarize_annotations,
+)
 
 
 class FakeGitHub:
@@ -833,6 +835,21 @@ def test_status_is_canonical_and_rejects_deployment_revision_mismatch():
     assert status["deployment"]["rejected"] is True
     assert status["phase"] == "revision_mismatch"
     assert status["deploy"] == status["deployment"]  # legacy alias is canonical, never raw
+
+
+def test_deployment_attempt_annotation_parser_chooses_latest_sequence_and_rejects_noise():
+    def annotation(sequence, state="running"):
+        payload = {
+            "attempt_id": "github:9:1", "run_attempt": 1, "sequence": sequence,
+            "terminal_state": state, "completed_stages": ["preflight"],
+        }
+        return {"message": "DEPLOY_ATTEMPT:" + json.dumps(payload)}
+
+    found = _parse_deployment_attempt_annotations([
+        {"message": "Process completed with exit code 1."}, annotation(1), annotation(4),
+        annotation(99, "invented"),
+    ])
+    assert found["sequence"] == 4 and found["terminal_state"] == "running"
 
 
 def test_just_merged_window_does_not_borrow_a_prior_completed_deploy_run():
