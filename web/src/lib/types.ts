@@ -38,6 +38,11 @@ export interface PromotableResource {
   id: string;
   title: string;
   kind: ResourceKind;
+  /** Which workspace this resource lives in — 'dev' for the spaces listed in "Meus espaços" (they
+   * come from the dev authoring workspace via the dev-reader SP), 'prod' for prod-deployed ones.
+   * Surfaced as a small badge so the origin is obvious at a glance. Optional/back-compat: undefined
+   * renders no env badge. */
+  env?: 'dev' | 'prod';
 }
 
 /** G1: one workspace-directory principal (SCIM user or group), as returned by `/api/principals` —

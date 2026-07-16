@@ -84,6 +84,37 @@ test('confirming the panel shows a busy state while the promotion is in flight',
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 });
 
+test('each space card carries a dev env badge next to the kind badge', async ({ page }) => {
+  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
+  await page.goto('/#/espacos');
+
+  const card = page.locator('.space-card').filter({ hasText: 'Recebíveis' });
+  await expect(card.getByText('Genie Space', { exact: true })).toBeVisible();
+  // the origin badge: these come from the dev authoring workspace
+  await expect(card.getByText('dev', { exact: true })).toBeVisible();
+});
+
+test('a terminal (deployed) promotion is NOT auto-pinned as an inline pipeline on load', async ({ page }) => {
+  // The reported bug: the last promotion's full pipeline showed at the bottom of the list on load,
+  // even when browsing (nothing selected). recover() must only resume an IN-FLIGHT promotion.
+  const PR = { number: 7, url: 'https://gh/pr/7' };
+  const terminal = {
+    id: 'promo-done', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
+    requester_email: 'malcoln@databricks.com', pr_number: PR.number, pr_url: PR.url,
+    current_phase: 'deployed', terminal: true, created_at: '2026-07-10T10:00:00Z',
+  };
+  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [terminal] } }));
+  await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [terminal] } }));
+  await page.goto('/#/espacos');
+
+  // The space + its history summary render, but NO inline pipeline / PR banner is auto-shown.
+  await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
+  await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
+  await expect(page.getByText('Pipeline de promoção')).toHaveCount(0);
+});
+
 test('shows the empty state pointing to the dev workspace when there are no spaces', async ({ page }) => {
   await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [] } }));
   await page.goto('/#/espacos');

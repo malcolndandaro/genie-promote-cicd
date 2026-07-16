@@ -43,6 +43,11 @@ export class Promotion {
   liveStatus = $state<PromoteStatus | null>(null);
   /** The persisted Promotion id (LB3) — drives the audit-trail fetch (LB4). */
   promotionId = $state<string | null>(null);
+  /** Whether the CURRENT promotion flow was actively STARTED by the user on this screen this session
+   * (via `requestPromotion`) — as opposed to auto-restored by `recover()` on page load. "Meus
+   * espaços" gates the inline pipeline/review on this so it appears only when the user actually
+   * requests a promotion, never automatically pinned to the last one at the bottom of the list. */
+  initiatedHere = $state(false);
   /** The append-only, GitHub-attributed audit trail (LB4) — accrues as the poll reconciles. */
   audit = $state<AuditEvent[]>([]);
 
@@ -111,6 +116,7 @@ export class Promotion {
     this.promotionId = null;
     this.audit = [];
     this.requesterEmail = this.viewerEmail; // a fresh flow is requested by the viewer
+    this.initiatedHere = false; // a bare selection isn't yet a requested promotion
     this.pendingAccessSpec = undefined;
     this.pendingProdTitle = undefined;
     this.pendingTableMapping = undefined;
@@ -165,6 +171,7 @@ export class Promotion {
     if (!this.resource || this.phase === 'reviewing') return; // no double-submit
     const id = this.resource.id;
     this.phase = 'reviewing';
+    this.initiatedHere = true; // user-initiated on this screen → its inline pipeline may show now
     this.review = null;
     this.error = null;
     this.pr = null;
@@ -202,14 +209,18 @@ export class Promotion {
     try {
       const list = await getPromotions('mine');
       if (list.length === 0) return false;
-      // Prefer the newest IN-FLIGHT promotion (so a reload mid-promotion resumes it); fall back to
-      // the most recent overall so a just-finished one is still visible. (LB5 adds the full list.)
-      const summary = list.find((p) => !p.terminal) ?? list[0];
+      // Resume ONLY a still-IN-FLIGHT promotion (reload mid-promotion picks up where it left off).
+      // Deliberately NO fallback to the most-recent TERMINAL one: pinning a finished/deployed
+      // promotion's pipeline at the bottom of "Meus espaços" on every load was a reported bug — a
+      // completed promotion is reachable by expanding its space + opening the attempt, not auto-shown.
+      const summary = list.find((p) => !p.terminal);
+      if (!summary) return false;
       const detail = await getPromotionDetail(summary.id);
       if (!detail.review || !detail.pr) return false;
       if (this.phase !== 'idle' || this.resource) return false; // a selection raced in — yield to it
       this._apply(summary, detail);
       this.phase = 'reviewed';
+      this.initiatedHere = true; // in-flight resume — surface its inline pipeline (non-terminal only)
       return true;
     } catch {
       return false; // store unavailable / nothing to recover — proceed with the normal flow

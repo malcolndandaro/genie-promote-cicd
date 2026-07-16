@@ -23,7 +23,14 @@
 <article class="space-card" class:space-card--selected={selected}>
   <div class="space-card__top">
     <span class="space-card__icon" aria-hidden="true"><Icon name="grid" size={18} /></span>
-    <Badge tone="accent">{kindMeta(resource.kind).label}</Badge>
+    <div class="space-card__badges">
+      {#if resource.env}
+        <Badge tone={resource.env === 'prod' ? 'success' : 'neutral'}>
+          {resource.env === 'prod' ? 'prod' : 'dev'}
+        </Badge>
+      {/if}
+      <Badge tone="accent">{kindMeta(resource.kind).label}</Badge>
+    </div>
   </div>
   <h3 class="space-card__title" title={resource.title}>{resource.title}</h3>
   <div class="space-card__foot">
@@ -67,6 +74,13 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
+  }
+  .space-card__badges {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .space-card__icon {
     display: inline-flex;

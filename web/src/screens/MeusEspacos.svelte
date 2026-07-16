@@ -239,8 +239,13 @@
     {/key}
   {/if}
 
-  <!-- The active promotion's review/pipeline/approval (in-place below the grid). -->
-  <PromotionReview {promotion} userEmail={who?.email ?? null} {devHost} {prodHost} />
+  <!-- The active promotion's review/pipeline/approval (in-place below the grid) — shown ONLY when the
+       user actively requested a promotion on this screen this session (`initiatedHere`), never
+       auto-pinned to the last promotion recovered on page load. To revisit a past promotion's
+       pipeline, expand the space (its history) and open the attempt (→ #/promocoes/:id). -->
+  {#if promotion.initiatedHere}
+    <PromotionReview {promotion} userEmail={who?.email ?? null} {devHost} {prodHost} />
+  {/if}
 </div>
 
 <style>

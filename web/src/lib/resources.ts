@@ -47,5 +47,8 @@ export function kindMeta(kind: ResourceKind): ResourceKindMeta {
  * the sources — the registry above already handles rendering N kinds; only *fetching* needs work.
  */
 export function spaceToResource(dto: { space_id: string; title: string }): PromotableResource {
-  return { id: dto.space_id, title: dto.title, kind: 'genie_space' };
+  // `/api/spaces` lists the caller's DEV authoring spaces (fetched via the dev-reader SP — see
+  // app_logic.list_spaces), so everything here is `env: 'dev'`. The env badge makes that origin
+  // obvious at a glance next to the kind badge.
+  return { id: dto.space_id, title: dto.title, kind: 'genie_space', env: 'dev' };
 }
