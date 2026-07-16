@@ -158,6 +158,37 @@ class KaEndpointsStore:
         self._b.delete(id)
         self._append_event(id, "ka_endpoint_deleted", actor_email=actor_email, detail=None)
 
+    def seed_from_config(self, entries: list[dict], *, actor_email: str = "system") -> int:
+        """Register a config-declared set of KA endpoints on a FRESH store (ADR-0004: no hardcoded
+        binding — a new customer sets their own via `APP_KA_SEED`). Idempotent + additive-safe: seeds
+        ONLY endpoints whose `serving_endpoint_name` isn't already registered, so a re-run (or a boot
+        after an admin added/removed endpoints in the UI) never duplicates or clobbers. Returns the
+        number of endpoints seeded.
+
+        Each entry: {name, serving_endpoint_name, is_global?, scope_space_ids?, enabled?}. Invalid
+        entries (missing required fields, or the global/scoped invariant violated) are skipped with
+        no effect — a bad config line must never break app startup. Registration runs as the app SP
+        (this store is the app's, written server-side), so it needs no browser/OBO — the accelerator
+        comes up with its KAs already wired from config."""
+        have = {e.serving_endpoint_name for e in self.list_all()}
+        seeded = 0
+        for ent in entries or []:
+            sep = (ent.get("serving_endpoint_name") or "").strip()
+            name = (ent.get("name") or "").strip()
+            if not sep or not name or sep in have:
+                continue
+            try:
+                self.create(
+                    name=name, serving_endpoint_name=sep, actor_email=actor_email,
+                    is_global=bool(ent.get("is_global", False)),
+                    scope_space_ids=list(ent.get("scope_space_ids") or []),
+                    enabled=bool(ent.get("enabled", True)))
+                have.add(sep)
+                seeded += 1
+            except ValueError:
+                continue  # invalid entry (e.g. global+scoped) — skip, never break startup
+        return seeded
+
     def get(self, id: str) -> Optional[KaEndpoint]:
         return _as(KaEndpoint, self._b.get(id))
 

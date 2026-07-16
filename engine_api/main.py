@@ -31,6 +31,7 @@ every caller as "no elevated access", never as "skip the check".
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -113,6 +114,19 @@ async def _lifespan(app: FastAPI):
     app.state.ka_endpoints_store = ka_endpoints_store.build_store_from_env()
     logger.info("KA endpoints store: %s",
                 "initialized (migrations applied)" if app.state.ka_endpoints_store else "absent (no PGHOST — local/test)")
+    # Config-driven KA seed (ADR-0004): on a FRESH store, register the KA endpoints declared in
+    # APP_KA_SEED (JSON array of {name, serving_endpoint_name, is_global?, scope_space_ids?}). Runs
+    # as the app SP at startup, so the accelerator comes up with its Knowledge Assistants wired
+    # without a browser/OBO round-trip; idempotent + additive, so admin edits in the UI are never
+    # clobbered. A malformed value is logged and skipped — it must never break startup.
+    if app.state.ka_endpoints_store is not None:
+        try:
+            seed = json.loads(os.environ.get("APP_KA_SEED", "") or "[]")
+            n = app.state.ka_endpoints_store.seed_from_config(seed) if isinstance(seed, list) else 0
+            if n:
+                logger.info("KA endpoints store: seeded %d endpoint(s) from APP_KA_SEED", n)
+        except (ValueError, TypeError) as e:
+            logger.warning("APP_KA_SEED ignored (not valid JSON array): %s", e)
     # S8 (app-ux-overhaul): the admin-editable reviewer prompt template — same hard-dependency
     # contract. An absent/empty store just means no custom template is saved (DEFAULT_PERSONA is
     # used, exactly as before this slice).

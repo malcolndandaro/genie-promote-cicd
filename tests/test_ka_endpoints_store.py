@@ -142,3 +142,45 @@ def test_create_update_delete_all_audited(store):
 def test_delete_of_a_missing_endpoint_is_not_audited(store):
     store.delete("nope", actor_email="admin@x")
     assert store.list_audit_events("nope") == []
+
+
+# --- seed_from_config (config-driven KA seed on a fresh store, ADR-0004) --------------------------
+
+
+def test_seed_from_config_registers_declared_endpoints(store):
+    n = store.seed_from_config([
+        {"name": "CI/CD", "serving_endpoint_name": "ka-cicd", "is_global": True},
+        {"name": "Domínio", "serving_endpoint_name": "ka-dom", "scope_space_ids": ["sp1", "sp2"]},
+    ])
+    assert n == 2
+    by_name = {e.name: e for e in store.list_all()}
+    assert by_name["CI/CD"].is_global is True and by_name["CI/CD"].scope_space_ids == []
+    assert by_name["Domínio"].is_global is False and by_name["Domínio"].scope_space_ids == ["sp1", "sp2"]
+
+
+def test_seed_from_config_is_idempotent_by_serving_endpoint_name(store):
+    entries = [{"name": "CI/CD", "serving_endpoint_name": "ka-cicd", "is_global": True}]
+    assert store.seed_from_config(entries) == 1
+    # a second boot (same config) adds nothing — matched by serving_endpoint_name
+    assert store.seed_from_config(entries) == 0
+    assert len(store.list_all()) == 1
+
+
+def test_seed_from_config_never_clobbers_an_admin_edit(store):
+    store.seed_from_config([{"name": "CI/CD", "serving_endpoint_name": "ka-cicd", "is_global": True}])
+    ep = store.list_all()[0]
+    store.update(ep.id, actor_email="admin@x", enabled=False)  # admin disables it
+    # re-seed (next boot) must NOT re-add or re-enable it
+    assert store.seed_from_config([{"name": "CI/CD", "serving_endpoint_name": "ka-cicd", "is_global": True}]) == 0
+    assert store.get(ep.id).enabled is False
+
+
+def test_seed_from_config_skips_invalid_entries_without_breaking(store):
+    n = store.seed_from_config([
+        {"name": "", "serving_endpoint_name": "ka-noname"},                     # missing name
+        {"name": "No endpoint"},                                                # missing serving_endpoint_name
+        {"name": "Both", "serving_endpoint_name": "ka-both", "is_global": True, "scope_space_ids": ["sp1"]},  # invalid: global+scoped
+        {"name": "Good", "serving_endpoint_name": "ka-good", "is_global": True},
+    ])
+    assert n == 1  # only the valid one
+    assert [e.name for e in store.list_all()] == ["Good"]
