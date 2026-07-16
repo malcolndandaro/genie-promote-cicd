@@ -61,6 +61,33 @@ def test_one_to_one_pr(store):
         _mk(store, pr_number=101, resource_id="space-2")
 
 
+def test_provider_neutral_change_request_round_trip_and_legacy_pr_lookup(store):
+    p = store.create_promotion(
+        resource_id="space-1",
+        resource_kind="genie_space",
+        resource_title="Recebíveis",
+        requester_email="ana@acme.com",
+        pr_number=101,  # compatibility only
+        pr_url="https://gh/pr/101",
+        branch="promote/recebiveis",
+        current_phase="open",
+        live_status=None,
+        change_provider="github",
+        external_id="101",
+        external_url="https://gh/pr/101",
+        content_revision="b" * 64,
+        engine_revision="a" * 40,
+    )
+    got = store.find_by_change_request("github", "101")
+    assert got.id == p.id
+    assert got.content_revision == "b" * 64
+    assert got.engine_revision == "a" * 40
+
+    legacy = _mk(store, pr_number=202, resource_id="legacy")
+    assert legacy.change_provider is None
+    assert store.find_by_change_request("github", "202").id == legacy.id
+
+
 def test_child_writes_require_an_existing_promotion(store):
     # The fake mirrors the Postgres FK (REFERENCES promotions(id)) so an invalid id fails in CI too.
     with pytest.raises(ValueError):

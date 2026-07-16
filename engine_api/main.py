@@ -656,7 +656,11 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
     from promotion_store import DuplicatePRNumber
 
     review, pr = result["review"], result["pr"]
-    existing = store.find_by_pr(pr["number"])
+    change = result.get("change_request") or {
+        "provider": "github", "external_id": str(pr["number"]), "external_url": pr["url"],
+        "content_revision": None, "engine_revision": None,
+    }
+    existing = store.find_by_change_request(change["provider"], change["external_id"])
     if existing is None:
         try:
             promotion = store.create_promotion(
@@ -672,12 +676,17 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
                 # G7: persist the declared table de-para the SAME way — straight from the request
                 # body (unlike access_spec, `table_mapping` isn't part of the reviewer's own
                 # payload; it never rides the review, only the promotion request).
-                table_mapping=body.table_mapping or None)
+                table_mapping=body.table_mapping or None,
+                change_provider=change["provider"],
+                external_id=change["external_id"],
+                external_url=change.get("external_url"),
+                content_revision=change.get("content_revision"),
+                engine_revision=change.get("engine_revision"))
             promotion_id, event = promotion.id, "requested"
         except DuplicatePRNumber:
             # Concurrent request created it between our find_by_pr and create (TOCTOU). Recover by
             # treating this as a re-review of the now-existing Promotion rather than 500-ing.
-            existing = store.find_by_pr(pr["number"])
+            existing = store.find_by_change_request(change["provider"], change["external_id"])
             if existing is None:
                 raise
             promotion_id, event = existing.id, "re_reviewed"
@@ -688,7 +697,17 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
         promotion_id, gate_conclusion=gate.get("conclusion"), gate_summary=gate.get("summary"),
         findings=review.get("findings") or [], eval=review.get("eval"),
         timeline=review.get("timeline") or [])
-    detail = {"pr_number": pr["number"], "pr_url": pr["url"]}
+    detail = {
+        "provider": change["provider"],
+        "external_id": change["external_id"],
+        "external_url": change.get("external_url"),
+        "pr_number": pr["number"],
+        "pr_url": pr["url"],
+        "revisions": {
+            "content_revision": change.get("content_revision"),
+            "engine_revision": change.get("engine_revision"),
+        },
+    }
     if event == "re_reviewed":
         # The (possibly changed) declarations this SAME request carried — recorded on the event so
         # the audit trail shows what a re-request declared, not just that one happened.
@@ -700,6 +719,14 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
             promotion_id, resource_title=body.resource_title, access_spec=None,
             audience_spec=audience_spec_,
             table_mapping=table_mapping_)
+        store.update_change_request(
+            promotion_id,
+            provider=change["provider"],
+            external_id=change["external_id"],
+            external_url=change.get("external_url"),
+            content_revision=change.get("content_revision"),
+            engine_revision=change.get("engine_revision"),
+        )
     # App-originated event. `actor_app_email` (display-only OBO email) is recorded on `requested`
     # per ADR-0005; governance identities come from GitHub via reconcile (LB4).
     store.append_audit_event(
@@ -808,18 +835,23 @@ def promote_status(number: int) -> dict:
     the audit trail self-heals + a reload renders the cached status instantly. Reflect, never assert.
     W3: also resolves `prod_space_id` onto the response once the phase is `deployed` (see
     `_with_prod_space_id`)."""
-    status = _engine_call("promotion_status", lambda: app_logic.promotion_status(number))
     store = getattr(app.state, "store", None)
-    promotion = None
-    if store is not None:
-        promotion = store.find_by_pr(number)
-        if promotion is not None:
-            # github_factory is lazy: reconcile builds the bot only if it must attribute a new
-            # merge/approval (a transition), so the 5s poll pays nothing extra on a steady state.
-            try:
-                reconcile_mod.reconcile(store, promotion, status, app_logic.github_app_factory)
-            except Exception:  # noqa: BLE001 — a reconcile hiccup must not break the status read
-                logger.exception("reconcile failed for PR #%s", number)
+    promotion = store.find_by_change_request("github", str(number)) if store is not None else None
+    expected = ({
+        "content_revision": promotion.content_revision,
+        "engine_revision": promotion.engine_revision,
+    } if promotion is not None and promotion.content_revision and promotion.engine_revision else None)
+    status = _engine_call(
+        "promotion_status",
+        lambda: app_logic.promotion_status(number, approved_revisions=expected),
+    )
+    if promotion is not None:
+        # github_factory is lazy: reconcile builds the bot only if it must attribute a new
+        # merge/approval (a transition), so the 5s poll pays nothing extra on a steady state.
+        try:
+            reconcile_mod.reconcile(store, promotion, status, app_logic.github_app_factory)
+        except Exception:  # noqa: BLE001 — a reconcile hiccup must not break the status read
+            logger.exception("reconcile failed for PR #%s", number)
     return _with_prod_space_id(status, promotion.resource_title if promotion is not None else None)
 
 
@@ -1149,6 +1181,11 @@ def _promotion_summary(p) -> dict:
             "audience_spec": p.audience_spec,
             # Read-only compatibility until ADR-0009 Phase 2.
             "access_spec": p.access_spec,
+            "change_provider": p.change_provider,
+            "external_id": p.external_id,
+            "external_url": p.external_url,
+            "content_revision": p.content_revision,
+            "engine_revision": p.engine_revision,
             # G7: the declared table de-para, persisted the same way — reopening a promotion shows
             # exactly what was declared, without re-parsing the `.mapping.json` sidecar from git.
             "table_mapping": p.table_mapping}

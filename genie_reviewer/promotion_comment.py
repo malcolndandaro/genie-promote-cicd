@@ -58,7 +58,8 @@ def _audience_lines(review: dict) -> list[str]:
 
 def render_promotion_comment(review: dict, requester_email: str | None, *,
                              resource_title: str | None = None,
-                             table_mapping: dict | None = None) -> str:
+                             table_mapping: dict | None = None,
+                             revisions: dict | None = None) -> str:
     """Markdown mirroring the Revisão UI. First line is the marker (every review comment carries
     it — GitHub history is NEW comments, not one canonical comment mutated in place).
 
@@ -79,6 +80,12 @@ def render_promotion_comment(review: dict, requester_email: str | None, *,
     ]
     if resource_title:
         lines.append(f"**Nome do space em produção:** `{_safe(resource_title)}`")
+    if revisions:
+        lines.append(
+            "**Revisões imutáveis:** "
+            f"conteúdo `{_safe(revisions.get('content_revision'))}` · "
+            f"engine `{_safe(revisions.get('engine_revision'))}`"
+        )
     lines += [
         "",
         "_Leitura dos espaços executa como o usuário (OBO); o revisor (LLM) e a checagem de "

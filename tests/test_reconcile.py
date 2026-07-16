@@ -174,8 +174,9 @@ class _SweepGitHub:
         self.facts = facts or {}
         self.status_calls = 0
 
-    def get_status(self, number):
+    def get_status(self, number, approved_revisions=None):
         self.status_calls += 1
+        self.approved_revisions = approved_revisions
         return self.status_by_pr[number]
 
     def audit_facts(self, number):

@@ -36,6 +36,7 @@ import access_spec  # noqa: E402  (F2 — the declared-access model; Space perms
 import audience_check  # noqa: E402  (pilot AudienceSpec deterministic validation)
 import audience_spec  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
+import change_request  # noqa: E402  (provider-neutral revision + observation contract)
 import eval_gate  # noqa: E402
 import grant_check  # noqa: E402
 import handbook_rules  # noqa: E402
@@ -112,6 +113,11 @@ def mapping_path_for(slug: str) -> str:
     next to the artifact so CI's render.sh finds it by convention (`pre_render.py apply-mapping`,
     applied AFTER the dev_->prod_ rebind, BEFORE the strict allowlist check)."""
     return f"{GH_GENIE_SRC_DIR}/{slug}.mapping.json"
+
+
+def revision_path_for(slug: str) -> str:
+    """Self-describing immutable content/engine pair reviewed and deployed for this promotion."""
+    return f"{GH_GENIE_SRC_DIR}/{slug}.revision.json"
 
 # The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
 REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group",
@@ -918,6 +924,20 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
         extra[mapping_path_for(slug)] = json.dumps(table_mapping, ensure_ascii=False, indent=2) + "\n"
     else:
         remove.append(mapping_path_for(slug))
+    # ADR-0008: bind the desired content tree to the immutable engine commit selected by the
+    # content repository. The manifest is excluded from its own digest and then committed beside
+    # the artifact, so PR checks and deploy can prove they consumed the same pair after merge.
+    engine_revision = change_request.parse_engine_lock(gh.get_file_content("engine.lock"))
+    content_revision = change_request.compute_content_revision(
+        {path: content, **extra}, remove
+    )
+    revisions = change_request.RevisionPair(content_revision, engine_revision)
+    extra[revision_path_for(slug)] = json.dumps(
+        {"version": 1, "revisions": revisions.to_dict()},
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
     pr = gh.open_or_update_promotion(
         branch=branch, path=path, content=content, extra_files=extra, remove_files=remove,
         title=f"Promover Genie Space para produção ({safe_id})",
@@ -929,19 +949,26 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     # opened — surface it so the app tells the user instead of showing an empty pipeline. The review
     # still ran (it's informative), so we return it; there's just no PR to track.
     if pr.get("no_change"):
-        return {"review": review, "pr": None, "branch": branch, "no_change": True}
+        return {"review": review, "pr": None, "branch": branch, "no_change": True,
+                "revisions": revisions.to_dict()}
     gh.post_review_comment(pr["number"], PROMOTION_COMMENT_MARKER,
                            render_promotion_comment(review, requester_email,
-                                                    resource_title=prod_title, table_mapping=table_mapping))
+                                                    resource_title=prod_title,
+                                                    table_mapping=table_mapping,
+                                                    revisions=revisions.to_dict()))
     return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch,
-            "no_change": False}
+            "no_change": False, "change_request": {
+                "provider": "github", "external_id": str(pr["number"]),
+                "external_url": pr["html_url"], **revisions.to_dict(),
+            }}
 
 
-def promotion_status(number: int, profile: str | None = None, *, github: GitHubApp | None = None) -> dict:
+def promotion_status(number: int, profile: str | None = None, *, github: GitHubApp | None = None,
+                     approved_revisions: dict | None = None) -> dict:
     """GH3: the live state of a promotion PR (checks + merge + prod deploy/gate), read as the BOT
     (app SP) — no user token needed, the bot reads GitHub regardless of which user is viewing."""
     gh = github or _github_app(profile)
-    return gh.get_status(number)
+    return gh.get_status(number, approved_revisions=approved_revisions)
 
 
 # --- F3: self-service access requests — GOVERNED grant application ----------

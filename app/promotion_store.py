@@ -89,6 +89,12 @@ class Promotion:
     # independently of the `.mapping.json` sidecar's own PR/branch lifetime). None/empty means the
     # plain dev_->prod_ rebind, no overrides.
     table_mapping: Optional[dict] = None
+    # Provider-neutral Change Request identity + immutable approved pair (ADR-0008).
+    change_provider: Optional[str] = None
+    external_id: Optional[str] = None
+    external_url: Optional[str] = None
+    content_revision: Optional[str] = None
+    engine_revision: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -204,14 +210,21 @@ class PromotionStore:
                          current_phase: Optional[str], live_status: Optional[dict],
                          access_spec: Optional[dict] = None,
                          audience_spec: Optional[dict] = None,
-                         table_mapping: Optional[dict] = None) -> Promotion:
+                         table_mapping: Optional[dict] = None,
+                         change_provider: Optional[str] = None,
+                         external_id: Optional[str] = None,
+                         external_url: Optional[str] = None,
+                         content_revision: Optional[str] = None,
+                         engine_revision: Optional[str] = None) -> Promotion:
         now = self._clock()
         p = Promotion(
             id=str(uuid.uuid4()), resource_id=resource_id, resource_kind=resource_kind,
             resource_title=resource_title, requester_email=requester_email, pr_number=pr_number,
             pr_url=pr_url, branch=branch, current_phase=current_phase, live_status=live_status,
             terminal=False, last_reconciled_at=None, created_at=now, updated_at=now,
-            access_spec=access_spec, audience_spec=audience_spec, table_mapping=table_mapping)
+            access_spec=access_spec, audience_spec=audience_spec, table_mapping=table_mapping,
+            change_provider=change_provider, external_id=external_id, external_url=external_url,
+            content_revision=content_revision, engine_revision=engine_revision)
         self._b.insert_promotion(dataclasses.asdict(p))
         return p
 
@@ -245,6 +258,31 @@ class PromotionStore:
 
     def find_by_pr(self, pr_number: int) -> Optional[Promotion]:
         return _as(Promotion, self._b.find_promotion_by_pr(pr_number))
+
+    def find_by_change_request(self, provider: str, external_id: str) -> Optional[Promotion]:
+        """Canonical lookup with a PR-number fallback for rows created before ADR-0008."""
+        match = next(
+            (p for p in self.list_promotions(None)
+             if p.change_provider == provider and p.external_id == external_id),
+            None,
+        )
+        if match is not None:
+            return match
+        if provider == "github" and external_id.isdigit():
+            return self.find_by_pr(int(external_id))
+        return None
+
+    def update_change_request(self, promotion_id: str, *, provider: str, external_id: str,
+                              external_url: Optional[str], content_revision: Optional[str],
+                              engine_revision: Optional[str]) -> None:
+        self._b.update_promotion(promotion_id, {
+            "change_provider": provider,
+            "external_id": external_id,
+            "external_url": external_url,
+            "content_revision": content_revision,
+            "engine_revision": engine_revision,
+            "updated_at": self._clock(),
+        })
 
     def list_promotions(self, requester_email: Optional[str] = None) -> list[Promotion]:
         """Promotions, newest first. `requester_email=None` => all (the caller enforces the role)."""
@@ -376,6 +414,14 @@ class InMemoryBackend:
         pr = row.get("pr_number")
         if pr is not None and any(p.get("pr_number") == pr for p in self._promotions.values()):
             raise DuplicatePRNumber(f"promotion already exists for PR #{pr}")  # mirrors UNIQUE(pr_number)
+        provider, external_id = row.get("change_provider"), row.get("external_id")
+        if provider and external_id and any(
+            p.get("change_provider") == provider and p.get("external_id") == external_id
+            for p in self._promotions.values()
+        ):
+            raise DuplicatePRNumber(
+                f"promotion already exists for {provider} Change Request {external_id}"
+            )
         self._promotions[row["id"]] = dict(row)
 
     def _require_promotion(self, promotion_id: str) -> None:
@@ -491,7 +537,12 @@ MIGRATIONS = (
         updated_at         timestamptz NOT NULL,
         access_spec        jsonb,
         audience_spec      jsonb,
-        table_mapping      jsonb
+        table_mapping      jsonb,
+        change_provider    text,
+        external_id        text,
+        external_url       text,
+        content_revision   text,
+        engine_revision    text
     )""",
     # F2 (added after the original CREATE TABLE shipped): idempotent for a promotions table that
     # predates this column — the CREATE TABLE above already includes it for a fresh DB (no-op
@@ -500,6 +551,11 @@ MIGRATIONS = (
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS audience_spec jsonb",
     # G7: same idempotent-migration pattern as access_spec above, for the declared table de-para.
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS table_mapping jsonb",
+    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS change_provider text",
+    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS external_id text",
+    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS external_url text",
+    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS content_revision text",
+    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS engine_revision text",
     """CREATE TABLE IF NOT EXISTS review_snapshots (
         id              text PRIMARY KEY,
         promotion_id    text NOT NULL REFERENCES promotions(id),
@@ -525,6 +581,9 @@ MIGRATIONS = (
     "CREATE INDEX IF NOT EXISTS ix_promotions_requester ON promotions(requester_email)",
     "CREATE INDEX IF NOT EXISTS ix_promotions_resource  ON promotions(resource_id)",
     "CREATE INDEX IF NOT EXISTS ix_promotions_pr        ON promotions(pr_number)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_promotions_change_request "
+    "ON promotions(change_provider, external_id) "
+    "WHERE change_provider IS NOT NULL AND external_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS ix_audit_promotion_seq  ON audit_events(promotion_id, seq)",
     # A reconcile-written milestone occurs AT MOST ONCE per promotion. This partial unique index makes
     # that a DB invariant, so two concurrent reconciles (e.g. a viewer poll + the LB6 scheduler) can't
@@ -551,7 +610,9 @@ MIGRATIONS = (
 _JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec", "audience_spec", "table_mapping"}
 _PROMO_COLS = ("id", "resource_id", "resource_kind", "resource_title", "requester_email",
                "pr_number", "pr_url", "branch", "current_phase", "live_status", "terminal",
-               "last_reconciled_at", "created_at", "updated_at", "access_spec", "audience_spec", "table_mapping")
+               "last_reconciled_at", "created_at", "updated_at", "access_spec", "audience_spec",
+               "table_mapping", "change_provider", "external_id", "external_url",
+               "content_revision", "engine_revision")
 _SNAP_COLS = ("id", "promotion_id", "created_at", "gate_conclusion", "gate_summary",
               "findings", "eval", "timeline")
 _EVENT_COLS = ("id", "promotion_id", "seq", "occurred_at", "event_type", "actor_github_login",

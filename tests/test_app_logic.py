@@ -588,6 +588,9 @@ class _FakeGitHubApp:
         self.promo = kw
         return {"number": 7, "html_url": "https://github.com/o/r/pull/7"}
 
+    def get_file_content(self, path, **_kwargs):
+        return "a" * 40 if path == "engine.lock" else None
+
     def post_review_comment(self, number, marker, body):
         self.comment = {"number": number, "marker": marker, "body": body}
         return {"id": 1, "seq": 1}
@@ -624,9 +627,15 @@ def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
     assert "display_name" in gh.promo["content"]
     # + a per-space title sidecar so render.sh can name the generated prod genie_spaces resource
     assert gh.promo["extra_files"]["src/genie/sp1.title"].strip() == "Recebíveis"
+    revision = json.loads(gh.promo["extra_files"]["src/genie/sp1.revision.json"])
+    assert revision["revisions"]["engine_revision"] == "a" * 40
+    assert len(revision["revisions"]["content_revision"]) == 64
+    assert out["change_request"]["external_id"] == "7"
     # the comment mirrors the review and attributes the human requester
     assert gh.comment["number"] == 7
     assert "malcoln@x" in gh.comment["body"] and "EVAL-01" in gh.comment["body"]
+    assert "**Revisões imutáveis:**" in gh.comment["body"]
+    assert ("a" * 40) in gh.comment["body"]
 
 
 def test_two_spaces_get_distinct_branches_and_paths():
@@ -646,10 +655,13 @@ def test_space_slug_pinned_and_derived(monkeypatch):
 
 def test_promotion_status_reads_via_injected_bot():
     class FakeGH:
-        def get_status(self, number):
+        def get_status(self, number, approved_revisions=None):
+            assert approved_revisions == {"content_revision": "b" * 64, "engine_revision": "a" * 40}
             return {"phase": "awaiting_approval", "number": number, "merged": True}
 
-    out = app_logic.promotion_status(6, github=FakeGH())
+    out = app_logic.promotion_status(
+        6, github=FakeGH(),
+        approved_revisions={"content_revision": "b" * 64, "engine_revision": "a" * 40})
     assert out == {"phase": "awaiting_approval", "number": 6, "merged": True}
 
 

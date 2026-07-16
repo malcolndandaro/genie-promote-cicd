@@ -94,9 +94,14 @@ def reconcile(store: PromotionStore, promotion, status: dict,
 
     for event in to_append:
         login, at = _identity(event, status, facts)
+        revisions = status.get("revisions") or {
+            "content_revision": promotion.content_revision,
+            "engine_revision": promotion.engine_revision,
+        }
         store.append_audit_event(
             promotion.id, event, actor_github_login=login, github_event_at=at,
-            detail={"phase": status.get("phase"), "observed_at": _now_iso()})
+            detail={"phase": status.get("phase"), "observed_at": _now_iso(),
+                    "revisions": revisions})
 
     # Only write the cache on an ACTUAL change (new events or a phase shift) — not on every steady
     # poll. This keeps `updated_at` meaningful (it tracks real activity, not the 5s ticker) and
@@ -137,7 +142,11 @@ def reconcile_all(store: PromotionStore, github_factory: Callable[[], object],
         if p.pr_number is None:
             continue
         try:
-            status = gh.get_status(p.pr_number)
+            expected = ({
+                "content_revision": p.content_revision,
+                "engine_revision": p.engine_revision,
+            } if p.content_revision and p.engine_revision else None)
+            status = gh.get_status(p.pr_number, approved_revisions=expected)
             appended = reconcile(store, p, status, factory)
             checked += 1
             if appended:

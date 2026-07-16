@@ -176,6 +176,11 @@ export interface PromotionSummary {
    * shows exactly what was declared. Empty/null means no overrides (plain dev_->prod_ defaults). */
   table_mapping: Record<string, string> | null;
   audience_spec: AudienceSpec | null;
+  change_provider?: string | null;
+  external_id?: string | null;
+  external_url?: string | null;
+  content_revision?: string | null;
+  engine_revision?: string | null;
 }
 
 /** One append-only audit event (LB4). `actor_github_login` is the AUTHORITATIVE governance identity;
@@ -246,10 +251,15 @@ export type PromotePhase =
   | 'deploying'
   | 'deployed'
   | 'deploy_failed'
+  | 'revision_mismatch'
   | 'merged'
   | 'closed';
 
 export interface PromoteStatus {
+  provider?: string;
+  external_id?: string;
+  external_url?: string | null;
+  revisions?: { content_revision: string; engine_revision: string } | null;
   pr_state: string;
   merged: boolean;
   checks: 'none' | 'pending' | 'success' | 'failure';
@@ -265,6 +275,9 @@ export interface PromoteStatus {
     run_url: string | null;
     run_id?: number | null;
     approver?: string | null;
+    revisions?: { content_revision: string; engine_revision: string } | null;
+    rejected?: boolean;
+    rejection_reason?: string | null;
   };
   /** Fix C: WHY the deploy failed — only populated when `deploy.conclusion === 'failure'` (the
    * bot degrades to `null` on any GitHub read hiccup, same contract as `checks_detail`). */

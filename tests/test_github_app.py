@@ -1,5 +1,6 @@
 """Unit tests for the GitHub App client (GH2) — a fake GitHub transport, no network, no real key."""
 import base64
+import json
 import os
 import sys
 
@@ -329,7 +330,7 @@ def test_github_error_raised_on_non_2xx():
 
 
 def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=None, annotations=None,
-                      jobs=None):
+                      jobs=None, revision_manifests=None):
     """`jobs` (Fix C): {run_id: [job, ...]} for `/actions/runs/{id}/jobs` — a job's own
     `check-runs/{id}/annotations` reuses the SAME `annotations` dict (keyed by check-run id, same
     as the PR-check-run path above; a job IS a check run on GitHub Actions)."""
@@ -342,6 +343,18 @@ def _status_transport(pull, check_runs, workflow_runs, approvals=None, reviews=N
             return 200, (annotations or {}).get(run_id, [])
         if "/reviews" in p:  # must precede the generic /pulls/{n} branch (path also has /pulls/)
             return 200, reviews or []
+        if "/pulls/" in p and "/files" in p:
+            return (200, [{"filename": "src/genie/space.revision.json"}]
+                    if revision_manifests else [])
+        if "/contents/src/genie/space.revision.json" in p:
+            ref = p.split("ref=", 1)[1]
+            payload = (revision_manifests or {}).get(ref)
+            if payload is None:
+                return 404, {}
+            return 200, {
+                "sha": f"blob-{ref}",
+                "content": base64.b64encode(json.dumps(payload).encode()).decode(),
+            }
         if "/pulls/" in p and p.split("/pulls/")[1].split("?")[0].isdigit():
             return 200, pull
         if "/check-runs" in p:
@@ -792,6 +805,34 @@ def test_deploy_run_matched_by_merge_commit_sha_not_just_latest():
     ]
     s = _status_transport(pr, [{"status": "completed", "conclusion": "success"}], runs).get_status(1)
     assert s["deploy"]["run_url"] == "mine" and s["phase"] == "awaiting_approval"
+
+
+def test_status_is_canonical_and_rejects_deployment_revision_mismatch():
+    approved = {"content_revision": "b" * 64, "engine_revision": "a" * 40}
+    observed = {"content_revision": "c" * 64, "engine_revision": "a" * 40}
+    pr = {**_MERGED_PR, "merge_commit_sha": "MINE", "merged_by": {"login": "pedro"}}
+    runs = [{
+        "name": "deploy", "status": "completed", "conclusion": "success",
+        "html_url": "run", "id": 9, "head_sha": "MINE",
+    }]
+    gh = _status_transport(
+        pr,
+        [{"name": "bundle validate", "status": "completed", "conclusion": "success"}],
+        runs,
+        approvals=[{"state": "approved", "user": {"login": "pedro"}}],
+        revision_manifests={
+            "s": {"version": 1, "revisions": approved},
+            "MINE": {"version": 1, "revisions": observed},
+        },
+    )
+    status = gh.get_status(1, approved_revisions=approved)
+    assert status["provider"] == "github"
+    assert status["external_id"] == "1"
+    assert status["actors"]["merged_by"] == "pedro"
+    assert status["revisions"] == approved
+    assert status["deployment"]["rejected"] is True
+    assert status["phase"] == "revision_mismatch"
+    assert status["deploy"] == status["deployment"]  # legacy alias is canonical, never raw
 
 
 def test_just_merged_window_does_not_borrow_a_prior_completed_deploy_run():

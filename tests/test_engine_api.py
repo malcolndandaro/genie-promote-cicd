@@ -966,14 +966,29 @@ def test_promote_status_endpoint_embeds_prod_space_id_when_deployed(monkeypatch,
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=9))
     client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis"},
                 headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
-    monkeypatch.setattr(engine_api.app_logic, "promotion_status", lambda n, *a, **k: {
-        "pr_state": "closed", "merged": True, "checks": "success", "review_decision": "approved",
-        "deploy": {"status": "completed", "conclusion": "success", "waiting_approval": False, "approver": "pedro"},
-        "pr_url": "https://gh/pr/9", "phase": "deployed"})
+    captured = {}
+
+    def fake_status(n, *a, approved_revisions=None, **k):
+        captured["approved_revisions"] = approved_revisions
+        return {
+            "pr_state": "closed", "merged": True, "checks": "success",
+            "review_decision": "approved",
+            "deploy": {
+                "status": "completed", "conclusion": "success",
+                "waiting_approval": False, "approver": "pedro",
+            },
+            "pr_url": "https://gh/pr/9", "phase": "deployed",
+        }
+
+    monkeypatch.setattr(engine_api.app_logic, "promotion_status", fake_status)
     monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
                         lambda *a, **k: [{"space_id": "prod-999", "title": "Recebíveis"}])
     r = client.get("/api/promote/9/status")
     assert r.status_code == 200 and r.json()["prod_space_id"] == "prod-999"
+    assert captured["approved_revisions"] == {
+        "content_revision": "b" * 64,
+        "engine_revision": "a" * 40,
+    }
 
 
 def test_promotion_detail_resolves_prod_space_id_from_cached_status(monkeypatch, store):
@@ -1011,7 +1026,14 @@ def _fake_promote(review_gate="success", number=7):
                            "findings": [{"rule_id": "ENV-01", "severity": "BLOCKER"}] if review_gate == "failure" else [],
                            "eval": {"status": "pass", "summary": "n/a"},
                            "timeline": [{"key": "review", "status": "pass"}]},
-                "pr": {"number": number, "url": f"https://gh/pr/{number}"}}
+                "pr": {"number": number, "url": f"https://gh/pr/{number}"},
+                "change_request": {
+                    "provider": "github",
+                    "external_id": str(number),
+                    "external_url": f"https://gh/pr/{number}",
+                    "content_revision": "b" * 64,
+                    "engine_revision": "a" * 40,
+                }}
     return fn
 
 
@@ -1023,10 +1045,13 @@ def test_promote_persists_promotion_snapshot_and_requested_event(monkeypatch, st
     pid = r.json()["promotion_id"]
     p = store.get_promotion(pid)
     assert p.pr_number == 7 and p.resource_title == "Recebíveis" and p.requester_email == "ana@x"
+    assert p.change_provider == "github" and p.external_id == "7"
+    assert p.content_revision == "b" * 64 and p.engine_revision == "a" * 40
     assert store.latest_snapshot(pid).gate_conclusion == "success"
     events = store.list_audit_events(pid)
     assert [e.event_type for e in events] == ["requested"]
     assert events[0].actor_app_email == "ana@x"  # display-only attribution
+    assert events[0].detail["revisions"]["engine_revision"] == "a" * 40
 
 
 def test_promote_threads_audience_spec_to_the_engine_and_persists_it(monkeypatch, store):

@@ -9,6 +9,7 @@ export const PHASE_LABEL: Record<PromotePhase, string> = {
   deploying: 'Implantando…',
   deployed: 'Implantado em produção',
   deploy_failed: 'Falha no deploy',
+  revision_mismatch: 'Deploy rejeitado: revisões divergentes',
   merged: 'Merge concluído',
   closed: 'PR fechado',
 };
@@ -36,6 +37,7 @@ export function phaseTone(phase: PromotePhase): BadgeTone {
       return 'success';
     case 'checks_failed':
     case 'deploy_failed':
+    case 'revision_mismatch':
       return 'destructive';
     case 'checks_running':
     case 'awaiting_approval':
@@ -89,6 +91,7 @@ export function statusBucket(phase: string | null | undefined): StatusBucket {
       return 'deployed';
     case 'checks_failed':
     case 'deploy_failed':
+    case 'revision_mismatch':
     case 'closed':
       return 'failed';
     case 'merged':

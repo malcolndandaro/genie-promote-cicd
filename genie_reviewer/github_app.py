@@ -25,6 +25,14 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+from change_request import (
+    ChangeRequestObservation,
+    CheckObservation,
+    DeploymentObservation,
+    RevisionPair,
+    reject_mismatched_deployment,
+)
+
 _API = "https://api.github.com"
 Transport = Callable[[str, str, dict, dict | None], "tuple[int, dict | None]"]
 
@@ -37,7 +45,7 @@ class GitHubError(RuntimeError):
 
 
 _NO_DEPLOY = {"status": "none", "conclusion": None, "waiting_approval": False, "run_url": None,
-              "run_id": None, "approver": None}
+              "run_id": None, "approver": None, "source_sha": None}
 
 
 def _aggregate_checks(runs: list) -> str:
@@ -321,7 +329,7 @@ class GitHubApp:
         return {"number": pr["number"], "html_url": pr["html_url"]}
 
     # --- live status (GH3): reflect, never assert ---------------------------
-    def get_status(self, number: int) -> dict:
+    def get_status(self, number: int, approved_revisions: dict | RevisionPair | None = None) -> dict:
         """Read the live promotion state from GitHub (as the bot): PR check conclusion, merge
         state, and — once merged — the prod deploy run + whether its Environment gate is waiting.
         Reflects GitHub; it never asserts a deploy that didn't happen."""
@@ -342,13 +350,77 @@ class GitHubApp:
                          if deploy["run_id"] and deploy["conclusion"] == "failure" else None)
         # A merged PR was approvable by definition; otherwise read the live PR-review decision.
         review_decision = "approved" if merged else self._pr_review_decision(number)
-        return {
-            "pr_state": pr.get("state"), "merged": merged, "checks": checks,
-            "checks_detail": checks_detail,
-            "review_decision": review_decision,
-            "deploy": deploy, "deploy_detail": deploy_detail, "pr_url": pr.get("html_url"),
-            "phase": _derive_phase(pr.get("state"), merged, checks, deploy),
-        }
+        revisions = self._revision_pair(number, head_sha)
+        deploy_revisions = self._revision_pair(number, deploy.get("source_sha"))
+        check_observations = tuple(
+            CheckObservation(
+                name=item.get("name") or "check",
+                conclusion=item.get("conclusion"),
+                summary=item.get("summary") or "",
+                details_url=item.get("details_url"),
+            )
+            for item in (checks_detail or [])
+        )
+        deployment = DeploymentObservation(
+            status=deploy["status"],
+            conclusion=deploy["conclusion"],
+            waiting_approval=deploy["waiting_approval"],
+            run_url=deploy["run_url"],
+            run_id=deploy["run_id"],
+            approver=deploy["approver"],
+            revisions=deploy_revisions,
+        )
+        observation = ChangeRequestObservation(
+            provider="github",
+            external_id=str(number),
+            external_url=pr.get("html_url"),
+            state=pr.get("state"),
+            merged=merged,
+            phase=_derive_phase(pr.get("state"), merged, checks, deploy),
+            checks=checks,
+            check_observations=check_observations,
+            review_decision=review_decision,
+            actors={
+                "merged_by": (pr.get("merged_by") or {}).get("login"),
+                "deploy_approver": deploy.get("approver"),
+            },
+            revisions=revisions,
+            deployment=deployment,
+        )
+        expected = (approved_revisions if isinstance(approved_revisions, RevisionPair)
+                    else RevisionPair.from_dict(approved_revisions))
+        wire = reject_mismatched_deployment(observation, expected).to_dict()
+        wire["deploy_detail"] = deploy_detail
+        return wire
+
+    def _revision_pair(self, number: int, ref: str | None) -> RevisionPair | None:
+        """Read the one promotion revision manifest changed by this PR at an immutable ref.
+
+        This is best-effort for pre-S2 Change Requests: a missing manifest is legacy compatibility,
+        while a present malformed manifest is rejected as unavailable rather than leaked raw.
+        """
+        if not ref:
+            return None
+        status, files = self._transport(
+            "GET",
+            f"{_API}{self._repo_path(f'/pulls/{number}/files')}?per_page=100",
+            self._headers(self._token()),
+            None,
+        )
+        if status != 200 or not isinstance(files, list):
+            return None
+        manifests = sorted(
+            item.get("filename") for item in files
+            if str(item.get("filename") or "").endswith(".revision.json")
+        )
+        if len(manifests) != 1:
+            return None
+        try:
+            raw = self.get_file_content(manifests[0], ref=ref)
+            payload = json.loads(raw or "{}")
+            return RevisionPair.from_dict(payload.get("revisions"))
+        except (GitHubError, ValueError, json.JSONDecodeError):
+            return None
 
     def _checks_detail(self, runs: list) -> list[dict] | None:
         """PT-friendly detail per FAILING check run (G8): name, conclusion, a best-effort summary,
@@ -452,7 +524,7 @@ class GitHubApp:
         approver = self._deploy_approver(run_id) if run_id and status == "completed" else None
         return {"status": status, "conclusion": conclusion,
                 "waiting_approval": status == "waiting", "run_url": wf.get("html_url"),
-                "run_id": run_id, "approver": approver}
+                "run_id": run_id, "approver": approver, "source_sha": wf.get("head_sha")}
 
     def _deploy_detail(self, run_id: int, run_url: str | None) -> dict | None:
         """PT-friendly detail for a FAILED deploy run (Fix C — mirrors G8's `_checks_detail`, one
