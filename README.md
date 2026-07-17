@@ -115,6 +115,19 @@ This validates the Python engine, API contracts, Svelte types, and production fr
 workspace, GitHub, model-serving, and Lakebase operations are intentionally exercised only after the
 deployment prerequisites below are configured.
 
+For the complete pre-pilot proof (backend, frontend, Playwright, both repository render shapes,
+contract/migration checks and a redacted evidence manifest), run:
+
+```bash
+python3 scripts/pilot_readiness.py \
+  --content-repo /path/to/genie-spaces-content \
+  --offline-only
+```
+
+Offline success is not a live GO. Copy [the evidence template](docs/pilot-live-evidence.example.json)
+and re-run without `--offline-only`; missing provider/human evidence returns `NO-GO` without mutating
+Databricks or GitHub. The human decision remains the [R1–R15 checklist](docs/PILOT-GO-NO-GO.md).
+
 ## Guided deployment
 
 The setup is easiest when completed in order. Finish the verification under each step before moving

@@ -81,6 +81,18 @@ now only renders + deploys dev's `setup` job (no app there anymore).
 Open a PR that touches a resource → `pr-checks` validates → merge → `deploy-prod`
 pauses on the prod gate → the Steward approves → SP runs `bundle deploy -t prod`.
 
+Before the pilot rehearsal, run the automated offline floor and then the live-evidence decision:
+
+```bash
+python3 scripts/pilot_readiness.py --content-repo /path/to/genie-spaces-content --offline-only
+cp docs/pilot-live-evidence.example.json /safe/path/pilot-live-evidence.json
+python3 scripts/pilot_readiness.py --content-repo /path/to/genie-spaces-content \
+  --live-evidence /safe/path/pilot-live-evidence.json
+```
+
+The second command is intentionally `NO-GO` while any provider or R1–R15 evidence is pending. It is
+read-only with respect to Databricks/GitHub and writes only a redacted local manifest under `build/`.
+
 ## Quality gates that BLOCK the merge (branch protection)
 
 The promotion PR (in the content repo `genie-spaces-content`) is gated by two required-check jobs in

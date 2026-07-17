@@ -70,8 +70,8 @@ describe('buildPromotionSteps — G8 checks_detail', () => {
   });
 });
 
-// Fix C: mirrors G8 one level down — a DEPLOY failure (e.g. apply_access.py crashing on real
-// declared access) must surface WHY, not a bare "Falha", via the same <details> mechanism.
+// Fix C: mirrors G8 one level down — a DEPLOY failure (e.g. audience reconciliation failing
+// mid-attempt) must surface WHY, not a bare "Falha", via the same <details> mechanism.
 describe('buildPromotionSteps — Fix C deploy_detail', () => {
   it('leaves the deploy step pending with no detail before any live status has landed', () => {
     const steps = buildPromotionSteps(review, null);

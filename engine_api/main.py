@@ -716,9 +716,9 @@ def _with_prod_space_id(status: dict | None, resource_title: str | None) -> dict
     """W3: once a promotion has reached `deployed`, embed the resolved PROD Genie Space id so the
     SPA can render an "Abrir Genie em produção" deep-link. The promotion's own `resource_id` is the
     DEV Space id (a Promotion's identity is the Space AUTHORED in dev — Genie mints a brand-new id
-    on `create_space`, it is never the same id in prod), so the prod id has to be RESOLVED, the same
-    way `apply_access.py::resolve_space_id` does: matching the promotion's stored `resource_title`
-    against the live prod listing (`app_logic.list_prod_spaces`).
+    on `create_space`, it is never the same id in prod), so the prod id has to be RESOLVED by
+    matching the promotion's stored `resource_title` against the live prod listing
+    (`app_logic.list_prod_spaces`).
 
     Resolved FRESH on every call rather than persisted — cheap (title is stable once deployed, so
     there's nothing to invalidate) and means a promotion cached BEFORE this field existed still
@@ -726,7 +726,7 @@ def _with_prod_space_id(status: dict | None, resource_title: str | None) -> dict
     stops at the `deployed` phase (a terminal phase), so this never becomes a per-5s-poll cost.
 
     NEVER guesses: a `resource_title` that matches zero or MORE THAN ONE live prod Space omits the
-    field entirely (same non-ambiguity rule `apply_access.py`'s own resolution enforces) — the UI
+    field entirely (the same non-ambiguity rule used by deployment resolution) — the UI
     hides the button rather than link to the wrong, or a nonexistent, Space."""
     if not status or status.get("phase") != "deployed" or not resource_title:
         return status

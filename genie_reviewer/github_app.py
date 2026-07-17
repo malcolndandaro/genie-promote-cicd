@@ -371,7 +371,7 @@ class GitHubApp:
         checks_detail = self._checks_detail(runs) if checks == "failure" else None
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
         attempt = self._deployment_attempt(deploy["run_id"]) if deploy.get("run_id") else None
-        # Fix C: WHY the DEPLOY failed (e.g. apply_access.py crashing on real declared access) —
+        # Fix C: WHY the DEPLOY failed (e.g. audience reconciliation failing mid-attempt) —
         # same "only on a failing verdict" gating as checks_detail, no new bot permission
         # (actions:read already covers /jobs; annotations reuse the checks_detail scope).
         deploy_detail = (self._deploy_detail(deploy["run_id"], deploy["run_url"])

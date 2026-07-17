@@ -11,7 +11,7 @@ workspace it lives in, and at pr-checks time the prod space doesn't exist yet (c
 merge-blocking gate is this benchmark COUNT, which IS deterministically readable from the committed
 JSON (`benchmarks.questions` round-trips through the create/import API — SP1 spike, 2026-07-02).
 
-Runs offline: the count is read straight from the file, so — unlike check_grants.py — this needs NO
+Runs offline: the count is read straight from the file, so — unlike the audience check — this needs NO
 WorkspaceClient / prod credentials. It just needs the rendered artifact.
 
 Threshold: `rules_config.eval01_config(None)` → the hardcoded default (min_benchmark=2, BLOCKER).
@@ -39,13 +39,13 @@ DEFAULT_PATH = "build/genie/receivables.serialized_space.json"
 def _gh_escape(s: str) -> str:
     """Escape text for a GitHub Actions workflow-command payload (`::error::`/`::warning::`), so the
     finding becomes a real check-run annotation. Per the docs, `%` must be escaped first. Mirrors
-    check_grants.py::_gh_escape verbatim."""
+    the audience check's escaping verbatim."""
     return s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def _emit_annotation(level: str, message: str) -> None:
     """Print an EVAL-01 finding as a REAL GitHub annotation (a bare print never becomes one). `level`
-    is `"error"` for the blocking count miss, `"warning"` otherwise — matches check_grants.py's shape
+    is `"error"` for the blocking count miss, `"warning"` otherwise — matches the audience check's shape
     so `github_app._summarize_annotations` surfaces it in the app's check-details panel."""
     print(f"::{level} title=EVAL-01::{_gh_escape(message)}")
 

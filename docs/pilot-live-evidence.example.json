@@ -1,0 +1,42 @@
+{
+  "github_app": {
+    "status": "pending",
+    "url": "https://github.com/your-org/your-content-repo/settings/installations",
+    "note": "Installation includes the content repository; App identity completed a token and read/write smoke test."
+  },
+  "required_checks": {
+    "status": "pending",
+    "url": "https://github.com/your-org/your-content-repo/settings/branches",
+    "note": "Strict required checks and admin enforcement are enabled on main."
+  },
+  "prod_environment_gate": {
+    "status": "pending",
+    "url": "https://github.com/your-org/your-content-repo/settings/environments",
+    "note": "The prod Environment requires the GestOps Steward and prevents self-review."
+  },
+  "runner": {
+    "status": "pending",
+    "url": "https://github.com/your-org/your-content-repo/settings/actions/runners",
+    "note": "The scoped content runner is online and completed a harmless job."
+  },
+  "app_runtime": {
+    "status": "pending",
+    "url": "https://your-workspace.cloud.databricks.com/apps",
+    "note": "One Medium App passed start/use/stop and cost-alert checks."
+  },
+  "databricks_identities": {
+    "status": "pending",
+    "url": "https://your-workspace.cloud.databricks.com/settings/identity-and-access",
+    "note": "App, DEV transport and CI service-principal permission smoke tests passed."
+  },
+  "r1_r15_rehearsal": {
+    "status": "pending",
+    "url": "https://your-evidence-location.example/pilot-rehearsal",
+    "note": "The human R1-R15 matrix has redacted evidence links."
+  },
+  "signoff": {
+    "status": "pending",
+    "url": "https://your-evidence-location.example/pilot-signoff",
+    "note": "KIP and GestOps both recorded affirmative decisions."
+  }
+}

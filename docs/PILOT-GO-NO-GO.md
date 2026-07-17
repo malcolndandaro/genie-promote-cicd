@@ -19,6 +19,21 @@ Recommended window: business days, 08:00–18:00 BRT. KIP starts/stops one Mediu
 and may extend the window for a scheduled demo. Expected App compute usage is 5 DBU/day or 25
 DBU/week; investigate above 30 DBU/week. Budget alerts inform KIP but do not stop the App.
 
+## Automated readiness first
+
+Run the non-mutating verifier before collecting live rehearsal evidence:
+
+```bash
+python3 scripts/pilot_readiness.py \
+  --content-repo /path/to/genie-spaces-content \
+  --offline-only
+```
+
+For the actual go/no-go, copy `docs/pilot-live-evidence.example.json`, replace placeholders with
+redacted evidence links/status, and omit `--offline-only`. Missing GitHub App configuration,
+required checks, the production gate, runtime evidence, R1–R15 proof, or signatures returns
+`NO-GO`; the verifier never creates credentials, approves a gate, or deploys anything.
+
 ## Current known live blocker
 
 The live in-app promotion button is a NO-GO until the `genie-promote-bot` installation includes
@@ -50,8 +65,7 @@ No secret, token, private key or full auth header belongs in the evidence pack.
 - [ ] All ten Wayfinder decisions are resolved and Phase 2 in ADR-0009 is complete.
 - [ ] `Meus Espaços`, `Aguardando minha revisão`, `Configurações`, and `Auditoria` are the only
       navigation surfaces; promotion detail remains available by deep link.
-- [ ] No active code/workflow/content reference remains for `.access.json`, `AccessSpec`,
-      `uc_principals`, `CAN_VIEW`, `GRANT-01`, `consumer_group`, Access Requests or Approver.
+- [ ] The automated retired-contract scan passes for active code, workflows, content and operator docs.
 - [ ] Lakebase has `AudienceSpec` and Deployment Attempt persistence, no access-request tables,
       no `promotions.access_spec`, and roles allow only `steward`/`admin`.
 - [ ] Demo promotion/review/audit/rehydrate rows were reset; operational role/rule/prompt/KA config
@@ -156,7 +170,7 @@ Any one of these fails the release:
 - the live App cannot create/update the content-repo Change Request;
 - Requester and Steward are the same governance identity, or the prod gate can be bypassed;
 - checks and deploy use different content/engine revisions;
-- any active path accepts `CAN_VIEW`, mutates UC grants, or exposes the retired Access Request flow;
+- any active path accepts a retired permission level, mutates UC grants, or exposes a retired demo flow;
 - a content/principal error reaches production mutation instead of Preflight;
 - the app claims `deployed` without live readback, claims `produção não mudou` without proof, or
   hides a partial mutation;
