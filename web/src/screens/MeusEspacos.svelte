@@ -7,6 +7,7 @@
   import EspacoRow from '../lib/components/EspacoRow.svelte';
   import PromotionConfirm from '../lib/components/PromotionConfirm.svelte';
   import PromotionReview from '../lib/components/PromotionReview.svelte';
+  import FlowSteps from '../lib/components/FlowSteps.svelte';
   import { getResources, getPromotions, isAuthError, type PromotionSummary } from '../lib/api';
   import { statusBucket, type StatusBucket } from '../lib/status';
   import type { Promotion } from '../lib/promotion.svelte';
@@ -169,15 +170,13 @@
 </script>
 
 <div class="author-home">
-  <header class="hero">
-    <div>
-      <p class="hero__crumb">Genie / Meus Espaços</p>
-      <h1>Do rascunho à produção,<br />sem perder o fio.</h1>
-      <p class="hero__copy">
-        Escolha um Space, confirme seu público e acompanhe cada promoção no mesmo lugar.
-        A edição continua no Dev; a publicação passa pelo Steward.
-      </p>
+  <header class="process-head">
+    <div class="process-head__intro">
+      <p class="process-head__eyebrow">Fluxo governado · Dev → Prod</p>
+      <h1>Promover Genie Space</h1>
+      <p>Escolha o Space; o app conduz o restante com revisão, aprovação e rastreabilidade.</p>
     </div>
+    <FlowSteps />
   </header>
 
   {#await Promise.all([resourcesP, promotionsP])}
@@ -294,39 +293,44 @@
 
 <style>
   .author-home { display: flex; flex-direction: column; gap: var(--space-5); }
-  .hero {
-    position: relative;
-    padding: var(--space-3) 0 var(--space-4);
-    overflow: clip;
+  .process-head {
+    display: grid;
+    grid-template-columns: minmax(15rem, 0.8fr) minmax(34rem, 1.7fr);
+    align-items: stretch;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: 0 0.45rem 1.5rem color-mix(in srgb, var(--foreground) 5%, transparent);
   }
-  .hero::after {
-    content: '';
-    position: absolute;
-    width: 16rem;
-    height: 16rem;
-    right: -5rem;
-    top: -7rem;
-    border-radius: 50%;
-    background: radial-gradient(circle, color-mix(in srgb, var(--destructive) 9%, transparent), transparent 68%);
-    pointer-events: none;
+  .process-head__intro {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: var(--space-3) var(--space-5);
   }
-  .hero__crumb {
-    margin: 0 0 var(--space-3);
-    color: var(--muted-foreground);
-    font-size: 0.75rem;
+  .process-head__eyebrow {
+    margin: 0 0 0.25rem;
+    color: var(--accent-hover);
+    font-size: 0.6rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
   }
-  .hero h1 {
-    max-width: 48rem;
+  .process-head h1 {
+    margin: 0;
     font-family: var(--font-display, Georgia, serif);
-    font-size: clamp(2.2rem, 5vw, 4rem);
-    line-height: 0.95;
-    letter-spacing: -0.055em;
+    font-size: clamp(1.35rem, 2vw, 1.8rem);
+    line-height: 1.05;
+    letter-spacing: -0.035em;
   }
-  .hero__copy {
-    max-width: 48rem;
-    margin: var(--space-4) 0 0;
+  .process-head__intro > p:last-child {
+    max-width: 34rem;
+    margin: 0.45rem 0 0;
     color: var(--muted-foreground);
-    font-size: 0.95rem;
+    font-size: 0.72rem;
+    line-height: 1.4;
   }
   .toolbar {
     display: grid;
@@ -440,12 +444,13 @@
     font-size: 0.875rem;
   }
   @media (max-width: 1040px) {
+    .process-head { grid-template-columns: 1fr; }
+    .process-head__intro { padding: var(--space-4); }
     .workspace { grid-template-columns: 1fr; }
     .space-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .space-list :global(.espaco-row__history) { grid-column: 1 / -1; }
   }
   @media (max-width: 720px) {
-    .hero h1 { font-size: clamp(2rem, 12vw, 3rem); }
     .toolbar { grid-template-columns: minmax(0, 1fr) auto; }
     .toolbar__count { display: none; }
     .space-list { grid-template-columns: 1fr; }

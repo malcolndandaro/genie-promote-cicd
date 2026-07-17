@@ -6,18 +6,23 @@
   const STEPS: { icon: IconName; title: string; desc: string }[] = [
     {
       icon: 'grid',
-      title: 'Autoria no dev',
-      desc: 'Você cria e ajusta o Genie Space no Genie nativo do workspace de dev.',
+      title: 'Escolher',
+      desc: 'Selecione o Space no Dev',
     },
     {
       icon: 'git-branch',
-      title: 'Revisão automatizada',
-      desc: 'Um agente revisa contra o manual e roda checagens (grants, PII, eval).',
+      title: 'Checks',
+      desc: 'Qualidade, acesso e eval',
     },
     {
       icon: 'check-circle',
-      title: 'Promoção governada',
-      desc: 'O Steward aprova e o deploy para produção é feito de forma segura.',
+      title: 'Steward',
+      desc: 'Revisão independente',
+    },
+    {
+      icon: 'external',
+      title: 'Produção',
+      desc: 'Deploy rastreável',
     },
   ];
 </script>
@@ -25,8 +30,10 @@
 <ol class="flow" aria-label="Como funciona a promoção">
   {#each STEPS as s, i (s.title)}
     <li class="flow__step">
-      <span class="flow__index">{i + 1}</span>
-      <span class="flow__icon" aria-hidden="true"><Icon name={s.icon} size={22} /></span>
+      <span class="flow__marker">
+        <span class="flow__index">0{i + 1}</span>
+        <span class="flow__icon" aria-hidden="true"><Icon name={s.icon} size={17} /></span>
+      </span>
       <div class="flow__text">
         <p class="flow__title">{s.title}</p>
         <p class="flow__desc">{s.desc}</p>
@@ -41,67 +48,70 @@
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--space-4);
+    grid-template-columns: repeat(4, minmax(8rem, 1fr));
+    gap: 0;
     counter-reset: none;
   }
   .flow__step {
     position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-4);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-  /* the connecting arrow between steps (desktop only) */
-  .flow__step:not(:last-child)::after {
-    content: '→';
-    position: absolute;
-    right: calc(-1 * var(--space-4) / 2 - 0.4rem);
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--border-strong);
-    font-size: 1.1rem;
-    z-index: 1;
-  }
-  .flow__index {
-    display: inline-flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
-    justify-content: center;
-    width: 1.5rem;
-    height: 1.5rem;
-    border-radius: var(--radius-pill);
-    background: var(--primary);
-    color: var(--primary-foreground);
-    font-size: 0.78rem;
-    font-weight: 700;
+    gap: var(--space-2);
+    min-height: 4.25rem;
+    padding: var(--space-2) var(--space-4);
+    border-left: 1px solid var(--border);
+  }
+  .flow__step::after {
+    content: '';
+    position: absolute;
+    right: -0.25rem;
+    top: 50%;
+    width: 0.5rem;
+    height: 0.5rem;
+    transform: translateY(-50%) rotate(45deg);
+    border-top: 1px solid var(--border-strong);
+    border-right: 1px solid var(--border-strong);
+    background: var(--surface);
+    z-index: 2;
+  }
+  .flow__step:last-child::after { display: none; }
+  .flow__marker { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; }
+  .flow__index {
+    color: var(--muted-foreground);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.57rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
   }
   .flow__icon {
+    display: grid;
+    place-items: center;
+    width: 1.8rem;
+    height: 1.8rem;
+    border-radius: 50%;
+    background: var(--accent-soft);
     color: var(--accent-hover);
   }
   .flow__title {
     margin: 0;
     font-weight: 700;
-    font-size: 0.98rem;
+    font-size: 0.78rem;
+    line-height: 1.2;
   }
   .flow__desc {
     margin: 0;
-    font-size: 0.84rem;
+    margin-top: 0.18rem;
+    font-size: 0.66rem;
     color: var(--muted-foreground);
     line-height: 1.45;
   }
   @media (max-width: 768px) {
     .flow {
-      grid-template-columns: 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      border-top: 1px solid var(--border);
     }
-    .flow__step:not(:last-child)::after {
-      content: '↓';
-      right: 50%;
-      top: auto;
-      bottom: calc(-1 * var(--space-4) / 2 - 0.4rem);
-      transform: translateX(50%);
-    }
+    .flow__step { border-bottom: 1px solid var(--border); }
+    .flow__step::after { display: none; }
   }
 </style>

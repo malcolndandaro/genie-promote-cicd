@@ -27,6 +27,21 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
   await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeEnabled();
 });
 
+test('the page header is compact and explains the governed promotion flow', async ({ page }) => {
+  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
+  await page.goto('/#/espacos');
+
+  const header = page.locator('.process-head');
+  await expect(header.getByRole('heading', { name: 'Promover Genie Space' })).toBeVisible();
+  const flow = header.getByRole('list', { name: 'Como funciona a promoção' });
+  for (const label of ['Escolher', 'Checks', 'Steward', 'Produção']) {
+    await expect(flow.getByText(label, { exact: true })).toBeVisible();
+  }
+  const box = await header.boundingBox();
+  expect(box?.height).toBeLessThan(160);
+});
+
 // G3: choosing a card SELECTS the space and opens a confirmation panel bound to it — it does not
 // fire the request. The grid locks (including the chosen card itself) until the panel is
 // confirmed or cancelled, since the actual "Solicitar promoção" action now lives in the panel.
