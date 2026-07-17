@@ -93,9 +93,11 @@ test('partial failure shows changed production and exact support evidence withou
   await expect(page.getByRole('heading', { name: 'A publicação parou depois de alterar produção' })).toBeVisible();
   await expect(page.getByText('Produção mudou parcialmente', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toHaveCount(0);
-  await expect(page.locator('.attempt-timeline li[data-state="failed"]')).toContainText('Público');
 
   await page.getByText('Detalhes para suporte e auditoria', { exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Etapas técnicas do deploy em produção' })).toBeVisible();
+  await expect(page.getByText('Evidência da run de deploy', { exact: true })).toBeVisible();
+  await expect(page.locator('.attempt-timeline li[data-state="failed"]')).toContainText('Público');
   await expect(page.getByText('github:900:1', { exact: true })).toBeVisible();
   await expect(page.getByText('receivables=space-prod-1', { exact: true })).toBeVisible();
   await expect(page.getByText(/InvalidParameterValue/)).toBeVisible();
@@ -148,6 +150,7 @@ test('Attempt timeline becomes vertical and stays inside a phone viewport', asyn
   await start(page, cleanReview, [{ ...baseStatus, merged: true, phase: 'deploy_failed', deploy: {
     status: 'completed', conclusion: 'failure', waiting_approval: false, run_url: partial.run_url, attempt: partial,
   } }]);
+  await page.getByText('Detalhes para suporte e auditoria', { exact: true }).click();
   const columns = await page.locator('.attempt-timeline ol').evaluate((node) =>
     getComputedStyle(node).gridTemplateColumns.split(' ').length,
   );

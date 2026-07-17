@@ -44,28 +44,30 @@
 {/if}
 
 {#if mode !== 'decision'}
-  {#if attempt}
-    <section class="attempt-timeline" aria-label="Estágios da tentativa de publicação">
-      <h3>Etapas da publicação</h3>
-      <ol>
-        {#each STAGES as [id, label] (id)}
-          {@const state = stageState(id)}
-          <li data-state={state}>
-            <span class="attempt-timeline__node" aria-hidden="true">
-              {state === 'done' ? '✓' : state === 'failed' ? '!' : state === 'current' ? '◴' : ''}
-            </span>
-            <span>{label}</span>
-            <span class="visually-hidden">— {state}</span>
-          </li>
-        {/each}
-      </ol>
-    </section>
-  {/if}
-
   <details class="support-details">
     <summary>Detalhes para suporte e auditoria</summary>
     <div class="support-details__body">
       {#if attempt}
+        <section class="attempt-timeline" aria-label="Etapas técnicas do deploy em produção">
+          <p class="attempt-timeline__source">Evidência da run de deploy</p>
+          <h3>Etapas técnicas do deploy em produção</h3>
+          <p class="attempt-timeline__intro">
+            Emitidas pelo provider durante a publicação; ajudam a KIP a localizar uma falha e confirmar
+            até onde produção foi alterada.
+          </p>
+          <ol>
+            {#each STAGES as [id, label] (id)}
+              {@const state = stageState(id)}
+              <li data-state={state}>
+                <span class="attempt-timeline__node" aria-hidden="true">
+                  {state === 'done' ? '✓' : state === 'failed' ? '!' : state === 'current' ? '◴' : ''}
+                </span>
+                <span>{label}</span>
+                <span class="visually-hidden">— {state}</span>
+              </li>
+            {/each}
+          </ol>
+        </section>
         <dl>
           <div><dt>Attempt</dt><dd><code>{attempt.attempt_id}</code></dd></div>
           <div><dt>Estado</dt><dd>{attempt.terminal_state}</dd></div>
@@ -140,8 +142,22 @@
   .decision__action span { color: var(--muted-foreground); font-size: 0.68rem; text-transform: uppercase; }
   .decision__action strong { font-size: 0.86rem; }
   .decision__review-summary { margin: var(--space-3) 0 0; font-size: 0.78rem; color: var(--muted-foreground); }
-  .attempt-timeline { margin-top: var(--space-5); }
-  .attempt-timeline h3 { margin-bottom: var(--space-3); font-size: 0.9rem; }
+  .attempt-timeline { margin: 0 0 var(--space-4); }
+  .attempt-timeline__source {
+    margin: 0 0 var(--space-1);
+    color: #79d5c7;
+    font-size: 0.64rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .attempt-timeline h3 { margin: 0; color: #f1f8f6; font-size: 0.95rem; }
+  .attempt-timeline__intro {
+    max-width: 48rem;
+    margin: var(--space-1) 0 var(--space-4);
+    color: #a9bfba;
+    line-height: 1.45;
+  }
   .attempt-timeline ol {
     display: grid;
     grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -156,7 +172,7 @@
     flex-direction: column;
     align-items: center;
     gap: var(--space-2);
-    color: var(--muted-foreground);
+    color: #b9cbc7;
     text-align: center;
     font-size: 0.68rem;
   }
@@ -167,7 +183,7 @@
     height: 1.6rem;
     border: 2px solid var(--border-strong);
     border-radius: 50%;
-    background: var(--surface);
+    background: #132a31;
     font-size: 0.72rem;
     font-weight: 800;
   }
@@ -189,7 +205,7 @@
     font-size: 0.76rem;
     overflow-wrap: anywhere;
   }
-  .support-details dl { margin: 0; }
+  .support-details dl { margin: 0; padding-top: var(--space-4); border-top: 1px solid #294148; }
   .support-details dl > div { display: grid; grid-template-columns: 9rem 1fr; gap: var(--space-3); padding: 0.25rem 0; }
   .support-details dt { color: #89a49e; }
   .support-details dd { margin: 0; }
