@@ -5,7 +5,7 @@ diff) against the Genie Promotion Handbook, and speaks Portuguese. The agent she
 (agent.py) and the CI shell wire these together; the LLM call lives in the shell.
 
   build_space_context(space)            parse serialized_space -> structured context
-  build_review_prompt(context, rules, grant_findings)  -> (system, user) in PT
+  build_review_prompt(context, rules, deterministic_findings)  -> (system, user) in PT
   parse_review(raw)                     tolerant: {summary, findings}
   decide_gate(findings)                 severity gate (BLOCKER => failure)
 """
@@ -80,8 +80,8 @@ DEFAULT_PERSONA = (
     "a definição (serialized_space) de um espaço que está sendo PROMOVIDO PARA PRODUÇÃO, "
     "ÚNICA E EXCLUSIVAMENTE contra as regras do Genie Promotion Handbook fornecidas. Não invente "
     "regras. Cada achado DEVE citar um rule_id da lista. Responda em PORTUGUÊS.\n\n"
-    "Checagens determinísticas (schema, bundle validate, allowlist de catálogo, verificação "
-    "de grants) JÁ rodam no PR. Concentre-se na camada SEMÂNTICA/de política que elas não "
+    "Checagens determinísticas (schema, bundle validate, allowlist de catálogo e Público do "
+    "Space) JÁ rodam no PR. Concentre-se na camada SEMÂNTICA/de política que elas não "
     "veem: catálogos de outro ambiente em SQL, ausência de perguntas de benchmark, instruções "
     "vagas/inseguras, exposição de PII/sigilo bancário, e convenções de SQL.\n\n"
     "Severidade: use a severity_hint da regra, mas ESCALE para BLOCKER qualquer referência a "
@@ -100,7 +100,8 @@ PROTECTED_CORE = (
 _SYSTEM = DEFAULT_PERSONA + PROTECTED_CORE  # byte-identical to the pre-S8 hardcoded constant
 
 
-def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[dict] | None = None,
+def build_review_prompt(context: dict, rules: list[dict],
+                        deterministic_findings: list[dict] | None = None,
                         persona_template: str | None = None) -> tuple[str, str]:
     rules_block = "\n".join(
         f"- {r.get('rule_id')} [{r.get('severity_hint', 'SUGGESTION')}] "
@@ -120,13 +121,13 @@ def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[d
         f"  - {q[:200]} :: {s[:1000]}"
         for q, s in zip(context.get("benchmark_questions", []), context.get("benchmark_sqls", []))
     ) or "  (nenhuma)"
-    # G9: a grant finding's severity is already DECIDED deterministically (BLOCKER for the baseline
-    # consumer group, SUGGESTION for a declared AccessSpec principal apply_access grants at deploy)
-    # — shown here so the LLM's narrative doesn't call an advisory one a blocker; finalize_findings
-    # OWNS the rule_id regardless, so the LLM's own GRANT-01 judgment never overrides this anyway.
-    grant_block = (
-        "\n".join(f"  - [{g.get('severity')}] {g.get('message')}" for g in (grant_findings or []))
-        or "  (verificação de grants não reportou problemas)"
+    # Deterministic findings are shown so the LLM narrative stays consistent with the checks whose
+    # severity is already decided. finalize_findings owns their rule_ids.
+    deterministic_block = (
+        "\n".join(
+            f"  - [{finding.get('severity')}] {finding.get('rule_id')}: {finding.get('message')}"
+            for finding in (deterministic_findings or [])
+        ) or "  (nenhum achado determinístico)"
     )
 
     user = (
@@ -137,8 +138,8 @@ def build_review_prompt(context: dict, rules: list[dict], grant_findings: list[d
         f"SQL de exemplo (Example queries):\n{sql_block}\n\n"
         f"perguntas de benchmark ({context.get('n_benchmark', 0)}):\n{bench_block}\n\n"
         f"joins: {', '.join(context.get('joins', [])) or '(nenhum)'}\n\n"
-        "ACHADOS DETERMINÍSTICOS DE GRANTS (severidade já decidida — não a altere na sua resposta):\n"
-        f"{grant_block}\n\n"
+        "ACHADOS DETERMINÍSTICOS (severidade já decidida — não a altere na sua resposta):\n"
+        f"{deterministic_block}\n\n"
         "Devolva o JSON de achados."
     )
     # S8: an admin-supplied persona/policy template REPLACES DEFAULT_PERSONA, but PROTECTED_CORE
@@ -249,7 +250,7 @@ def decide_gate(findings: list[dict]) -> dict:
 
 
 # --- Core 5: merge deterministic findings into the gate -------------------------
-# The hero BLOCKERs (GRANT-01, EVAL-01) must be DETERMINISTIC, not LLM-judgment, so a
+# Content and quality backstops must be DETERMINISTIC, not LLM judgment, so a
 # soft/omitted/injection-suppressed LLM answer can't flip a broken space to "success".
 # Deterministic findings OWN their rule_id; the LLM owns the rest (semantic rules).
 def finalize_findings(

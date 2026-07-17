@@ -61,7 +61,7 @@ def test_benchmark_count_uses_benchmarks_not_example_queries():
 def test_prompt_includes_rules_and_space():
     ctx = rc.build_space_context(SPACE)
     system, user = rc.build_review_prompt(ctx, handbook_rules.RULES)
-    assert "ENV-01" in user and "GRANT-01" in user
+    assert "ENV-01" in user and "EVAL-01" in user
     assert "dev_recebiveis.diamond.dim_cedente" in user
     assert "PORTUGU" in system.upper()
 
@@ -112,30 +112,29 @@ def test_raw_is_parseable_false_for_empty_or_none():
     assert rc.raw_is_parseable(None) is False
 
 
-def test_prompt_includes_grant_findings():
+def test_prompt_includes_deterministic_findings():
     ctx = rc.build_space_context(SPACE)
     _, user = rc.build_review_prompt(
         ctx, handbook_rules.RULES,
-        grant_findings=[{"message": "grupo de produção sem SELECT em prod_recebiveis.diamond.dim_arranjo"}],
+        deterministic_findings=[{
+            "rule_id": "AUDIENCE-01", "severity": "SUGGESTION",
+            "message": "grupo de produção sem SELECT em prod_recebiveis.diamond.dim_arranjo"
+        }],
     )
     assert "dim_arranjo" in user
 
 
-def test_prompt_shows_grant_finding_severity_so_the_llm_never_narrates_an_advisory_as_a_blocker():
-    """G9: a GRANT-01 finding's severity is already decided deterministically (BLOCKER for the
-    baseline group, SUGGESTION for a declared AccessSpec principal) — the prompt must show that
-    severity per finding, not a blanket 'treat as BLOCKER' instruction that would mislead the LLM's
-    narrative for a merely-advisory finding."""
+def test_prompt_shows_deterministic_finding_severity():
     ctx = rc.build_space_context(SPACE)
     _, user = rc.build_review_prompt(
         ctx, handbook_rules.RULES,
-        grant_findings=[
-            {"severity": "BLOCKER", "message": "grupo baseline sem SELECT"},
-            {"severity": "SUGGESTION", "message": "ana@x.com sem SELECT — será concedido no deploy"},
+        deterministic_findings=[
+            {"rule_id": "ENV-01", "severity": "BLOCKER", "message": "catálogo inválido"},
+            {"rule_id": "AUDIENCE-01", "severity": "SUGGESTION", "message": "ana@x.com sem SELECT"},
         ],
     )
-    assert "[BLOCKER] grupo baseline sem SELECT" in user
-    assert "[SUGGESTION] ana@x.com sem SELECT" in user
+    assert "[BLOCKER] ENV-01: catálogo inválido" in user
+    assert "[SUGGESTION] AUDIENCE-01: ana@x.com sem SELECT" in user
     assert "considere como BLOCKER" not in user
 
 
@@ -150,10 +149,10 @@ def test_parse_review_tolerant_fenced():
 def test_parse_findings_drops_invalid():
     raw = {"findings": [
         {"severity": "NOPE", "rule_id": "X", "citation": "c", "message": "m"},
-        {"severity": "BLOCKER", "rule_id": "GRANT-01", "citation": "c", "message": "m"},
+        {"severity": "BLOCKER", "rule_id": "AUDIENCE-01", "citation": "c", "message": "m"},
     ]}
     fs = rc.parse_findings(raw)
-    assert len(fs) == 1 and fs[0]["rule_id"] == "GRANT-01"
+    assert len(fs) == 1 and fs[0]["rule_id"] == "AUDIENCE-01"
 
 
 def test_gate_blocker_fails():
@@ -180,10 +179,10 @@ def test_buried_catalog_ref_survives_truncation():
     assert "sbx_recebiveis.diamond.fato_recebiveis" in user  # visible after whitespace-collapse
 
 
-def test_finalize_keeps_deterministic_grant_even_if_llm_silent():
-    det = [{"severity": "BLOCKER", "rule_id": "GRANT-01", "citation": "c", "message": "m"}]
+def test_finalize_keeps_deterministic_finding_even_if_llm_silent():
+    det = [{"severity": "BLOCKER", "rule_id": "AUDIENCE-01", "citation": "c", "message": "m"}]
     out = rc.finalize_findings([], det, n_benchmark=3)
-    assert any(f["rule_id"] == "GRANT-01" and f["severity"] == "BLOCKER" for f in out)
+    assert any(f["rule_id"] == "AUDIENCE-01" and f["severity"] == "BLOCKER" for f in out)
 
 
 def test_finalize_adds_eval01_backstop_when_too_few_benchmarks():
@@ -220,16 +219,16 @@ def test_finalize_min_benchmark_is_configurable():
 
 
 def test_finalize_dedups_llm_against_deterministic_owner():
-    det = [{"severity": "BLOCKER", "rule_id": "GRANT-01", "citation": "c", "message": "det"}]
-    llm = [{"severity": "SUGGESTION", "rule_id": "GRANT-01", "citation": "c", "message": "llm-soft"},
+    det = [{"severity": "BLOCKER", "rule_id": "AUDIENCE-01", "citation": "c", "message": "det"}]
+    llm = [{"severity": "SUGGESTION", "rule_id": "AUDIENCE-01", "citation": "c", "message": "llm-soft"},
            {"severity": "STYLE", "rule_id": "SQL-01", "citation": "c", "message": "keep"}]
     out = rc.finalize_findings(llm, det, n_benchmark=3)
-    grant = [f for f in out if f["rule_id"] == "GRANT-01"]
-    assert len(grant) == 1 and grant[0]["message"] == "det"  # deterministic wins
+    audience = [f for f in out if f["rule_id"] == "AUDIENCE-01"]
+    assert len(audience) == 1 and audience[0]["message"] == "det"
     assert any(f["rule_id"] == "SQL-01" for f in out)        # LLM semantic kept
 
 
-def test_handbook_has_nine_rules_with_required_fields():
-    assert len(handbook_rules.RULES) == 9
+def test_handbook_rules_have_required_fields():
+    assert len(handbook_rules.RULES) == 7
     for r in handbook_rules.RULES:
         assert r["rule_id"] and r["severity_hint"] in rc.SEVERITIES and r["citation"] and r["content"]

@@ -6,17 +6,16 @@ import { test, expect } from '@playwright/test';
 const review = {
   findings: [
     {
-      rule_id: 'GRANT-01',
+      rule_id: 'AUDIENCE-01',
       severity: 'BLOCKER',
       message: 'Grupo consumidor sem SELECT em prod_recebiveis.diamond.fato_recebiveis.',
-      citation: 'Genie Promotion Handbook › Grants › GRANT-01',
+      citation: 'CERC › Público do Space › AUDIENCE-01',
       suggestion: 'Conceder SELECT ao grupo consumidor.',
     },
   ],
   gate: { conclusion: 'failure', blocker_count: 1, summary: '🔴 Promoção bloqueada — 1 achado BLOCKER.' },
   eval: { status: 'pass', summary: '🟢 eval-run ok.' },
   allowlist_violations: [],
-  consumer_group: '',
   timeline: [
     { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)', status: 'pass' },
     { key: 'review', label: 'Revisão do agente (Genie Reviewer)', status: 'fail' },
@@ -91,7 +90,7 @@ test('recovers the stored promotion on load WITHOUT re-running the reviewer', as
 
   // The recovered promotion renders: PR banner + the stored finding + the live phase badge (polled).
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
-  await expect(page.getByText('GRANT-01', { exact: true })).toBeVisible();
+  await expect(page.getByText('AUDIENCE-01', { exact: true })).toBeVisible();
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
   await expect(page.getByText('Checagens em execução')).toBeVisible(); // live status resumed
   await expect(page.getByRole('link', { name: /Ver no GitHub/ })).toHaveAttribute('href', PR.url);

@@ -38,7 +38,7 @@ test.describe('"Exportar para dev" on a deployed promotion\'s own detail', () =>
   };
   const review = {
     findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto.' },
-    eval: { status: 'pass', summary: 'ok' }, allowlist_violations: [], consumer_group: '',
+    eval: { status: 'pass', summary: 'ok' }, allowlist_violations: [],
     timeline: [{ key: 'review', label: 'Revisão', status: 'pass' }],
   };
   const liveStatus = {

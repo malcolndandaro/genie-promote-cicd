@@ -78,7 +78,7 @@ command:
 env:
   - name: APP_DOMAIN
     value: "recebiveis"
-  # The configured Steward (separation of duties): the distinct approver, surfaced by /whoami so
+  # The configured Steward (separation of duties), surfaced by /whoami so
   # the SPA can enforce "the requester can never approve their own promotion" (SV4).
   - name: APP_STEWARD
     value: "pedro.perdomo@databricks.com"

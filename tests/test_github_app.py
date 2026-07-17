@@ -157,12 +157,12 @@ def test_remove_files_deletes_a_previously_committed_sidecar():
     fg = FakeGitHub()
     gh = _app(fg)
     gh.open_or_update_promotion(branch="promote/x", path="p", content="{}", title="t", body="b",
-                                extra_files={"src/genie/x.access.json": '{"a": 1}'})
-    assert ("promote/x", "src/genie/x.access.json") in fg.files
+                                extra_files={"src/genie/x.mapping.json": '{"a": 1}'})
+    assert ("promote/x", "src/genie/x.mapping.json") in fg.files
 
     gh.open_or_update_promotion(branch="promote/x", path="p", content="{}", title="t", body="b",
-                                remove_files=["src/genie/x.access.json"])
-    assert ("promote/x", "src/genie/x.access.json") not in fg.files
+                                remove_files=["src/genie/x.mapping.json"])
+    assert ("promote/x", "src/genie/x.mapping.json") not in fg.files
 
 
 def test_remove_files_is_a_noop_for_a_path_never_committed():
@@ -170,7 +170,7 @@ def test_remove_files_is_a_noop_for_a_path_never_committed():
     # one that was never written (the common case: nothing was ever declared for this space).
     fg = FakeGitHub()
     pr = _app(fg).open_or_update_promotion(branch="promote/x", path="p", content="{}", title="t",
-                                           body="b", remove_files=["src/genie/x.access.json"])
+                                           body="b", remove_files=["src/genie/x.mapping.json"])
     assert pr["number"] == 1  # completed without error
 
 
@@ -189,16 +189,16 @@ def test_remove_files_does_not_touch_the_main_artifact_or_other_extra_files():
 
 def test_get_file_content_returns_none_when_absent():
     fg = FakeGitHub()
-    assert _app(fg).get_file_content("src/genie/s.access.json") is None
+    assert _app(fg).get_file_content("src/genie/s.mapping.json") is None
 
 
 def test_get_file_content_reads_and_decodes_from_base_by_default():
     # F3: reading an existing sidecar off `main` (the default `ref`) so a caller can merge into it
     # rather than blindly overwrite. Seed the fake as if a prior PR had already merged the file.
     fg = FakeGitHub()
-    fg.files[("main", "src/genie/s.access.json")] = {
+    fg.files[("main", "src/genie/s.mapping.json")] = {
         "sha": "sha1", "content": base64.b64encode(b'{"space_permissions": []}').decode()}
-    got = _app(fg).get_file_content("src/genie/s.access.json")
+    got = _app(fg).get_file_content("src/genie/s.mapping.json")
     assert got == '{"space_permissions": []}'
 
 
@@ -424,23 +424,22 @@ def test_checks_detail_uses_output_summary_when_present():
 
 
 def test_checks_detail_falls_back_to_annotations_when_output_is_empty():
-    # Bare `run:` steps (GRANT-01, print()-based) don't populate `output` — the PT findings live in
-    # the annotations GitHub DOES surface for a failed step. G9: GRANT-01 now emits them as REAL
+    # Bare `run:` steps do not populate `output`; the findings live in annotations.
     # `::error::` workflow-command annotations (failure-level) — and GitHub's OWN generic noise (the
     # step's auto "Process completed with exit code N." failure annotation) must be filtered out
     # when real content is present (this is now "the annotation-fallback test" — it must show noise
     # filtering, not just a plain join).
-    run = {"id": 9, "name": "GRANT-01 — every declared principal can SELECT", "status": "completed",
+    run = {"id": 9, "name": "AUDIENCE-01 — validate the declared audience", "status": "completed",
            "conclusion": "failure", "output": {}, "html_url": "https://x/9"}
     ann = {9: [
-        {"annotation_level": "failure", "message": "🔴 GRANT-01 — promoção bloqueada (1 achado(s))"},
+        {"annotation_level": "failure", "message": "🔴 AUDIENCE-01 — promoção bloqueada (1 achado)"},
         {"annotation_level": "failure",
          "message": "'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo"},
         {"annotation_level": "failure", "message": "Process completed with exit code 1."},
     ]}
     s = _status_transport(_OPEN_PR, [run], [], annotations=ann).get_status(1)
     detail = s["checks_detail"][0]
-    assert detail["summary"] == ("🔴 GRANT-01 — promoção bloqueada (1 achado(s))\n"
+    assert detail["summary"] == ("🔴 AUDIENCE-01 — promoção bloqueada (1 achado)\n"
                                  "'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo")
     assert "exit code" not in detail["summary"]  # GitHub's own noise annotation is filtered out
     assert detail["details_url"] == "https://x/9"  # falls back to html_url (no details_url given)

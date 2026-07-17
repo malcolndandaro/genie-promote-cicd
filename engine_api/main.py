@@ -43,15 +43,14 @@ from databricks.sdk.core import Config
 from databricks.sdk.errors import PermissionDenied, Unauthenticated
 from fastapi import APIRouter, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 # Reuse the existing engine unchanged: app_logic resolves genie_reviewer/ + scripts/ itself.
 # NB: this relies on the app being deployed with the engine package (app/ + genie_reviewer/)
 # alongside engine_api/ — the build assembly (scripts/build_*_app.sh) guarantees that layout.
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "app"))
-import app_logic  # noqa: E402  (MUST import before access_spec/github_app — it puts genie_reviewer/ on sys.path)
-import access_spec as access_spec_mod  # noqa: E402  (F2 — declared-access model)
+import app_logic  # noqa: E402  (puts genie_reviewer/ on sys.path)
 import audience_spec as audience_spec_mod  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
@@ -234,8 +233,8 @@ def _engine_call(label: str, fn: Callable):
     except ValueError as e:
         # A deterministic, caller-input refusal (e.g. rehydrate's reverse-allowlist leak or a G6
         # table_mapping override pointing back at the prod catalog) is the CALLER's problem to fix,
-        # not an engine fault — every `raise ValueError` in the engine layer (rehydrate.py,
-        # access_spec.py, the *_store.py CRUD modules) is exactly this kind of input validation, so a
+        # not an engine fault — every `raise ValueError` in the engine layer (rehydrate.py and the
+        # store CRUD modules) is exactly this kind of input validation, so a
         # 400 here is right across the board, never the generic 502 the broad except below would map
         # an uncaught ValueError to.
         logger.info("input rejected in %s (%s)", label, e)
@@ -354,7 +353,7 @@ def _is_steward(email: str | None) -> bool:
 
 def _steward_display() -> str | None:
     """A single Steward email for `whoami`'s legacy `steward` field (SV4's SoD UI just needs ONE
-    "the distinct approver" identity to compare the viewer against). F5: prefers the roles store's
+    distinct Steward identity to compare the viewer against). F5: prefers the roles store's
     effective Steward set (deterministically the lexicographically-first email, so the value is
     stable across calls rather than an arbitrary set-iteration order); falls back to `APP_STEWARD`
     unchanged when the store is empty/absent, so existing single-Steward deployments see the exact
@@ -387,7 +386,7 @@ def whoami(
     the config-driven admin/steward set — a caller with no valid OBO token verifies to no identity
     and is never admin, regardless of what `x-forwarded-email` claims. `steward` (F5: now
     store-backed, `APP_STEWARD`/`APP_STEWARDS` as the bootstrap fallback — see `_steward_display`)
-    is the distinct approver for the separation-of-duties model (SV4). `dev_host` (G5) is the dev
+    is the distinct Steward for the separation-of-duties model (SV4). `dev_host` (G5) is the dev
     workspace host (`APP_DEV_HOST`, the same one `rehydrate.py` targets) — exposed purely so the SPA
     can build a deep-link to a just-rehydrated dev Space; `None` when unconfigured (local/offline).
     `prod_host` (W3) is the PROD workspace host the app itself runs in — unlike `dev_host` there is
@@ -476,12 +475,6 @@ def principals(
         "list_principals", lambda: app_logic.list_principals(q, kind=kind))}
 
 
-class SpacePermissionIn(BaseModel):
-    principal: str
-    is_group: bool = False
-    level: str = "CAN_RUN"
-
-
 class PrincipalIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -494,46 +487,24 @@ class AudienceSpecIn(BaseModel):
 
     principals: list[PrincipalIn]
 
+    @model_validator(mode="after")
+    def validate_contract(self) -> "AudienceSpecIn":
+        # Convert domain validation into FastAPI's standard 422 boundary response.
+        audience_spec_mod.AudienceSpec.from_dict(self.model_dump())
+        return self
+
     def to_engine(self) -> "audience_spec_mod.AudienceSpec":
         return audience_spec_mod.AudienceSpec.from_dict(self.model_dump())
 
 
-class AccessSpecIn(BaseModel):
-    """F2: the Requester's declared access, over the wire. Mirrors
-    `access_spec.AccessSpec.to_dict()` — kept as a distinct pydantic model (rather than a bare
-    dict) so a malformed client payload 422s instead of failing deep inside the engine."""
-    space_permissions: list[SpacePermissionIn] = []
-    uc_principals: list[PrincipalIn] = []
-
-    def to_engine(self) -> "access_spec_mod.AccessSpec":
-        return access_spec_mod.AccessSpec.from_dict(self.model_dump())
-
-
 class ReviewRequest(BaseModel):
     space_id: str
-    audience_spec: AudienceSpecIn | None = None
-    # Narrow read-only compatibility input. It is translated only when every Space entry is
-    # CAN_RUN; UC principals are discarded and never written/mutated.
-    access_spec: AccessSpecIn | None = None
+    audience_spec: AudienceSpecIn
 
 
 # Only the UI-facing fields of the review result (drop the large prod_serialized payload).
-_REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations", "consumer_group",
-                  "audience_spec", "access_spec")
-
-
-def _audience_from_request(audience: AudienceSpecIn | None,
-                           legacy: AccessSpecIn | None) -> "audience_spec_mod.AudienceSpec | None":
-    if audience is not None and legacy is not None:
-        raise HTTPException(status_code=422, detail="use audience_spec; do not send access_spec together")
-    try:
-        if audience is not None:
-            return audience.to_engine()
-        if legacy is not None:
-            return audience_spec_mod.from_legacy_access_spec(legacy.model_dump())
-        return None  # expand phase: old callers can read; canonical SPA writers always require it
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+_REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations",
+                  "audience_spec")
 
 
 @api.post("/review")
@@ -542,15 +513,15 @@ def review(
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """The full promotion review for a space (export via OBO -> pre-render -> ENV-01 + grant
-    preview + LLM reviewer + eval gate). The Genie export runs on behalf of the user; the LLM
-    reviewer + grant preview run as the app SP (the engine's existing auth split)."""
+    """The full promotion review for a space (export via OBO -> pre-render -> deterministic
+    preflight + LLM reviewer + eval gate). The Genie export runs on behalf of the user; shared
+    reviewer and inspection calls run as the app SP."""
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
 
     def _run() -> dict:
-        audience = _audience_from_request(body.audience_spec, body.access_spec)
+        audience = body.audience_spec.to_engine()
         # G2: the admin-configured rule overrides (None when no store — reviews with the hardcoded
         # handbook_rules.RULES, unchanged from before this slice).
         store = _rules_store()
@@ -568,8 +539,7 @@ def review(
                                         persona_template=persona_template)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
-        return {k: (result.get(k) if k in {"audience_spec", "access_spec"} else result[k])
-                for k in _REVIEW_FIELDS}
+        return {k: result[k] for k in _REVIEW_FIELDS}
 
     return _engine_call("review_space", _run)
 
@@ -577,13 +547,10 @@ def review(
 class PromoteRequest(BaseModel):
     space_id: str
     # Display metadata the SPA already holds (from /api/spaces) — persisted with the Promotion so the
-    # history/recovery view (LB3/LB5) shows the resource without a second OBO lookup. Optional so the
-    # legacy {space_id}-only contract still works.
+    # history/recovery view (LB3/LB5) shows the resource without a second OBO lookup.
     resource_title: str | None = None
     resource_kind: str | None = None
-    audience_spec: AudienceSpecIn | None = None
-    # Read-only expand/switch compatibility. Canonical writers must send audience_spec.
-    access_spec: AccessSpecIn | None = None
+    audience_spec: AudienceSpecIn
     # G7: the Requester's declared table de-para (source DEV ref -> desired prod ref overrides),
     # keyed exactly like `/promote/preview`'s `source` field — only entries actually changed away
     # from the preview's `default_target` need be sent (an identity mapping is a harmless no-op).
@@ -599,16 +566,15 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
     (the reviewer result at that point in time) so recovery renders it WITHOUT re-running the LLM.
     DB writes are the app SP's job (this runs server-side), preserving the OBO/SP split.
 
-    Found #3: a re-request can change any of the three declarations (`resource_title`/`access_spec`/
-    `table_mapping`) — the Requester picked a different prod name, revised the AccessSpec, or edited
-    the table de-para — so a re-review must refresh them on the EXISTING Promotion row too, not just
+    A re-request can change `resource_title`, `audience_spec` and `table_mapping`, so a re-review
+    must refresh them on the EXISTING Promotion row too, not just
     at creation (`store.update_declarations`, replacing the `touch()`-only re-review path). The
     audit trail records this the SAME way: rather than a distinct `declarations_updated` event type
     (which would mean a THIRD event vocabulary + a new EVENT_TYPES/RECURRING_EVENTS entry for
     something that only ever happens alongside a re-review, never alone), the re-request's OWN
     `re_reviewed` event's `detail` is extended with the new declarations — one event per action,
     fitting the existing "re_reviewed already recurs" convention instead of inventing a second one."""
-    from promotion_store import DuplicatePRNumber
+    from promotion_store import DuplicateChangeRequest
 
     review, pr = result["review"], result["pr"]
     change = result.get("change_request") or {
@@ -621,16 +587,10 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
             promotion = store.create_promotion(
                 resource_id=body.space_id, resource_kind=body.resource_kind or "genie_space",
                 resource_title=body.resource_title, requester_email=requester_email,
-                pr_number=pr["number"], pr_url=pr["url"], branch=result.get("branch", ""),
+                branch=result.get("branch", ""),
                 current_phase="open", live_status=None,
-                # F2: persist the declared AccessSpec WITH the Promotion (echoed back by
-                # request_promotion's review payload) so it survives independently of the PR/branch
-                # and renders in the recovery/history view without re-parsing the sidecar from git.
-                access_spec=None,
                 audience_spec=review.get("audience_spec") or None,
-                # G7: persist the declared table de-para the SAME way — straight from the request
-                # body (unlike access_spec, `table_mapping` isn't part of the reviewer's own
-                # payload; it never rides the review, only the promotion request).
+                # Persist the declared table de-para straight from the request body.
                 table_mapping=body.table_mapping or None,
                 change_provider=change["provider"],
                 external_id=change["external_id"],
@@ -638,8 +598,8 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
                 content_revision=change.get("content_revision"),
                 engine_revision=change.get("engine_revision"))
             promotion_id, event = promotion.id, "requested"
-        except DuplicatePRNumber:
-            # Concurrent request created it between our find_by_pr and create (TOCTOU). Recover by
+        except DuplicateChangeRequest:
+            # Concurrent request created it between lookup and create (TOCTOU). Recover by
             # treating this as a re-review of the now-existing Promotion rather than 500-ing.
             existing = store.find_by_change_request(change["provider"], change["external_id"])
             if existing is None:
@@ -656,8 +616,6 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
         "provider": change["provider"],
         "external_id": change["external_id"],
         "external_url": change.get("external_url"),
-        "pr_number": pr["number"],
-        "pr_url": pr["url"],
         "revisions": {
             "content_revision": change.get("content_revision"),
             "engine_revision": change.get("engine_revision"),
@@ -671,7 +629,7 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
         detail.update(resource_title=body.resource_title, audience_spec=audience_spec_,
                      table_mapping=table_mapping_)
         store.update_declarations(
-            promotion_id, resource_title=body.resource_title, access_spec=None,
+            promotion_id, resource_title=body.resource_title,
             audience_spec=audience_spec_,
             table_mapping=table_mapping_)
         store.update_change_request(
@@ -705,7 +663,7 @@ def promote(
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
-    audience = _audience_from_request(body.audience_spec, body.access_spec)
+    audience = body.audience_spec.to_engine()
     rules_store_ = _rules_store()
     overrides = rules_store_.list_all_dicts() if rules_store_ is not None else None
     # S7b: same in-scope/enabled KA endpoint lookup as /review, above.
@@ -939,12 +897,9 @@ def _require_store():
 def _promotion_summary(p) -> dict:
     return {"id": p.id, "resource_id": p.resource_id, "resource_kind": p.resource_kind,
             "resource_title": p.resource_title, "requester_email": p.requester_email,
-            "pr_number": p.pr_number, "pr_url": p.pr_url,
             "current_phase": p.current_phase, "terminal": p.terminal,
             "created_at": p.created_at, "updated_at": p.updated_at,
             "audience_spec": p.audience_spec,
-            # Read-only compatibility until ADR-0009 Phase 2.
-            "access_spec": p.access_spec,
             "change_provider": p.change_provider,
             "external_id": p.external_id,
             "external_url": p.external_url,
@@ -965,7 +920,7 @@ def _audit_event(e) -> dict:
 
 def _snapshot_to_review(snap) -> dict:
     """Reconstruct the UI Review from a stored snapshot. blocker_count is derived from findings;
-    allowlist_violations/consumer_group aren't part of the rendered review (recomputed in CI), so
+    allowlist violations aren't part of the rendered review (recomputed in CI), so
     they default — the recovered review renders identically without re-running the reviewer."""
     findings = snap.findings or []
     return {
@@ -974,7 +929,7 @@ def _snapshot_to_review(snap) -> dict:
                  "blocker_count": sum(1 for f in findings if f.get("severity") == "BLOCKER")},
         "eval": snap.eval or {"status": "n/a", "summary": "eval-run indisponível"},
         "timeline": snap.timeline or [],
-        "allowlist_violations": [], "consumer_group": "",
+        "allowlist_violations": [],
     }
 
 
@@ -1052,7 +1007,9 @@ def get_promotion(
     return {
         "promotion": _promotion_summary(p),
         "review": _snapshot_to_review(snap) if snap else None,
-        "pr": {"number": p.pr_number, "url": p.pr_url} if p.pr_number else None,
+        "pr": ({"number": int(p.external_id), "url": p.external_url}
+               if p.change_provider == "github" and p.external_id and p.external_id.isdigit()
+               else None),
         # The cached status lets the SPA render the phase badge IMMEDIATELY on load (LB4), before the
         # first live poll lands. The audit trail (append-only, GitHub-attributed) drives the trail view.
         # W3: re-resolved here too (not just the live poll) — the cache may predate this field, or

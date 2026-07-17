@@ -87,7 +87,7 @@ export async function getProdSpaces(q = ''): Promise<PromotableResource[]> {
 }
 
 /** Users + groups of the workspace directory (SCIM), for every principal picker (F2 access
- * declarations, F3 access requests, F5 role assignment). `q` is a search query, server-filtered;
+ * audience declarations and role assignment). `q` is a search query, server-filtered;
  * blank returns a prefilled first page. */
 export async function getPrincipals(q = '', kind: 'all' | 'user' | 'group' = 'all'): Promise<Principal[]> {
   const data = await getJSON<{ principals?: Principal[] }>(
@@ -123,9 +123,7 @@ export interface PromoteResult {
  * server persists the Promotion + Review Snapshot (LB3). The resource title/kind are sent so the
  * stored Promotion (and the history/recovery view) shows the resource without a second lookup.
  *
- * `accessSpec` (F2, optional) is the Requester's declared access — DECLARATION only (this call);
- * the server writes it to a git sidecar the governed CI pipeline enforces, it never mutates a live
- * grant/permission from this request.
+ * `audienceSpec` is the required Público do Space desired set; every principal derives to CAN_RUN.
  *
  * `prodTitle` (G7, optional) overrides `resource.title` as the prod Space name declaration — the
  * confirm step pre-fills it WITH the dev title but lets the caller edit it before requesting;
@@ -135,7 +133,7 @@ export interface PromoteResult {
  */
 export async function postPromote(
   resource: PromotableResource,
-  audienceSpec?: AudienceSpec,
+  audienceSpec: AudienceSpec,
   prodTitle?: string,
   tableMapping?: Record<string, string>
 ): Promise<PromoteResult> {
@@ -146,7 +144,7 @@ export async function postPromote(
       space_id: resource.id,
       resource_title: prodTitle?.trim() || resource.title,
       resource_kind: resource.kind,
-      ...(audienceSpec ? { audience_spec: audienceSpec } : {}),
+      audience_spec: audienceSpec,
       ...(tableMapping && Object.keys(tableMapping).length > 0 ? { table_mapping: tableMapping } : {}),
     }),
   });
@@ -163,8 +161,6 @@ export interface PromotionSummary {
   /** The original requester (OBO email, display-only) — so an admin's cross-user view attributes
    * the real requester, not the viewer. */
   requester_email: string | null;
-  pr_number: number | null;
-  pr_url: string | null;
   current_phase: string | null;
   terminal: boolean;
   created_at: string;

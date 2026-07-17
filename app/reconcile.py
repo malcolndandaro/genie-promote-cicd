@@ -26,6 +26,18 @@ MILESTONE_ORDER = ("pr_opened", "pr_review_approved", "merged", "deploy_approved
 _NEED_FACTS = {"merged", "pr_review_approved"}
 
 
+def _github_number(promotion) -> int:
+    """Adapt a provider-neutral Change Request to the current GitHub observer."""
+    if promotion.change_provider != "github" or not promotion.external_id:
+        raise ValueError(
+            f"unsupported Change Request provider {promotion.change_provider!r}"
+        )
+    try:
+        return int(promotion.external_id)
+    except ValueError as exc:
+        raise ValueError(f"invalid GitHub Change Request id {promotion.external_id!r}") from exc
+
+
 def _parse_ts(value: Optional[str]) -> Optional[datetime]:
     """Parse a GitHub ISO-8601 timestamp (…Z) to an aware datetime; None if absent/unparseable."""
     if not value:
@@ -50,7 +62,7 @@ def _reached(status: dict) -> set[str]:
         reached.add("merged")
     deploy = status.get("deploy") or {}
     # deploy_approved (the gate was RELEASED) is recorded only once the deploy run has COMPLETED — at
-    # that point get_status carries the approver (the Steward), so the most governance-critical
+    # that point get_status carries the gate reviewer (the Steward), so the most governance-critical
     # identity is captured rather than recorded prematurely as null and never backfilled.
     if deploy.get("status") == "completed":
         reached.add("deploy_approved")
@@ -95,7 +107,7 @@ def reconcile(store: PromotionStore, promotion, status: dict,
     if any(m in _NEED_FACTS for m in to_append):
         # Cold path: only fetched on a real transition that needs a human identity.
         try:
-            facts = github_factory().audit_facts(promotion.pr_number)
+            facts = github_factory().audit_facts(_github_number(promotion))
         except Exception:  # noqa: BLE001 — never let an enrichment hiccup drop the audit event
             facts = {}
 
@@ -149,19 +161,25 @@ def reconcile_all(store: PromotionStore, github_factory: Callable[[], object],
     checked = 0
     transitioned: list[dict] = []
     for p in promotions:
-        if p.pr_number is None:
+        if not p.change_provider or not p.external_id:
             continue
         try:
             expected = ({
                 "content_revision": p.content_revision,
                 "engine_revision": p.engine_revision,
             } if p.content_revision and p.engine_revision else None)
-            status = gh.get_status(p.pr_number, approved_revisions=expected)
+            status = gh.get_status(_github_number(p), approved_revisions=expected)
             appended = reconcile(store, p, status, factory)
             checked += 1
             if appended:
-                transitioned.append({"id": p.id, "pr_number": p.pr_number, "events": appended})
+                transitioned.append({
+                    "id": p.id, "provider": p.change_provider,
+                    "external_id": p.external_id, "events": appended,
+                })
         except Exception:  # noqa: BLE001 — one bad promotion must not abort the whole sweep
             if logger:
-                logger.exception("scheduled reconcile failed for PR #%s", p.pr_number)
+                logger.exception(
+                    "scheduled reconcile failed for %s Change Request %s",
+                    p.change_provider, p.external_id,
+                )
     return {"checked": checked, "transitioned": transitioned}

@@ -8,15 +8,14 @@ promoção. Independente de domínio.
 - **ENV-01 (BLOCKER)** — um espaço de produção referencia apenas catálogos `prod_<domínio>`.
   Qualquer referência a `dev_`/`sbx_`/outro ambiente é bloqueador. Verificada no CI (pré-render +
   allowlist), independente do texto — desabilitar no app não desliga o gate.
-- **GRANT-01 (BLOCKER)** — todo principal consumidor de produção tem SELECT em toda tabela do
-  espaço. Verificada no CI (check_grants) como o SP de produção. Grant faltando = bloqueador.
+- **AUDIENCE-01** — valida os principais e tabelas do Público do Space. Falta de SELECT é advisory
+  e orienta o processo Terraform da CERC; entrada inválida bloqueia e falha de inspeção é operacional.
 - **EVAL-01 (BLOCKER, configurável)** — o espaço tem ≥ N perguntas de benchmark (default 2). Contada
   deterministicamente. O mínimo e o limiar do eval-run são configuráveis pelo admin.
 
 ## Regras avaliadas pelo revisor (LLM, texto configurável)
 
 - **ENV-02 (SUGGESTION)** — o warehouse do espaço deve ser o de produção.
-- **GRANT-02 (SUGGESTION)** — o dono/CAN_MANAGE do espaço deve ser um grupo, não um indivíduo.
 - **PII-01 (BLOCKER)** — coluna de PII de pessoa física / sigilo bancário exposta sem máscara a
   grupo não autorizado. Identificador de empresa (CNPJ) não é bloqueador por si só.
 - **PII-02 (SUGGESTION)** — instruções não devem induzir cruzamento entre clientes ou vazamento

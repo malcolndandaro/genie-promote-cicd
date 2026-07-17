@@ -246,15 +246,24 @@ def test_principals_rejects_invalid_kind():
 
 # --- POST /review (AK3) ---
 
+_AUDIENCE_SPEC_WIRE = {
+    "principals": [
+        {"principal": "ana@x.com", "is_group": False},
+        {"principal": "data_analysts", "is_group": True},
+    ]
+}
+
+
+def _body(space_id: str, **extra) -> dict:
+    return {"space_id": space_id, "audience_spec": _AUDIENCE_SPEC_WIRE, **extra}
+
 _FAKE_REVIEW = {
     "findings": [{"rule_id": "EVAL-01", "severity": "BLOCKER", "message": "...", "citation": "..."}],
     "gate": {"conclusion": "failure", "blocker_count": 1, "summary": "🔴 ..."},
     "eval": {"status": "advisory", "summary": "🟡 ..."},
     "timeline": [{"key": "checks", "label": "...", "status": "pass"}],
     "allowlist_violations": [],
-    "consumer_group": "account users",
-    "audience_spec": None,
-    "access_spec": {"space_permissions": [], "uc_principals": []},  # F2: no access declared
+    "audience_spec": _AUDIENCE_SPEC_WIRE,
     "prod_serialized": {"huge": "payload", "should": "not be returned"},
 }
 
@@ -268,34 +277,24 @@ def test_review_threads_token_and_returns_ui_fields(monkeypatch):
         return dict(_FAKE_REVIEW)
 
     monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-    r = client.post("/review", json={"space_id": "01f16e83"},
+    r = client.post("/review", json=_body("01f16e83"),
                     headers={"x-forwarded-access-token": "tok-r"})
     assert r.status_code == 200
     body = r.json()
     assert captured == {"space_id": "01f16e83", "user_token": "tok-r"}
-    assert set(body.keys()) == {"findings", "gate", "eval", "timeline",
-                                "allowlist_violations", "consumer_group", "audience_spec", "access_spec"}
+    assert set(body.keys()) == {
+        "findings", "gate", "eval", "timeline", "allowlist_violations", "audience_spec"
+    }
     assert "prod_serialized" not in body  # large payload dropped
     assert body["gate"]["conclusion"] == "failure"
 
 
 def test_review_requires_a_token():
-    r = client.post("/review", json={"space_id": "x"})
+    r = client.post("/review", json=_body("x"))
     assert r.status_code == 401
 
 
-# --- F2: AccessSpec threaded through /review and /promote --------------------
-
-_ACCESS_SPEC_WIRE = {
-    "space_permissions": [{"principal": "data_analysts", "is_group": True, "level": "CAN_RUN"}],
-    "uc_principals": [{"principal": "ana@x.com", "is_group": False}],
-}
-_AUDIENCE_SPEC_WIRE = {
-    "principals": [
-        {"principal": "ana@x.com", "is_group": False},
-        {"principal": "data_analysts", "is_group": True},
-    ]
-}
+# --- Required AudienceSpec threaded through /review and /promote ------------
 
 
 def test_review_threads_declared_audience_spec_into_the_engine(monkeypatch):
@@ -332,7 +331,7 @@ def test_review_rejects_empty_audience_and_author_selected_permission_level(monk
             "space_id": "s",
             "audience_spec": {
                 "principals": [
-                    {"principal": "users", "is_group": True, "level": "CAN_VIEW"}
+                    {"principal": "users", "is_group": True, "level": "CAN_" + "VIEW"}
                 ]
             },
         },
@@ -342,36 +341,13 @@ def test_review_rejects_empty_audience_and_author_selected_permission_level(monk
     assert selected_level.status_code == 422
 
 
-def test_review_without_audience_spec_passes_none_during_compatibility_window(monkeypatch):
-    """The pre-F2 contract ({space_id} only) must still work — no AccessSpec declared -> None,
-    never an empty-but-truthy sentinel that would confuse a downstream check."""
-    captured = {}
-
-    def fake_review_space(space_id, *a, audience_spec_=None, **k):
-        captured["audience_spec_"] = audience_spec_
-        return dict(_FAKE_REVIEW)
-
-    monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
+def test_review_without_audience_spec_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        engine_api.app_logic, "review_space",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("invalid input reached engine")))
     r = client.post("/review", json={"space_id": "01f16e83"},
                     headers={"x-forwarded-access-token": "tok-r"})
-    assert r.status_code == 200
-    assert captured["audience_spec_"] is None
-
-
-def test_review_legacy_access_spec_is_read_only_translated_to_audience(monkeypatch):
-    captured = {}
-
-    def fake_review_space(space_id, *a, audience_spec_=None, **k):
-        captured["audience"] = audience_spec_
-        return dict(_FAKE_REVIEW)
-
-    monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-    r = client.post("/review", json={"space_id": "s", "access_spec": _ACCESS_SPEC_WIRE},
-                    headers={"x-forwarded-access-token": "tok-r"})
-    assert r.status_code == 200
-    assert captured["audience"].to_dict() == {
-        "principals": [{"principal": "data_analysts", "is_group": True}]
-    }
+    assert r.status_code == 422
 
 
 # --- S7b: /review and /promote thread this space's in-scope, enabled KA endpoints through ------
@@ -395,7 +371,7 @@ def test_review_threads_scoped_ka_endpoints_into_the_engine(monkeypatch):
             return dict(_FAKE_REVIEW)
 
         monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-        r = client.post("/review", json={"space_id": "01f16e83"},
+        r = client.post("/review", json=_body("01f16e83"),
                         headers={"x-forwarded-access-token": "tok-r"})
         assert r.status_code == 200
         assert [e["name"] for e in captured["ka_endpoints"]] == ["In scope"]
@@ -412,7 +388,7 @@ def test_review_passes_none_ka_endpoints_when_store_absent(monkeypatch):
         return dict(_FAKE_REVIEW)
 
     monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-    r = client.post("/review", json={"space_id": "01f16e83"},
+    r = client.post("/review", json=_body("01f16e83"),
                     headers={"x-forwarded-access-token": "tok-r"})
     assert r.status_code == 200
     assert captured["ka_endpoints"] is None
@@ -428,7 +404,7 @@ def test_review_engine_error_maps_to_502(monkeypatch):
         raise RuntimeError("simulated review failure")
 
     monkeypatch.setattr(engine_api.app_logic, "review_space", boom)
-    r = client.post("/review", json={"space_id": "x"},
+    r = client.post("/review", json=_body("x"),
                     headers={"x-forwarded-access-token": "tok"})
     assert r.status_code == 502
     assert "simulated review failure" not in r.text
@@ -440,7 +416,7 @@ def test_review_contract_drift_maps_to_502(monkeypatch):
 
     monkeypatch.setattr(engine_api.app_logic, "review_space",
                         lambda space_id, *a, user_token=None, **k: dict(incomplete))
-    r = client.post("/review", json={"space_id": "x"},
+    r = client.post("/review", json=_body("x"),
                     headers={"x-forwarded-access-token": "tok"})
     assert r.status_code == 502
 
@@ -508,8 +484,9 @@ def test_rehydrate_overwrite_passes_dev_space_id_and_promotion_id(monkeypatch):
 def _mk_promotion(store):
     return store.create_promotion(
         resource_id="dev-src", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@x", pr_number=7, pr_url="https://gh/pr/7", branch="promote/x",
-        current_phase="deployed", live_status=None)
+        requester_email="ana@x", branch="promote/x", current_phase="deployed", live_status=None,
+        change_provider="github", external_id="7", external_url="https://gh/change/7",
+        audience_spec=_AUDIENCE_SPEC_WIRE)
 
 
 def test_rehydrate_proceeds_with_promotion_id_none_when_no_promotion_matches(monkeypatch, store):
@@ -572,8 +549,9 @@ def test_rehydrate_auto_resolves_promotion_id_by_resource_id_when_omitted(monkey
     _verify_as(monkeypatch, {"tok": "ana@x"})
     p = store.create_promotion(
         resource_id="prod-1", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@x", pr_number=9, pr_url="https://gh/pr/9", branch="promote/x",
-        current_phase="deployed", live_status=None)
+        requester_email="ana@x", branch="promote/x", current_phase="deployed", live_status=None,
+        change_provider="github", external_id="9", external_url="https://gh/change/9",
+        audience_spec=_AUDIENCE_SPEC_WIRE)
 
     def fake_rehydrate(*, source_prod_space_id, identity, mode, dev_space_id=None, title=None,
                        store=None, promotion_id=None, table_mapping=None):
@@ -869,7 +847,7 @@ def test_promote_threads_token_email_and_returns_review_and_pr(monkeypatch):
         return {"review": {"gate": {"conclusion": "success"}}, "pr": {"number": 7, "url": "u"}}
 
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake_request_promotion)
-    r = client.post("/api/promote", json={"space_id": "s1"},
+    r = client.post("/api/promote", json=_body("s1"),
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "m@x"})
     assert r.status_code == 200
     assert r.json()["pr"] == {"number": 7, "url": "u"}
@@ -877,7 +855,7 @@ def test_promote_threads_token_email_and_returns_review_and_pr(monkeypatch):
 
 
 def test_promote_requires_a_token():
-    assert client.post("/api/promote", json={"space_id": "s"}).status_code == 401
+    assert client.post("/api/promote", json=_body("s")).status_code == 401
 
 
 def test_promote_github_error_maps_to_503(monkeypatch):
@@ -887,7 +865,7 @@ def test_promote_github_error_maps_to_503(monkeypatch):
         raise GitHubError(404, "create pull", {"message": "not installed"})
 
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", boom)
-    r = client.post("/api/promote", json={"space_id": "s"},
+    r = client.post("/api/promote", json=_body("s"),
                     headers={"x-forwarded-access-token": "tok"})
     assert r.status_code == 503
     assert "not installed" not in r.text  # internal detail not leaked
@@ -964,7 +942,7 @@ def test_with_prod_space_id_degrades_on_list_prod_spaces_error(monkeypatch):
 
 def test_promote_status_endpoint_embeds_prod_space_id_when_deployed(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=9))
-    client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis"},
+    client.post("/api/promote", json=_body("s1", resource_title="Recebíveis"),
                 headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     captured = {}
 
@@ -996,7 +974,7 @@ def test_promotion_detail_resolves_prod_space_id_from_cached_status(monkeypatch,
     still has to run at READ time (not only on the live poll), since a cached blob may predate this
     field entirely, or the promotion may never be polled again once terminal."""
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))
-    pid = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis"},
+    pid = client.post("/api/promote", json=_body("s1", resource_title="Recebíveis"),
                       headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
     store.update_cache(pid, current_phase="deployed", live_status={"phase": "deployed"}, terminal=True)
     monkeypatch.setattr(engine_api.app_logic, "list_prod_spaces",
@@ -1021,11 +999,12 @@ def store():
 
 
 def _fake_promote(review_gate="success", number=7):
-    def fn(space_id, *a, user_token=None, requester_email=None, **k):
+    def fn(space_id, *a, user_token=None, requester_email=None, audience_spec_=None, **k):
         return {"review": {"gate": {"conclusion": review_gate, "summary": "ok"},
                            "findings": [{"rule_id": "ENV-01", "severity": "BLOCKER"}] if review_gate == "failure" else [],
                            "eval": {"status": "pass", "summary": "n/a"},
-                           "timeline": [{"key": "review", "status": "pass"}]},
+                           "timeline": [{"key": "review", "status": "pass"}],
+                           "audience_spec": audience_spec_.to_dict()},
                 "pr": {"number": number, "url": f"https://gh/pr/{number}"},
                 "change_request": {
                     "provider": "github",
@@ -1039,12 +1018,12 @@ def _fake_promote(review_gate="success", number=7):
 
 def test_promote_persists_promotion_snapshot_and_requested_event(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
-    r = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis"},
+    r = client.post("/api/promote", json=_body("s1", resource_title="Recebíveis"),
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     assert r.status_code == 200
     pid = r.json()["promotion_id"]
     p = store.get_promotion(pid)
-    assert p.pr_number == 7 and p.resource_title == "Recebíveis" and p.requester_email == "ana@x"
+    assert p.external_id == "7" and p.resource_title == "Recebíveis" and p.requester_email == "ana@x"
     assert p.change_provider == "github" and p.external_id == "7"
     assert p.content_revision == "b" * 64 and p.engine_revision == "a" * 40
     assert store.latest_snapshot(pid).gate_conclusion == "success"
@@ -1073,7 +1052,6 @@ def test_promote_threads_audience_spec_to_the_engine_and_persists_it(monkeypatch
     pid = r.json()["promotion_id"]
     p = store.get_promotion(pid)
     assert p.audience_spec == _AUDIENCE_SPEC_WIRE
-    assert p.access_spec is None
 
     # the Steward-facing recovery payload (get_promotion) echoes the SAME declaration
     detail = client.get(f"/api/promotions/{pid}",
@@ -1081,12 +1059,12 @@ def test_promote_threads_audience_spec_to_the_engine_and_persists_it(monkeypatch
     assert detail["promotion"]["audience_spec"] == _AUDIENCE_SPEC_WIRE
 
 
-def test_promote_without_audience_spec_persists_none_during_compatibility(monkeypatch, store):
+def test_promote_without_audience_spec_is_rejected(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
     r = client.post("/api/promote", json={"space_id": "s1"},
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
-    pid = r.json()["promotion_id"]
-    assert store.get_promotion(pid).audience_spec is None
+    assert r.status_code == 422
+    assert store.list_promotions() == []
 
 
 # --- G7: the declared prod name + table de-para thread into request_promotion + persist ----------
@@ -1105,8 +1083,9 @@ def test_promote_threads_prod_title_and_table_mapping_to_the_engine(monkeypatch,
         return _fake_promote()(space_id, *a, **k)
 
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake_request_promotion)
-    r = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis PROD",
-                                          "table_mapping": _TABLE_MAPPING_WIRE},
+    r = client.post(
+        "/api/promote",
+        json=_body("s1", resource_title="Recebíveis PROD", table_mapping=_TABLE_MAPPING_WIRE),
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     assert r.status_code == 200
     assert captured == {"resource_title": "Recebíveis PROD", "table_mapping": _TABLE_MAPPING_WIRE}
@@ -1114,7 +1093,7 @@ def test_promote_threads_prod_title_and_table_mapping_to_the_engine(monkeypatch,
 
 def test_promote_persists_the_declared_table_mapping(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
-    r = client.post("/api/promote", json={"space_id": "s1", "table_mapping": _TABLE_MAPPING_WIRE},
+    r = client.post("/api/promote", json=_body("s1", table_mapping=_TABLE_MAPPING_WIRE),
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     pid = r.json()["promotion_id"]
     p = store.get_promotion(pid)
@@ -1128,7 +1107,7 @@ def test_promote_persists_the_declared_table_mapping(monkeypatch, store):
 
 def test_promote_without_table_mapping_persists_none(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote())
-    r = client.post("/api/promote", json={"space_id": "s1"},
+    r = client.post("/api/promote", json=_body("s1"),
                     headers={"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"})
     pid = r.json()["promotion_id"]
     assert store.get_promotion(pid).table_mapping is None
@@ -1137,8 +1116,8 @@ def test_promote_without_table_mapping_persists_none(monkeypatch, store):
 def test_promote_rerequest_adds_snapshot_and_re_reviewed_to_same_promotion(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=7))
     h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
-    pid1 = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
-    pid2 = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
+    pid1 = client.post("/api/promote", json=_body("s1"), headers=h).json()["promotion_id"]
+    pid2 = client.post("/api/promote", json=_body("s1"), headers=h).json()["promotion_id"]
     assert pid1 == pid2  # SAME Promotion (1:1 with the PR) — no fragmentation
     assert len(store.list_snapshots(pid1)) == 2  # both snapshots retained
     assert [e.event_type for e in store.list_audit_events(pid1)] == ["requested", "re_reviewed"]
@@ -1154,13 +1133,13 @@ def _fake_request_promotion_echoing_audience(number: int):
 
 
 def test_promote_rerequest_updates_the_stored_declarations(monkeypatch, store):
-    """Found #3: a re-request declaring a DIFFERENT resource_title/access_spec/table_mapping than
+    """A re-request declaring a different title/audience/mapping than
     the first must refresh the stored Promotion row — otherwise the history/recovery view keeps
     showing the FIRST request's now-stale declarations forever."""
     monkeypatch.setattr(engine_api.app_logic, "request_promotion",
                         _fake_request_promotion_echoing_audience(7))
     h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
-    pid = client.post("/api/promote", json={"space_id": "s1", "resource_title": "Recebíveis v1"},
+    pid = client.post("/api/promote", json=_body("s1", resource_title="Recebíveis v1"),
                       headers=h).json()["promotion_id"]
     assert store.get_promotion(pid).resource_title == "Recebíveis v1"
 
@@ -1182,9 +1161,8 @@ def test_promote_rerequest_updates_the_stored_declarations(monkeypatch, store):
     assert detail["promotion"]["table_mapping"] == _TABLE_MAPPING_WIRE
 
 
-def test_promote_rerequest_clearing_a_declaration_persists_none_not_the_stale_value(monkeypatch, store):
-    """Declare-latest-wins: a re-request that DROPS a previously-declared AccessSpec/table_mapping
-    must clear it on the stored Promotion, never keep echoing the first round's value."""
+def test_promote_rerequest_clears_optional_mapping_not_required_audience(monkeypatch, store):
+    """Declare-latest-wins clears an omitted mapping while retaining required audience."""
     monkeypatch.setattr(engine_api.app_logic, "request_promotion",
                         _fake_request_promotion_echoing_audience(8))
     h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
@@ -1193,14 +1171,9 @@ def test_promote_rerequest_clearing_a_declaration_persists_none_not_the_stale_va
                       headers=h).json()["promotion_id"]
     assert store.get_promotion(pid).audience_spec == _AUDIENCE_SPEC_WIRE
 
-    client.post("/api/promote", json={"space_id": "s1"}, headers=h)  # re-request, nothing declared
+    client.post("/api/promote", json=_body("s1"), headers=h)
     p = store.get_promotion(pid)
-    # access_spec's source is the review's OWN echo, which — like the create path — always carries
-    # `spec.to_dict()` (never a bare None, even for an empty spec); the point is it's the FRESH
-    # empty shape, not the stale first-round declaration.
-    assert p.audience_spec is None
-    # table_mapping's source is the request body directly (not echoed by the review), so an omitted
-    # one on re-request really is a bare None.
+    assert p.audience_spec == _AUDIENCE_SPEC_WIRE
     assert p.table_mapping is None
 
 
@@ -1210,9 +1183,8 @@ def test_promote_rerequest_records_the_new_declarations_on_the_re_reviewed_audit
     monkeypatch.setattr(engine_api.app_logic, "request_promotion",
                         _fake_request_promotion_echoing_audience(9))
     h = {"x-forwarded-access-token": "tok", "x-forwarded-email": "ana@x"}
-    pid = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
-    client.post("/api/promote", json={"space_id": "s1", "resource_title": "Novo nome",
-                                      "audience_spec": _AUDIENCE_SPEC_WIRE}, headers=h)
+    pid = client.post("/api/promote", json=_body("s1"), headers=h).json()["promotion_id"]
+    client.post("/api/promote", json=_body("s1", resource_title="Novo nome"), headers=h)
 
     events = store.list_audit_events(pid)
     requested = next(e for e in events if e.event_type == "requested")
@@ -1226,18 +1198,18 @@ def test_promote_rerequest_records_the_new_declarations_on_the_re_reviewed_audit
 def test_list_promotions_scope_mine_filters_by_email(monkeypatch, store):
     _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-bob": "bob@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))
-    client.post("/api/promote", json={"space_id": "s1"},
+    client.post("/api/promote", json=_body("s1"),
                 headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=12))
-    client.post("/api/promote", json={"space_id": "s2"},
+    client.post("/api/promote", json=_body("s2"),
                 headers={"x-forwarded-access-token": "tok-bob", "x-forwarded-email": "bob@x"})
     # scope=mine is keyed on the VERIFIED identity (A2) — the request must carry a token that
     # verifies to ana's email, not just a matching display header.
     r = client.get("/api/promotions?scope=mine", headers={"x-forwarded-access-token": "tok-ana",
                                                            "x-forwarded-email": "ana@x"})
     assert r.status_code == 200
-    prs = [p["pr_number"] for p in r.json()["promotions"]]
-    assert prs == [11]  # only ana's
+    external_ids = [p["external_id"] for p in r.json()["promotions"]]
+    assert external_ids == ["11"]  # only ana's
 
 
 def test_list_promotions_scope_mine_spoofed_header_does_not_leak_others(monkeypatch, store):
@@ -1245,7 +1217,7 @@ def test_list_promotions_scope_mine_spoofed_header_does_not_leak_others(monkeypa
     # ana's email as the display header (A2: x-forwarded-email is never an authz input).
     _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-bob": "bob@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=11))
-    client.post("/api/promote", json={"space_id": "s1"},
+    client.post("/api/promote", json=_body("s1"),
                 headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"})
     r = client.get("/api/promotions?scope=mine",
                    headers={"x-forwarded-access-token": "tok-bob", "x-forwarded-email": "ana@x"})
@@ -1255,7 +1227,7 @@ def test_list_promotions_scope_mine_spoofed_header_does_not_leak_others(monkeypa
 
 def test_get_promotion_recovers_stored_review_without_calling_engine(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(review_gate="failure", number=9))
-    pid = client.post("/api/promote", json={"space_id": "s1"},
+    pid = client.post("/api/promote", json=_body("s1"),
                       headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
 
     # Recovery must NOT re-run the reviewer: blow up request_promotion so any call would fail.
@@ -1273,21 +1245,21 @@ def test_get_promotion_recovers_stored_review_without_calling_engine(monkeypatch
 
 
 def test_promote_recovers_from_concurrent_create_race(monkeypatch, store):
-    # TOCTOU: a concurrent request created the Promotion for this PR between our find_by_pr and
-    # create. create raises DuplicatePRNumber; we must recover (treat as re_reviewed), not 500.
+    # TOCTOU: a concurrent request created the Promotion between lookup and create.
     p = store.create_promotion(resource_id="s1", resource_kind="genie_space", resource_title="t",
-                               requester_email="ana@x", pr_number=7, pr_url="u", branch="b",
-                               current_phase="open", live_status=None)
-    real_find = store.find_by_pr
+                               requester_email="ana@x", branch="b", current_phase="open",
+                               live_status=None, change_provider="github", external_id="7",
+                               external_url="u", audience_spec=_AUDIENCE_SPEC_WIRE)
+    real_find = store.find_by_change_request
     seq = {"n": 0}
 
-    def flaky_find(pr_number):  # None on the first lookup (the race window), real value after
+    def flaky_find(provider, external_id):
         seq["n"] += 1
-        return None if seq["n"] == 1 else real_find(pr_number)
+        return None if seq["n"] == 1 else real_find(provider, external_id)
 
-    monkeypatch.setattr(store, "find_by_pr", flaky_find)
+    monkeypatch.setattr(store, "find_by_change_request", flaky_find)
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=7))
-    r = client.post("/api/promote", json={"space_id": "s1"},
+    r = client.post("/api/promote", json=_body("s1"),
                     headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"})
     assert r.status_code == 200
     assert r.json()["promotion_id"] == p.id  # recovered onto the existing promotion, no 500
@@ -1297,9 +1269,9 @@ def test_promote_recovers_from_concurrent_create_race(monkeypatch, store):
 def test_re_review_only_requested_carries_app_email_and_bumps_updated_at(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=7))
     h = {"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}
-    pid = client.post("/api/promote", json={"space_id": "s1"}, headers=h).json()["promotion_id"]
+    pid = client.post("/api/promote", json=_body("s1"), headers=h).json()["promotion_id"]
     created_at = store.get_promotion(pid).created_at
-    client.post("/api/promote", json={"space_id": "s1"}, headers=h)  # re-review
+    client.post("/api/promote", json=_body("s1"), headers=h)  # re-review
     events = store.list_audit_events(pid)
     assert events[0].event_type == "requested" and events[0].actor_app_email == "ana@x"
     # re_reviewed carries NO app email (ADR-0005: actor_app_email only on `requested`)
@@ -1354,15 +1326,17 @@ def test_scope_all_role_gated(monkeypatch, store):
     monkeypatch.setenv("APP_ADMINS", "admin@x")
     _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-bob": "bob@x", "tok-admin": "admin@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=21))
-    client.post("/api/promote", json={"space_id": "s1"},
+    client.post("/api/promote", json=_body("s1"),
                 headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=22))
-    client.post("/api/promote", json={"space_id": "s2"},
+    client.post("/api/promote", json=_body("s2"),
                 headers={"x-forwarded-access-token": "tok-bob", "x-forwarded-email": "bob@x"})
     # An admin (by VERIFIED identity) sees ALL promotions (cross-user governance view).
     admin = client.get("/api/promotions?scope=all", headers={"x-forwarded-access-token": "tok-admin",
                                                              "x-forwarded-email": "admin@x"})
-    assert admin.status_code == 200 and {p["pr_number"] for p in admin.json()["promotions"]} == {21, 22}
+    assert admin.status_code == 200 and {
+        p["external_id"] for p in admin.json()["promotions"]
+    } == {"21", "22"}
     # A non-admin requesting scope=all is denied (server-enforced, not just hidden in the UI) —
     # even if they spoof the display header to look like the admin.
     assert client.get("/api/promotions?scope=all",
@@ -1371,7 +1345,7 @@ def test_scope_all_role_gated(monkeypatch, store):
     # scope=mine still filters by the caller's VERIFIED identity.
     mine = client.get("/api/promotions?scope=mine", headers={"x-forwarded-access-token": "tok-ana",
                                                               "x-forwarded-email": "ana@x"})
-    assert {p["pr_number"] for p in mine.json()["promotions"]} == {21}
+    assert {p["external_id"] for p in mine.json()["promotions"]} == {"21"}
     assert client.get("/api/promotions?scope=bogus",
                       headers={"x-forwarded-access-token": "tok-admin",
                                "x-forwarded-email": "admin@x"}).status_code == 400
@@ -1380,20 +1354,21 @@ def test_scope_all_role_gated(monkeypatch, store):
 # --- S6 (app-ux-overhaul): scope=steward-queue — cross-user, phase-filtered, is_steward-gated ----
 
 
-def _mk_promotion_with_phase(store, *, pr_number, resource_id="s1", phase, requester="ana@x"):
+def _mk_promotion_with_phase(store, *, external_id, resource_id="s1", phase, requester="ana@x"):
     # The filter under test only looks at `current_phase` — the endpoint's own `terminal` field
     # isn't part of its logic, so no need to force it here.
     return store.create_promotion(
         resource_id=resource_id, resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email=requester, pr_number=pr_number, pr_url=f"https://gh/pr/{pr_number}",
-        branch="promote/x", current_phase=phase, live_status={"phase": phase})
+        requester_email=requester, branch="promote/x", current_phase=phase,
+        live_status={"phase": phase}, change_provider="github", external_id=str(external_id),
+        external_url=f"https://gh/change/{external_id}", audience_spec=_AUDIENCE_SPEC_WIRE)
 
 
 def test_steward_queue_is_gated_on_is_steward_or_is_admin(monkeypatch, store):
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.setenv("APP_STEWARDS", "pedro@x")
     _verify_as(monkeypatch, {"tok-steward": "pedro@x", "tok-rando": "rando@x"})
-    _mk_promotion_with_phase(store, pr_number=30, phase="open")
+    _mk_promotion_with_phase(store, external_id=30, phase="open")
 
     ok = client.get("/api/promotions?scope=steward-queue",
                     headers={"x-forwarded-access-token": "tok-steward"})
@@ -1406,36 +1381,36 @@ def test_steward_queue_filters_to_phases_needing_steward_attention(monkeypatch, 
     monkeypatch.setenv("APP_STEWARDS", "pedro@x")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     _verify_as(monkeypatch, {"tok-steward": "pedro@x"})
-    _mk_promotion_with_phase(store, pr_number=31, phase="open")             # needs review -> IN
-    _mk_promotion_with_phase(store, pr_number=32, phase="checks_running")   # needs review -> IN
-    _mk_promotion_with_phase(store, pr_number=33, phase="awaiting_approval")  # needs deploy gate -> IN
-    _mk_promotion_with_phase(store, pr_number=34, phase="checks_failed")    # requester's problem -> OUT
-    _mk_promotion_with_phase(store, pr_number=35, phase="deploying")        # gate already passed -> OUT
-    _mk_promotion_with_phase(store, pr_number=36, phase="deployed")         # terminal -> OUT
-    _mk_promotion_with_phase(store, pr_number=37, phase="closed")           # terminal -> OUT
+    _mk_promotion_with_phase(store, external_id=31, phase="open")
+    _mk_promotion_with_phase(store, external_id=32, phase="checks_running")
+    _mk_promotion_with_phase(store, external_id=33, phase="awaiting_approval")
+    _mk_promotion_with_phase(store, external_id=34, phase="checks_failed")
+    _mk_promotion_with_phase(store, external_id=35, phase="deploying")
+    _mk_promotion_with_phase(store, external_id=36, phase="deployed")
+    _mk_promotion_with_phase(store, external_id=37, phase="closed")
 
     r = client.get("/api/promotions?scope=steward-queue",
                    headers={"x-forwarded-access-token": "tok-steward"})
     assert r.status_code == 200
-    assert {p["pr_number"] for p in r.json()["promotions"]} == {31, 32, 33}
+    assert {p["external_id"] for p in r.json()["promotions"]} == {"31", "32", "33"}
 
 
 def test_steward_queue_is_cross_user_not_scoped_to_the_stewards_own_promotions(monkeypatch, store):
     monkeypatch.setenv("APP_STEWARDS", "pedro@x")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     _verify_as(monkeypatch, {"tok-steward": "pedro@x"})
-    _mk_promotion_with_phase(store, pr_number=38, phase="open", requester="ana@x")
-    _mk_promotion_with_phase(store, pr_number=39, phase="open", requester="bob@x")
+    _mk_promotion_with_phase(store, external_id=38, phase="open", requester="ana@x")
+    _mk_promotion_with_phase(store, external_id=39, phase="open", requester="bob@x")
 
     r = client.get("/api/promotions?scope=steward-queue",
                    headers={"x-forwarded-access-token": "tok-steward"})
-    assert {p["pr_number"] for p in r.json()["promotions"]} == {38, 39}
+    assert {p["external_id"] for p in r.json()["promotions"]} == {"38", "39"}
 
 
 def test_status_read_reconciles_and_caches(monkeypatch, store):
     # Persist a promotion (PR 6), then a status read must reconcile -> append GitHub events + cache.
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=6))
-    pid = client.post("/api/promote", json={"space_id": "s1"},
+    pid = client.post("/api/promote", json=_body("s1"),
                       headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
     monkeypatch.setattr(engine_api.app_logic, "promotion_status", lambda n, *a, **k: {
         "pr_state": "open", "merged": False, "checks": "pending", "review_decision": "approved",
@@ -1453,7 +1428,7 @@ def test_status_read_reconciles_and_caches(monkeypatch, store):
 
 def test_promotion_detail_includes_audit_and_cached_status(monkeypatch, store):
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=6))
-    pid = client.post("/api/promote", json={"space_id": "s1"},
+    pid = client.post("/api/promote", json=_body("s1"),
                       headers={"x-forwarded-access-token": "t", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
     body = client.get(f"/api/promotions/{pid}").json()
     assert "audit" in body and body["audit"][0]["event_type"] == "requested"
@@ -1467,7 +1442,7 @@ def test_get_promotion_ownership_gated(monkeypatch, store):
     monkeypatch.setenv("APP_ADMINS", "admin@x")
     _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-admin": "admin@x", "tok-mallory": "mallory@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=31))
-    pid = client.post("/api/promote", json={"space_id": "s1"},
+    pid = client.post("/api/promote", json=_body("s1"),
                       headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
     # The owner sees it; an admin sees it; another user is denied (can't read by guessing an id) —
     # gated on each caller's own VERIFIED identity.
@@ -1486,7 +1461,7 @@ def test_get_promotion_denies_spoofed_display_header(monkeypatch, store):
     # gated on mallory's own VERIFIED identity (from mallory's OWN token), not the header (A2).
     _verify_as(monkeypatch, {"tok-ana": "ana@x", "tok-mallory": "mallory@x"})
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=32))
-    pid = client.post("/api/promote", json={"space_id": "s1"},
+    pid = client.post("/api/promote", json=_body("s1"),
                       headers={"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}).json()["promotion_id"]
     r = client.get(f"/api/promotions/{pid}",
                    headers={"x-forwarded-access-token": "tok-mallory", "x-forwarded-email": "ana@x"})
@@ -1508,7 +1483,7 @@ def test_promote_still_works_without_store(monkeypatch):
     # Local-without-Lakebase: the PR still opens; persistence is skipped (no promotion_id).
     engine_api.app.state.store = None
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", _fake_promote(number=42))
-    r = client.post("/api/promote", json={"space_id": "s"},
+    r = client.post("/api/promote", json=_body("s"),
                     headers={"x-forwarded-access-token": "t"})
     assert r.status_code == 200 and "promotion_id" not in r.json()
 

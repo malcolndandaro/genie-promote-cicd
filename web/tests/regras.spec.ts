@@ -8,7 +8,6 @@ import { test, expect } from '@playwright/test';
 
 const HARDCODED = [
   { rule_id: 'ENV-01', severity_hint: 'BLOCKER', citation: 'Handbook › ENV-01', content: 'catálogo por ambiente' },
-  { rule_id: 'GRANT-01', severity_hint: 'BLOCKER', citation: 'Handbook › GRANT-01', content: 'grupo consumidor tem SELECT' },
   { rule_id: 'EVAL-01', severity_hint: 'BLOCKER', citation: 'Handbook › EVAL-01', content: '>= N benchmarks',
     params: { min_benchmarks: 2 } },
   { rule_id: 'SQL-01', severity_hint: 'STYLE', citation: 'Handbook › SQL-01', content: 'convenções SQL' },
@@ -135,7 +134,7 @@ test('editing EVAL-01\'s eval-run threshold (%) persists as a fraction, alongsid
 
 test('a configurable rule with an override can be reset back to default', async ({ page }) => {
   // SQL-01 is a configurable (non-pipeline-locked) rule, so it has a reset affordance;
-  // ENV-01/GRANT-01 are locked and never show one.
+  // ENV-01 is locked and never shows one.
   mockAdminScreen(page, [
     { rule_id: 'SQL-01', is_custom: false, enabled: false, severity: null, params: null,
       content: null, citation: null, updated_by: 'admin@databricks.com', updated_at: '2026-07-01T00:00:00Z' },
@@ -224,18 +223,18 @@ test('editing a configurable rule\'s text persists as an override', async ({ pag
   await expect(refreshed.getByText('Editado por admin@databricks.com')).toBeVisible();
 });
 
-test('pipeline-locked rules (ENV-01/GRANT-01) are read-only: no toggle, no edit, informative text', async ({ page }) => {
+test('pipeline-locked ENV-01 is read-only: no toggle, no edit, informative text', async ({ page }) => {
   mockAdminScreen(page);
   await page.goto('/#/configuracoes');
 
-  const grantRow = page.locator('li').filter({ hasText: 'GRANT-01' });
-  await expect(grantRow.getByText('sempre ativa no pipeline')).toBeVisible();
+  const envRow = page.locator('li').filter({ hasText: 'ENV-01' });
+  await expect(envRow.getByText('sempre ativa no pipeline')).toBeVisible();
   // read-only: no enable checkbox, no "Editar texto", no severity dropdown
-  await expect(grantRow.getByRole('checkbox')).toHaveCount(0);
-  await expect(grantRow.getByRole('button', { name: 'Editar texto' })).toHaveCount(0);
-  await expect(grantRow.getByRole('combobox')).toHaveCount(0);
+  await expect(envRow.getByRole('checkbox')).toHaveCount(0);
+  await expect(envRow.getByRole('button', { name: 'Editar texto' })).toHaveCount(0);
+  await expect(envRow.getByRole('combobox')).toHaveCount(0);
   // it DOES inform what the check does
-  await expect(grantRow.getByText(/check_grants/)).toBeVisible();
+  await expect(envRow.getByText(/pre_render/)).toBeVisible();
 });
 
 test('EVAL-01 is the configurable deterministic rule: keeps its params + toggle, text read-only', async ({ page }) => {

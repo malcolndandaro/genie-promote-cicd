@@ -23,8 +23,8 @@ FROM GitHub (LB4). It never decides a verdict. Governance attribution lives in `
 must be auditable for ANY prod Space the caller can access, not only ones that went through this
 app's own promotion flow — the prod store starts EMPTY (ADR-0006) so most prod Spaces have no
 Promotion row at all. Rather than FK an audit row to a Promotion that may not exist, a rehydrate
-with no linkable source Promotion is recorded in this STANDALONE table instead — same reasoning
-`access_request_store.py`/`rules_store.py` already document for their own audit tables, kept here
+with no linkable source Promotion is recorded in this STANDALONE table instead — the same reasoning
+the configuration stores document for their own audit tables, kept here
 (rather than as a sibling module) because `rehydrate.py`/the engine already thread a single
 `PromotionStore` end-to-end and this is one flat append-only table, not a new domain with its own
 pool. When a source Promotion DOES exist, the richer `audit_events`-linked `rehydrated` event (see
@@ -67,8 +67,6 @@ class Promotion:
     resource_kind: str
     resource_title: Optional[str]
     requester_email: Optional[str]   # OBO email — DISPLAY ONLY (governance uses GitHub identities)
-    pr_number: Optional[int]
-    pr_url: Optional[str]
     branch: Optional[str]
     current_phase: Optional[str]
     live_status: Optional[dict]      # cached get_status (jsonb) — renders immediately on load (LB4)
@@ -76,16 +74,10 @@ class Promotion:
     last_reconciled_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
-    # F2: the Requester's declared AccessSpec (jsonb; `access_spec.AccessSpec.to_dict()` shape) —
-    # persisted WITH the Promotion so the Review/history view shows exactly what was declared, even
-    # after the sidecar's own PR/branch is long merged/closed. None when no AccessSpec was declared
-    # (pre-F2 promotions, or a promotion with no declared access).
-    access_spec: Optional[dict] = None
-    # Pilot Público do Space desired set. New promotions write this field; `access_spec` above is
-    # read-only compatibility until ADR-0009 Phase 2 drops it.
+    # Required Público do Space desired set.
     audience_spec: Optional[dict] = None
     # G7: the Requester's declared table de-para (jsonb; source DEV ref -> desired prod ref
-    # overrides) — persisted WITH the Promotion for the SAME reason as access_spec above (survives
+    # overrides) — persisted WITH the Promotion so it survives
     # independently of the `.mapping.json` sidecar's own PR/branch lifetime). None/empty means the
     # plain dev_->prod_ rebind, no overrides.
     table_mapping: Optional[dict] = None
@@ -162,12 +154,8 @@ class LakebaseUnavailable(RuntimeError):
     """Raised at startup when Lakebase is a hard dependency but unreachable/misconfigured."""
 
 
-class DuplicatePRNumber(ValueError):
-    """Raised when creating a second Promotion for a PR that already has one (the 1:1-PR rule).
-
-    A `ValueError` subclass so existing handlers keep working; both backends raise THIS type (the
-    in-memory fake AND the Postgres `UNIQUE(pr_number)` violation) so a caller (LB3) catches one
-    exception regardless of backend — no backend-specific error leaks as a 500."""
+class DuplicateChangeRequest(ValueError):
+    """Raised when a second Promotion targets the same provider Change Request."""
 
 
 # --- backend interface ------------------------------------------------------
@@ -181,7 +169,6 @@ class StoreBackend(Protocol):
     def migrate(self) -> None: ...
     def insert_promotion(self, row: dict) -> None: ...
     def get_promotion(self, promotion_id: str) -> Optional[dict]: ...
-    def find_promotion_by_pr(self, pr_number: int) -> Optional[dict]: ...
     def list_promotions(self, requester_email: Optional[str]) -> list[dict]: ...  # newest first
     def list_non_terminal(self) -> list[dict]: ...  # all non-terminal (for the scheduler)
     def update_promotion(self, promotion_id: str, fields: dict) -> None: ...
@@ -229,9 +216,8 @@ class PromotionStore:
     # -- promotions ---------------------------------------------------------
     def create_promotion(self, *, resource_id: str, resource_kind: str,
                          resource_title: Optional[str], requester_email: Optional[str],
-                         pr_number: Optional[int], pr_url: Optional[str], branch: Optional[str],
+                         branch: Optional[str],
                          current_phase: Optional[str], live_status: Optional[dict],
-                         access_spec: Optional[dict] = None,
                          audience_spec: Optional[dict] = None,
                          table_mapping: Optional[dict] = None,
                          change_provider: Optional[str] = None,
@@ -239,13 +225,15 @@ class PromotionStore:
                          external_url: Optional[str] = None,
                          content_revision: Optional[str] = None,
                          engine_revision: Optional[str] = None) -> Promotion:
+        if not change_provider or not external_id:
+            raise ValueError("promotion requires change_provider and external_id")
         now = self._clock()
         p = Promotion(
             id=str(uuid.uuid4()), resource_id=resource_id, resource_kind=resource_kind,
-            resource_title=resource_title, requester_email=requester_email, pr_number=pr_number,
-            pr_url=pr_url, branch=branch, current_phase=current_phase, live_status=live_status,
+            resource_title=resource_title, requester_email=requester_email,
+            branch=branch, current_phase=current_phase, live_status=live_status,
             terminal=False, last_reconciled_at=None, created_at=now, updated_at=now,
-            access_spec=access_spec, audience_spec=audience_spec, table_mapping=table_mapping,
+            audience_spec=audience_spec, table_mapping=table_mapping,
             change_provider=change_provider, external_id=external_id, external_url=external_url,
             content_revision=content_revision, engine_revision=engine_revision)
         self._b.insert_promotion(dataclasses.asdict(p))
@@ -257,21 +245,17 @@ class PromotionStore:
         self._b.update_promotion(promotion_id, {"updated_at": self._clock()})
 
     def update_declarations(self, promotion_id: str, *, resource_title: Optional[str],
-                            access_spec: Optional[dict] = None,
                             audience_spec: Optional[dict] = None,
                             table_mapping: Optional[dict] = None) -> None:
-        """Refresh the declared `resource_title`/`access_spec`/`table_mapping` on an EXISTING
-        Promotion (found #3): a re-request on the same open PR can change any of these three (a
-        different prod name, a revised AccessSpec, a new table de-para), but `create_promotion`
+        """Refresh the declared title, Audience and mapping on an existing Promotion.
+        A re-request on the same Change Request can change any of these, but `create_promotion`
         only sets them ONCE, at creation — without this, the stored Promotion kept showing the
         FIRST request's declarations forever, stale against what the PR/sidecars actually now
         carry. Called instead of (not in addition to) `touch()` on a re-request — it bumps
         `updated_at` itself, same as `touch`/`update_cache` do. The new values REPLACE the old ones
-        outright (declare-latest-wins, not a merge): a re-request that drops an AccessSpec (e.g. the
-        Requester decided no principal is needed after all) must show that, not keep echoing a
-        stale one only the previous round declared."""
+        outright (declare-latest-wins, not a merge)."""
         self._b.update_promotion(promotion_id, {
-            "resource_title": resource_title, "access_spec": access_spec,
+            "resource_title": resource_title,
             "audience_spec": audience_spec,
             "table_mapping": table_mapping, "updated_at": self._clock()})
 
@@ -279,21 +263,13 @@ class PromotionStore:
         row = self._b.get_promotion(promotion_id)
         return _as(Promotion, row)
 
-    def find_by_pr(self, pr_number: int) -> Optional[Promotion]:
-        return _as(Promotion, self._b.find_promotion_by_pr(pr_number))
-
     def find_by_change_request(self, provider: str, external_id: str) -> Optional[Promotion]:
-        """Canonical lookup with a PR-number fallback for rows created before ADR-0008."""
-        match = next(
+        """Provider-neutral lookup for the canonical 1:1 Change Request identity."""
+        return next(
             (p for p in self.list_promotions(None)
              if p.change_provider == provider and p.external_id == external_id),
             None,
         )
-        if match is not None:
-            return match
-        if provider == "github" and external_id.isdigit():
-            return self.find_by_pr(int(external_id))
-        return None
 
     def update_change_request(self, promotion_id: str, *, provider: str, external_id: str,
                               external_url: Optional[str], content_revision: Optional[str],
@@ -466,15 +442,14 @@ class InMemoryBackend:
         self.migrated = True
 
     def insert_promotion(self, row: dict) -> None:
-        pr = row.get("pr_number")
-        if pr is not None and any(p.get("pr_number") == pr for p in self._promotions.values()):
-            raise DuplicatePRNumber(f"promotion already exists for PR #{pr}")  # mirrors UNIQUE(pr_number)
         provider, external_id = row.get("change_provider"), row.get("external_id")
-        if provider and external_id and any(
+        if not provider or not external_id:
+            raise ValueError("promotion requires change_provider and external_id")
+        if any(
             p.get("change_provider") == provider and p.get("external_id") == external_id
             for p in self._promotions.values()
         ):
-            raise DuplicatePRNumber(
+            raise DuplicateChangeRequest(
                 f"promotion already exists for {provider} Change Request {external_id}"
             )
         self._promotions[row["id"]] = dict(row)
@@ -487,12 +462,6 @@ class InMemoryBackend:
     def get_promotion(self, promotion_id: str) -> Optional[dict]:
         row = self._promotions.get(promotion_id)
         return dict(row) if row else None
-
-    def find_promotion_by_pr(self, pr_number: int) -> Optional[dict]:
-        for row in self._promotions.values():
-            if row.get("pr_number") == pr_number:
-                return dict(row)
-        return None
 
     def list_promotions(self, requester_email: Optional[str]) -> list[dict]:
         rows = [dict(r) for r in self._promotions.values()
@@ -593,8 +562,6 @@ MIGRATIONS = (
         resource_kind      text NOT NULL,
         resource_title     text,
         requester_email    text,
-        pr_number          integer UNIQUE,
-        pr_url             text,
         branch             text,
         current_phase      text,
         live_status        jsonb,
@@ -602,7 +569,6 @@ MIGRATIONS = (
         last_reconciled_at timestamptz,
         created_at         timestamptz NOT NULL,
         updated_at         timestamptz NOT NULL,
-        access_spec        jsonb,
         audience_spec      jsonb,
         table_mapping      jsonb,
         change_provider    text,
@@ -611,18 +577,42 @@ MIGRATIONS = (
         content_revision   text,
         engine_revision    text
     )""",
-    # F2 (added after the original CREATE TABLE shipped): idempotent for a promotions table that
-    # predates this column — the CREATE TABLE above already includes it for a fresh DB (no-op
-    # there); ADD COLUMN IF NOT EXISTS covers a promotions table created before F2.
-    "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS access_spec jsonb",
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS audience_spec jsonb",
-    # G7: same idempotent-migration pattern as access_spec above, for the declared table de-para.
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS table_mapping jsonb",
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS change_provider text",
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS external_id text",
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS external_url text",
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS content_revision text",
     "ALTER TABLE promotions ADD COLUMN IF NOT EXISTS engine_revision text",
+    # Contract the provider-shaped columns only after canonical Change Request fields exist and old
+    # rows have been backfilled. The information_schema guards make this safe on both an upgraded
+    # demo database and a brand-new canonical schema.
+    """DO $$ BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'promotions'
+              AND column_name = 'pr_number'
+        ) THEN
+            UPDATE promotions
+            SET change_provider = COALESCE(change_provider, 'github'),
+                external_id = COALESCE(external_id, pr_number::text)
+            WHERE pr_number IS NOT NULL;
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'promotions'
+              AND column_name = 'pr_url'
+        ) THEN
+            UPDATE promotions SET external_url = COALESCE(external_url, pr_url)
+            WHERE pr_url IS NOT NULL;
+        END IF;
+    END $$""",
+    "DROP INDEX IF EXISTS ix_promotions_pr",
+    "ALTER TABLE promotions DROP COLUMN IF EXISTS pr_number",
+    "ALTER TABLE promotions DROP COLUMN IF EXISTS pr_url",
+    "ALTER TABLE promotions DROP COLUMN IF EXISTS access_" "spec",
+    "DROP TABLE IF EXISTS access_" "request_audit_events",
+    "DROP TABLE IF EXISTS access_" "requests",
     """CREATE TABLE IF NOT EXISTS review_snapshots (
         id              text PRIMARY KEY,
         promotion_id    text NOT NULL REFERENCES promotions(id),
@@ -647,7 +637,6 @@ MIGRATIONS = (
     )""",
     "CREATE INDEX IF NOT EXISTS ix_promotions_requester ON promotions(requester_email)",
     "CREATE INDEX IF NOT EXISTS ix_promotions_resource  ON promotions(resource_id)",
-    "CREATE INDEX IF NOT EXISTS ix_promotions_pr        ON promotions(pr_number)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_promotions_change_request "
     "ON promotions(change_provider, external_id) "
     "WHERE change_provider IS NOT NULL AND external_id IS NOT NULL",
@@ -695,11 +684,11 @@ MIGRATIONS = (
 )
 
 # Columns that hold JSON blobs (wrapped as jsonb on write).
-_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "access_spec", "audience_spec", "table_mapping",
+_JSON_COLS = {"live_status", "findings", "eval", "timeline", "detail", "audience_spec", "table_mapping",
               "revisions", "completed_stages", "target_ids"}
 _PROMO_COLS = ("id", "resource_id", "resource_kind", "resource_title", "requester_email",
-               "pr_number", "pr_url", "branch", "current_phase", "live_status", "terminal",
-               "last_reconciled_at", "created_at", "updated_at", "access_spec", "audience_spec",
+               "branch", "current_phase", "live_status", "terminal",
+               "last_reconciled_at", "created_at", "updated_at", "audience_spec",
                "table_mapping", "change_provider", "external_id", "external_url",
                "content_revision", "engine_revision")
 _SNAP_COLS = ("id", "promotion_id", "created_at", "gate_conclusion", "gate_summary",
@@ -777,14 +766,14 @@ class PgBackend:
         from psycopg.errors import UniqueViolation
         try:
             self._insert("promotions", _PROMO_COLS, row)
-        except UniqueViolation as e:  # UNIQUE(pr_number) -> map to the same type the fake raises
-            raise DuplicatePRNumber(f"promotion already exists for PR #{row.get('pr_number')}") from e
+        except UniqueViolation as e:
+            raise DuplicateChangeRequest(
+                f"promotion already exists for {row.get('change_provider')} "
+                f"Change Request {row.get('external_id')}"
+            ) from e
 
     def get_promotion(self, promotion_id: str) -> Optional[dict]:
         return self._one("SELECT * FROM promotions WHERE id = %s", (promotion_id,))
-
-    def find_promotion_by_pr(self, pr_number: int) -> Optional[dict]:
-        return self._one("SELECT * FROM promotions WHERE pr_number = %s", (pr_number,))
 
     def list_promotions(self, requester_email: Optional[str]) -> list[dict]:
         if requester_email is None:

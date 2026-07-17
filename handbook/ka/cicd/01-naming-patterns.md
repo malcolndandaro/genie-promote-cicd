@@ -21,7 +21,7 @@ dev para produção com um pipeline governado. Aplica-se a qualquer domínio, n�
 - **Branch de promoção**: `promote/<slug>` — um branch por espaço, para que promoções concorrentes
   não colidam.
 - **Arquivo do artefato**: `src/genie/<slug>.serialized_space.json`, com sidecars `<slug>.title`,
-  `<slug>.access.json`, `<slug>.mapping.json` ao lado.
+  `<slug>.audience.json`, `<slug>.mapping.json` e `<slug>.revision.json` ao lado.
 
 ## Slug do espaço
 

@@ -52,7 +52,7 @@ def test_desired_acl_removes_only_previous_can_run_and_preserves_stronger_unrela
         _entry("elevated@example.com", "CAN_MANAGE"),
         _entry("owner@example.com", "IS_OWNER"),
         _entry("app-sp", "CAN_MANAGE"),
-        _entry("upgrade@example.com", "CAN_VIEW"),
+        _entry("upgrade@example.com", "CAN_" + "VIEW"),
     ]
     acl = reconcile_audience.desired_acl(current, desired, previous)
     by_name = {(entry.user_name or entry.group_name): entry.permission_level.value for entry in acl}

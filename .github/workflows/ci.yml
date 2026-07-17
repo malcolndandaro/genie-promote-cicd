@@ -2,14 +2,14 @@ name: ci
 
 # S9b (repo split): the ENGINE repo's own CI. After the split this repo holds only the app/engine
 # + pipeline LOGIC (no promotable content — that moved to genie-spaces-content, which runs the
-# per-promotion GRANT-01 governance gate + the governed deploy). This workflow is the engine's
+# per-promotion Audience governance gate + the governed deploy). This workflow is the engine's
 # deployability floor: every PR must keep the unit suite green, render cleanly, and produce a bundle
 # that validates against prod — because every content-repo promotion checks THIS repo out at `main`
 # and overlays its content on top, so a broken engine `main` would break all downstream promotions.
 #
 # Deliberately STANDALONE (no content overlay): render.sh emits empty genie_spaces + omits the
 # dashboard/setup when src/ is absent (the app repo's real state), and `bundle validate -t prod`
-# still resolves. No deploy, no content, no GRANT-01 (those are content-repo concerns).
+# still resolves. No deploy or content (those are content-repo concerns).
 #
 # runs-on: self-hosted — this bundle's prod target eagerly resolves prod credentials during
 # `bundle validate` (proven: it round-trips SCIM), and the workspace enforces IP access lists that

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Local verification of the Genie Reviewer (S5) — no mlflow/SDK needed.
 
-Builds a deliberately-bad PROD serialized_space + a deterministic GRANT-01 finding,
+Builds a deliberately-bad PROD serialized_space + a deterministic AUDIENCE-01 finding,
 assembles the handbook-grounded prompt, calls the Claude serving endpoint directly,
 and prints the parsed PT findings + severity gate. Proves the agent's differentiator
-(catches GRANT-01 + EVAL violations a naming linter can't see) without deploying a
+(catches Audience + EVAL violations a naming linter cannot see) without deploying a
 Model Serving endpoint.
 
 Usage: python3 scripts/verify_agent.py [profile] [llm-endpoint]
@@ -39,13 +39,13 @@ BAD_PROD_SPACE = {
         "join_specs": [],
     },
 }
-# Deterministic GRANT-01 (would come from grant_check.check_grants in the pipeline):
-GRANT_FINDINGS = [{
-    "rule_id": "GRANT-01", "severity": "BLOCKER",
-    "citation": "Genie Promotion Handbook › Access › GRANT-01",
+# Deterministic audience finding (would come from the content preflight):
+DETERMINISTIC_FINDINGS = [{
+    "rule_id": "AUDIENCE-01", "severity": "BLOCKER",
+    "citation": "CERC › Público do Space › AUDIENCE-01",
     "message": "o grupo 'grp_recebiveis_consumer' não tem SELECT em "
-               "prod_recebiveis.diamond.dim_arranjo — o espaço seria inutilizável (GRANT-01)",
-    "suggestion": "Reaplicar GRANT SELECT ao grupo de produção.",
+               "prod_recebiveis.diamond.dim_arranjo",
+    "suggestion": "Corrigir o principal ou a tabela antes de promover.",
 }]
 
 
@@ -66,10 +66,10 @@ def call_claude(system: str, user: str) -> str:
 
 def main() -> int:
     ctx = review_core.build_space_context(BAD_PROD_SPACE)
-    system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, GRANT_FINDINGS)
+    system, user = review_core.build_review_prompt(ctx, handbook_rules.RULES, DETERMINISTIC_FINDINGS)
     review = review_core.parse_review(call_claude(system, user))
-    # gate over the FINALIZED set: deterministic GRANT-01/EVAL-01 are guaranteed present
-    review["findings"] = review_core.finalize_findings(review["findings"], GRANT_FINDINGS, ctx["n_benchmark"])
+    review["findings"] = review_core.finalize_findings(
+        review["findings"], DETERMINISTIC_FINDINGS, ctx["n_benchmark"])
     gate = review_core.decide_gate(review["findings"])
     print("=== Genie Reviewer — findings ===")
     for f in review["findings"]:
@@ -77,8 +77,7 @@ def main() -> int:
     print(f"\nsummary: {review['summary']}")
     print(f"gate: {gate['conclusion']} (blockers={gate['blocker_count']}) — {gate['summary']}")
     rule_ids = {f["rule_id"] for f in review["findings"]}
-    # the demo bar: GRANT-01 must block, and the gate must fail
-    ok = gate["conclusion"] == "failure" and "GRANT-01" in rule_ids
+    ok = gate["conclusion"] == "failure" and "AUDIENCE-01" in rule_ids
     print(f"\nVERIFY: {'PASS' if ok else 'CHECK'} (rules cited: {sorted(rule_ids)})")
     return 0 if ok else 1
 

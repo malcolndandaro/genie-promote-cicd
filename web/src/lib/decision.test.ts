@@ -6,7 +6,7 @@ import type { Review } from './types';
 const review = (blocked = false): Review => ({
   findings: blocked ? [{ rule_id: 'ENV-01', severity: 'BLOCKER', message: 'fora do ambiente' }] : [],
   gate: { conclusion: blocked ? 'failure' : 'success', blocker_count: blocked ? 1 : 0, summary: 'x' },
-  eval: { status: 'advisory', summary: 'x' }, allowlist_violations: [], consumer_group: '', timeline: [],
+  eval: { status: 'advisory', summary: 'x' }, allowlist_violations: [], timeline: [],
 });
 
 const status = (over: Partial<PromoteStatus> = {}): PromoteStatus => ({

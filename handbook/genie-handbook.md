@@ -1,4 +1,4 @@
-# Acme Genie/AI-BI Handbook — promotion standards
+# Genie/AI-BI Handbook — promotion standards
 
 > The knowledge base the **Genie Reviewer** agent grounds on (chunked into Vector
 > Search; one rule = one retrievable chunk, mirroring `bimbo_demo/bimbops_handbook`).
@@ -35,26 +35,6 @@ SQL strings that the allowlist regex over `data_sources` would miss.)*
 *citation:* `Genie Promotion Handbook › Catalog-per-Env › ENV-02`
 `warehouse_id` must resolve to the prod/portal workspace's warehouse, not a dev
 warehouse. (Pre-render swaps it; flag if a stray dev warehouse survives.)
-
----
-
-## GRANT — Access governance (BCB-538 "documented access governance")
-
-### GRANT-01 — Every data source must be grant-readable by the prod consumer group (BLOCKER)
-*citation:* `Genie Promotion Handbook › Access › GRANT-01`
-Every table in `data_sources[]` must be `SELECT`-able by the **prod consumer
-group** that will use the Space. A Space whose sources the group cannot read is
-the **single most common real Acme failure** — "a Genie Room built by a data team
-was unusable by business users due to missing UC grants." This is a **BLOCKER**:
-promotion must re-apply the grant, not ship a broken Space. The fix re-binds the
-grant to the prod group (the native `genie_spaces` deploy re-applies it).
-
-### GRANT-02 — Owner is a group, never an individual (SUGGESTION)
-*citation:* `Genie Promotion Handbook › Access › GRANT-02`
-Prod Space ownership / `CAN_MANAGE` should be a **group**, not a personal
-identity — so the Space survives a person leaving and stays auditable.
-
----
 
 ## PII — Bank secrecy / sensitive data
 
@@ -109,8 +89,6 @@ raw/trusted. STYLE only — advisory.
 |---|---|---|
 | ENV-01 | BLOCKER | cross-env catalog ref in a prod Space |
 | ENV-02 | SUGGESTION | non-prod warehouse survived promotion |
-| GRANT-01 | BLOCKER | data source not readable by prod group (the Acme failure) |
-| GRANT-02 | SUGGESTION | individual (not group) owns the prod Space |
 | PII-01 | BLOCKER | unmasked bank-secrecy/PII exposed to wrong group |
 | PII-02 | SUGGESTION | instructions invite cross-client leakage |
 | EVAL-01 | BLOCKER | no benchmark questions to certify against |

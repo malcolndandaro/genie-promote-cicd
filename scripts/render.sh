@@ -43,17 +43,12 @@ for src in src/genie/*.serialized_space.json; do
   if [ -f "src/genie/${slug}.title" ]; then
     title="$(tr -d '\n' < "src/genie/${slug}.title" | sed 's/"/\\"/g')"
     entries+="          title: \"${title}\"\n"
-    # Copy the title sidecar forward too (F2): apply_access.py resolves the deployed Space's live id
-    # by matching this title via genie.list_spaces() (the id isn't in bundle summary / the payload).
+    # Copy the title sidecar forward so the deploy resolves the live Space id without guessing.
     cp "src/genie/${slug}.title" "build/genie/${slug}.title"
   fi
-  # Canonical AudienceSpec. A legacy input remains readable only during ADR-0009's bounded
-  # compatibility window; canonical content is always materialized at the canonical filename.
+  # Required canonical AudienceSpec.
   if [ -f "src/genie/${slug}.audience.json" ]; then
     cp "src/genie/${slug}.audience.json" "build/genie/${slug}.audience.json"
-  elif [ -f "src/genie/${slug}.access.json" ]; then
-    # Read-only legacy input until the content-repo atomic switch (ADR-0009).
-    cp "src/genie/${slug}.access.json" "build/genie/${slug}.access.json"
   fi
 done
 {

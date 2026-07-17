@@ -19,13 +19,13 @@ content lives in a separate content repository, such as
 
 - A Databricks App with a FastAPI backend and Svelte interface.
 - Native DEV Genie authoring with guided promotion to PROD.
-- Fresh LLM review plus deterministic environment, grant, and evaluation checks.
+- Fresh LLM review plus deterministic environment, audience, and evaluation checks.
 - Optional Agent Bricks Knowledge Assistants for grounded, advisory feedback.
 - GitHub pull requests, required checks, and a human production approval gate.
-- Declared Genie and Unity Catalog access applied by the deployment pipeline.
+- Required Genie audience (`CAN_RUN`) reconciled safely by the deployment pipeline.
 - A controlled PROD → DEV rehydrate flow.
-- Durable Lakebase state for promotions, audit, roles, rules, and access requests.
-- Persona-aware experiences for Authors, Stewards, Approvers, and Platform Admins.
+- Durable Lakebase state for promotions, deployment attempts, audit, roles, rules, prompts, and KAs.
+- Focused experiences for Authors, Stewards, and Platform Admins.
 
 ## How it works
 
@@ -36,11 +36,11 @@ flowchart LR
   app --> review[Rules + LLM reviewer<br/>+ advisory KAs]
   review -->|approved request| pr[Content repository PR]
   engine[Engine repository<br/>this repo] -. pipeline logic .-> checks
-  pr --> checks[Render + ENV + GRANT<br/>+ EVAL + tests]
+  pr --> checks[Render + ENV + Audience<br/>+ EVAL + tests]
   checks --> steward{Steward approval}
   steward --> deploy[CI service principal]
   deploy --> prod[Managed PROD Genie Space]
-  deploy --> access[Declared access]
+  deploy --> audience[Reconciled CAN_RUN audience]
   app <--> lakebase[(Lakebase<br/>workflow state + audit)]
   prod -. authorized rehydrate .-> app
   app -. guarded DEV write .-> dev
@@ -50,16 +50,16 @@ The user journey is deliberately simple:
 
 1. **Author in DEV.** A business user creates and tests a Genie Space in the native Databricks UI.
 2. **Prepare the promotion.** In the app, the user selects the Space and can adjust its production
-   title, table mapping, and intended access.
+   title, table mapping, and required Público do Space.
 3. **Review before creating a PR.** The app verifies the caller, checks their live Space access,
    runs deterministic rules, invokes the reviewer model, consults any in-scope Knowledge Assistants,
    and runs the configured Genie evaluation.
 4. **Create a reviewed change.** A GitHub App writes the serialized Space and its sidecars to a
    per-Space branch in the content repository and opens or updates a pull request.
 5. **Run authoritative gates.** GitHub Actions renders DEV references for PROD, rejects foreign
-   catalogs, checks grants and benchmarks, re-runs the DEV evaluation, and validates the bundle.
+   catalogs, validates the audience and benchmarks, re-runs the DEV evaluation, and validates the bundle.
 6. **Separate approval from deployment.** A Steward approves the protected PROD Environment. A
-   dedicated CI service principal then deploys the Space and applies its declared access.
+   dedicated CI service principal then deploys the Space and reconciles its declared audience.
 7. **Keep the full history.** The app reflects GitHub status and stores workflow history and audit
    facts in Lakebase. Authorized users can also rehydrate a PROD Space back into DEV.
 
@@ -70,7 +70,7 @@ The user journey is deliberately simple:
 | **DEV workspace** | Native Genie authoring, benchmark questions, development data, and DEV evaluations. |
 | **PROD workspace** | The Databricks App, Lakebase, reviewer endpoints, managed PROD Spaces, and production data. |
 | **Engine repository** | This repository: app code, reviewer, policy checks, render logic, tests, and DABs configuration. |
-| **Content repository** | Serialized Genie Spaces, titles, mappings, declared access, dashboards, and the promotion workflows. |
+| **Content repository** | Serialized Genie Spaces, titles, audiences, mappings, revision manifests, and promotion workflows. |
 | **GitHub App** | Creates branches and PRs, posts review comments, and reads check/deployment status. It never approves. |
 | **Self-hosted runners** | Execute validation and deployment where workspace IP access policies require an allowlisted host. |
 
@@ -82,11 +82,10 @@ The security model is easier to understand when humans and machine identities ar
 |---|---|
 | **Author** | Authors a DEV Space and requests promotion. Needs `CAN_USE` on the app and access to their DEV Space. |
 | **Steward** | Reviews evidence and approves the GitHub PROD Environment. Cannot self-approve their own request. |
-| **Approver** | Reviews self-service access requests in the app. |
 | **Platform Admin** | Configures roles, rules, Knowledge Assistants, and operational access. |
 | **App service principal** | Runs the PROD-hosted app, queries reviewer endpoints, reads PROD state, and connects to Lakebase. |
 | **DEV reader/writer SP** | Transports cross-workspace Genie calls. Every call is gated against the verified human's live ACL. |
-| **CI service principal** | Validates and deploys the bundle, grants declared access, and gives the app access to deployed Spaces. |
+| **CI service principal** | Validates and deploys the bundle, reconciles audience ACLs, and gives the app technical access to deployed Spaces. |
 
 The forwarded OBO token proves **who the caller is**. It is not used as a cross-workspace transport.
 For DEV operations, the app compares the platform-verified user and groups with the target Space's
@@ -133,7 +132,7 @@ Collect these values first:
 | DEV / PROD workspace URLs | `https://...cloud.databricks.com` |
 | DEV / PROD SQL warehouse IDs | one warehouse in each workspace |
 | Domain and catalogs | `sales`, `dev_sales`, `prod_sales` |
-| Baseline consumer group | an account-level group visible to Unity Catalog |
+| Initial Space audience | one or more users/groups that should receive Genie `CAN_RUN` |
 | Steward | a Databricks email and a distinct GitHub login |
 | Author group | the group that receives `CAN_USE` on the app |
 
@@ -163,7 +162,7 @@ Start with the smallest configuration and add optional features later.
 
 | File | Values to review |
 |---|---|
-| `databricks.yml` | `domain`, `consumer_group`, `dev_host`, `dev_warehouse_id`, and Lakebase names. |
+| `databricks.yml` | `domain`, `dev_host`, `dev_warehouse_id`, and Lakebase names. |
 | `scripts/provision_ci.sh` | PROD profile/host, CI SP name, PROD catalog, warehouse, and GitHub repository. |
 | `scripts/build_promote_app.sh` | Steward/Admin emails, content repo, domain, slug map, and optional KA seed. |
 | Content `.github/workflows/*.yml` | `APP_REPO` and any pinned `APP_SPACE_SLUGS`. |
@@ -338,17 +337,31 @@ Use a DEV Space with at least two benchmark questions:
 2. Confirm the content PR contains the serialized Space and expected sidecars.
 3. Confirm both required checks pass.
 4. Merge the PR and approve the PROD Environment deployment.
-5. Confirm the PROD Space exists, declared access was applied, and the app shows the completed audit
+5. Confirm the PROD Space exists, the audience was reconciled, and the app shows the completed audit
    timeline.
 
 Your installation is ready when that flow succeeds without using a human token for deployment.
+
+### Reset disposable demo history
+
+Before the pilot, KIP can clear promotion/review/deployment/rehydrate history while preserving
+roles, rules, reviewer prompt and Knowledge Assistant configuration. The command is dry-run first:
+
+```bash
+python3 scripts/reset_demo_ledger.py --profile <prod-profile>
+python3 scripts/reset_demo_ledger.py --profile <prod-profile> \
+  --execute --confirm DELETE-DEMO-LEDGER
+```
+
+Run it only in the demo installation. It prints row counts before deletion and verifies the ledger
+is empty afterward.
 
 ## Quality and governance model
 
 | Control | Behavior |
 |---|---|
 | **ENV-01** | Blocks references outside the target environment/domain allowlist. |
-| **GRANT-01** | Blocks a missing baseline consumer grant; declared grants remain advisory because the pipeline applies them. |
+| **AUDIENCE-01** | Blocks invalid principals/tables; missing `SELECT` is advisory and points to CERC's Terraform process. |
 | **EVAL-01** | Requires a configurable minimum number of benchmark questions. |
 | **Live eval-run** | Re-runs DEV benchmarks and blocks the content PR below the configured pass-rate. |
 | **LLM reviewer** | Produces structured findings from a protected prompt core and editable reviewer persona. |
@@ -361,8 +374,8 @@ Your installation is ready when that flow succeeds without using a human token f
 |---|---|
 | `engine_api/` | FastAPI routes, OBO boundary, startup migrations, and scheduled reconciliation. |
 | `web/` | Svelte application and persona-aware user experience. |
-| `app/` | Promotion, authorization, rehydrate, roles, rules, access requests, audit, and Lakebase stores. |
-| `genie_reviewer/` | Reviewer prompt, rules, evaluation, grant checks, GitHub App client, and MLflow agent wrapper. |
+| `app/` | Promotion, authorization, rehydrate, roles, rules, prompts, KAs, audit, and Lakebase stores. |
+| `genie_reviewer/` | Reviewer prompt, rules, evaluation, audience checks, GitHub App client, and MLflow agent wrapper. |
 | `scripts/` | Render, validate, build, provision, deploy, and post-deploy access helpers. |
 | `databricks.yml` | Portable DABs targets for the PROD control plane and DEV setup job. |
 | `docs/adr/` | Architectural decisions and trade-offs. |

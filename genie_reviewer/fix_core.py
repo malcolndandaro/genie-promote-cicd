@@ -5,9 +5,8 @@ findings, then validates structure before the bot pushes (mirrors bimbo fix_pr.p
 the artifact is a Genie serialized_space JSON, not a code file).
 
 Auto-fixable: instruction/SQL/semantic edits (EVAL-02 vague instructions, SQL-01
-conventions, an ENV catalog ref inside SQL). NOT auto-fixable by a JSON rewrite:
-GRANT-01 (re-apply the UC grant at deploy) and EVAL-01 (authoring benchmark Q→SQL is
-human-confirmed) — these are reported, never silently invented.
+conventions, an ENV catalog ref inside SQL). EVAL-01 benchmark authoring and audience/data-access
+operations are never silently invented by a JSON rewrite.
 """
 from __future__ import annotations
 
@@ -20,9 +19,10 @@ _FENCE = re.compile(r"```[a-zA-Z0-9_]*\n(?P<code>.*?)```", re.S)
 # Auto-fixable = instruction/SQL TEXT rewrites that don't touch tables/columns/grants/env.
 # Everything else is owned elsewhere: ENV-01/ENV-02 by the deterministic pre-render
 # (dev_->prod_ + warehouse, ADR-0003 — re-pointing an identifier is NOT the agent's job);
-# GRANT-01/GRANT-02 by UC grants at deploy; EVAL-01 by benchmark authoring (human); PII-01
+# AUDIENCE-01 by the declared audience and external data-access process; EVAL-01 by benchmark
+# authoring (human); PII-01
 # by masking/column changes (human-confirmed, BCB-538). Auto-fix only EVAL-02, SQL-01, PII-02.
-_NON_AUTOFIX = {"GRANT-01", "GRANT-02", "EVAL-01", "ENV-01", "ENV-02", "PII-01"}
+_NON_AUTOFIX = {"AUDIENCE-01", "EVAL-01", "ENV-01", "ENV-02", "PII-01"}
 _WRITE_PERMS = ("write", "maintain", "admin")
 
 _FIX_SYSTEM = (

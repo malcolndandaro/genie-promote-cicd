@@ -48,11 +48,6 @@ export interface Principal {
   id: string;
   display: string;
   email: string | null;
-  /** G9: false for a workspace-LOCAL group (built-in `users`/`admins`, or any workspace-scoped
-   * custom group) — UC grants reject those outright. Always true for a user (always account-level).
-   * Drives the UC-principals picker's exclusion; the Space-permissions picker ignores it (workspace
-   * ACLs accept local groups fine). */
-  uc_grantable: boolean;
 }
 
 /** One reviewer finding (deterministic rule or LLM). */
@@ -123,30 +118,6 @@ export interface TimelineStep {
   detail?: CheckDetail[] | null;
 }
 
-/** One Genie Space permission entry the Requester declared (F2, system 1). */
-export interface SpacePermissionEntry {
-  principal: string;
-  is_group: boolean;
-  level: string; // 'CAN_RUN' | 'CAN_VIEW'
-}
-
-/** One UC SELECT-grant principal the Requester declared (F2, system 2). */
-export interface AccessPrincipal {
-  principal: string;
-  is_group: boolean;
-}
-
-/**
- * The Requester's declared access for this promotion (F2). Models BOTH systems explicitly —
- * Genie Space permissions (who can open/run the Space) and UC data grants (who can SELECT the
- * underlying tables) — so the Steward reviews and approves exactly what will be enforced by the
- * governed CI pipeline (never applied app-direct). Empty arrays mean nothing was declared.
- */
-export interface AccessSpec {
-  space_permissions: SpacePermissionEntry[];
-  uc_principals: AccessPrincipal[];
-}
-
 export interface AudienceEntry {
   principal: string;
   is_group: boolean;
@@ -162,11 +133,7 @@ export interface Review {
   gate: Gate;
   eval: EvalResult;
   allowlist_violations: string[];
-  consumer_group: string;
   timeline: TimelineStep[];
-  /** The declared AccessSpec (F2) — present once the engine always returns it; optional here so an
-   * older cached/recovered review payload (pre-F2) still type-checks. */
-  access_spec?: AccessSpec;
   audience_spec?: AudienceSpec | null;
 }
 

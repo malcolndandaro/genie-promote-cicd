@@ -12,7 +12,6 @@ const review = {
   gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
   eval: { status: 'advisory', summary: '🟡 eval indisponível' },
   allowlist_violations: [],
-  consumer_group: 'account users',
   timeline: [
     { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)', status: 'pass' },
     { key: 'review', label: 'Revisão do agente (Genie Reviewer)', status: 'pass' },
@@ -97,9 +96,9 @@ test('checks_failed → "Checagens" step shows reprovado with an expandable PT d
 }) => {
   const detail = [
     {
-      name: 'GRANT-01 — every declared principal can SELECT the prod tables',
+      name: 'AUDIENCE-01 — validate the declared Space audience',
       conclusion: 'failure',
-      summary: "🔴 GRANT-01 — promoção bloqueada (1 achado(s))\n'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo",
+      summary: "🔴 AUDIENCE-01 — promoção bloqueada (1 achado)\nprincipal inválido: users",
       details_url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/42/checks',
     },
   ];
@@ -108,7 +107,7 @@ test('checks_failed → "Checagens" step shows reprovado with an expandable PT d
 
   // Closed by default — must expand the disclosure to reveal the CI's own PT findings.
   await page.getByText('Ver detalhes das checagens').click();
-  await expect(page.getByText("'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo")).toBeVisible();
+  await expect(page.getByText('principal inválido: users')).toBeVisible();
   await expect(page.getByRole('link', { name: 'Ver log no GitHub ↗' })).toHaveAttribute(
     'href',
     detail[0].details_url,

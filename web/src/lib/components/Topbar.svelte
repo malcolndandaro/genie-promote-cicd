@@ -21,7 +21,7 @@
   const repoUrl = $derived(who?.repo_url || DEFAULT_REPO);
 
   // Identity-derived role label (display-only — the real SoD is GitHub's Environment gate). Steward
-  // takes priority over Admin because it's the governance/approver role.
+  // takes priority over Admin because it owns promotion governance.
   const role = $derived(
     who?.email && who?.steward && who.email.toLowerCase() === who.steward.toLowerCase()
       ? 'Steward'

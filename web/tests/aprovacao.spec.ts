@@ -18,7 +18,6 @@ const cleanReview = {
   gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
   eval: { status: 'advisory', summary: '🟡 eval indisponível' },
   allowlist_violations: [],
-  consumer_group: 'account users',
   timeline: [{ key: 'review', label: 'Revisão do agente (Genie Reviewer)', status: 'pass' }],
 };
 const blockerReview = {

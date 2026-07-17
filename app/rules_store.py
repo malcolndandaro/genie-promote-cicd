@@ -1,7 +1,7 @@
 """rules_store — G2: the durable, Lakebase-backed admin configuration for the reviewer's handbook
-rules (`genie_reviewer/handbook_rules.py` — 9 hardcoded ENV/GRANT/PII/EVAL/SQL rules).
+rules (`genie_reviewer/handbook_rules.py` — the hardcoded ENV/PII/EVAL/SQL baseline).
 
-Mirrors `roles_store.py`'s / `access_request_store.py`'s pattern EXACTLY (own tables, an injectable
+Mirrors `roles_store.py`'s pattern (own tables, an injectable
 **backend** — `InMemoryBackend` for offline tests, `PgBackend` for Lakebase, the same OAuth-
 refreshing connection-pool + SP-owned-schema recipe): a `RulesStore` holds all domain logic
 (upsert-by-rule_id, reset/delete, an append-only audit trail) and delegates raw row CRUD to the
@@ -10,11 +10,10 @@ backend.
 An admin can, per hardcoded rule: **disable** it, **override its severity**, and **override its
 params** (e.g. EVAL-01's `{"min_benchmarks": N}` threshold) — a row in `rule_overrides` with
 `is_custom=False`. An admin can also **add a fully custom rule** (`is_custom=True`, its own
-rule_id/severity/content/citation) that the reviewer prompt then grounds on alongside the 9
+rule_id/severity/content/citation) that the reviewer prompt then grounds on alongside the
 hardcoded ones.
 
-**Its OWN audit table (`rule_audit_events`), NOT `promotion_store.audit_events`** — same reasoning
-`access_request_store.py` already documents for the same choice: that table's `promotion_id`
+**Its OWN audit table (`rule_audit_events`), NOT `promotion_store.audit_events`**: that table's `promotion_id`
 column FKs to `promotions(id)`, and a rule change is not a Promotion. UNLIKE the sibling audit
 tables, `rule_audit_events.rule_id` is deliberately **not** a foreign key into `rule_overrides`:
 "reset to default" / "delete a custom rule" removes the `rule_overrides` row, and the audit trail
@@ -43,6 +42,7 @@ from typing import Callable, Optional, Protocol
 SEVERITIES = ("BLOCKER", "SUGGESTION", "STYLE")
 
 EVENT_TYPES = ("rule_created", "rule_updated", "rule_deleted", "rule_reset")
+_RETIRED_RULE_IDS = frozenset({"GRANT" + "-01", "GRANT" + "-02"})
 
 
 @dataclasses.dataclass
@@ -156,7 +156,7 @@ class RulesStore:
 
     def seed_defaults(self, rules: list[dict], *, actor_email: str = "system") -> int:
         """Seed the handbook's default rules as editable rows — the "no more hardcoded rules"
-        requirement: after this runs, the 9 handbook rules exist as real `rule_overrides` rows an
+        requirement: after this runs, the handbook rules exist as real `rule_overrides` rows an
         admin can edit/disable/remove via the UI, instead of being an invisible compile-time baseline.
 
         IDEMPOTENT + non-destructive: seeds ONLY when the store is completely empty (a fresh install),
@@ -169,7 +169,7 @@ class RulesStore:
         for field (severity_hint->severity, content, citation, and params when present). Deliberately
         writes rows DIRECTLY via the backend, NOT through `upsert()`: `upsert` would append a
         `rule_updated` audit event per rule, but seeding is the store's INITIAL STATE, not an admin
-        action — polluting the audit trail with 9 synthetic "changes" at every fresh install would
+        action — polluting the audit trail with synthetic "changes" at every fresh install would
         misrepresent "who changed what". `effective_rules` still returns a set identical to the
         hardcoded baseline (the seeded rows carry the same values), so runtime review behavior is
         unchanged — only now the rows are real + editable."""
@@ -224,8 +224,8 @@ def _as(cls, row: Optional[dict]):
 
 class InMemoryBackend:
     """A faithful in-memory backend for offline tests, mirroring the sibling stores' fakes — enforces
-    append-only audit + per-rule monotonic seq, but NO FK check on insert_audit_event (unlike
-    access_request_store's `_require_request`): a rule_audit_events row can legitimately outlive its
+    append-only audit + per-rule monotonic seq, but NO FK check on insert_audit_event: an audit row
+    can legitimately outlive its
     rule_overrides row (see the module docstring)."""
 
     def __init__(self):
@@ -235,6 +235,7 @@ class InMemoryBackend:
 
     def migrate(self) -> None:
         self.migrated = True
+        self._rows = {key: row for key, row in self._rows.items() if key not in _RETIRED_RULE_IDS}
 
     def upsert(self, row: dict) -> None:
         self._rows[row["rule_id"]] = dict(row)
@@ -292,6 +293,7 @@ MIGRATIONS = (
         detail      jsonb,
         UNIQUE (rule_id, seq)
     )""",
+    "DELETE FROM rule_overrides WHERE rule_id IN ('GRANT' || '-01', 'GRANT' || '-02')",
     "CREATE INDEX IF NOT EXISTS ix_rule_audit_rule_seq ON rule_audit_events(rule_id, seq)",
 )
 

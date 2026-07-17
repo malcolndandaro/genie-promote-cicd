@@ -1,6 +1,6 @@
 """Offline contract tests for rules_store (G2) — InMemoryBackend, NO live Lakebase.
 
-Mirrors tests/test_roles_store.py's / test_access_request_store.py's conventions: asserts the
+Mirrors the other store tests: asserts the
 store's external contract — upsert-by-rule_id, idempotent reset, custom-rule validation, and the
 append-only audit trail (including that a reset/delete does NOT wipe the audit history that
 preceded it — the one place this store's contract deliberately differs from its siblings).
@@ -177,7 +177,7 @@ import rules_config  # noqa: E402
 
 def test_seed_defaults_populates_an_empty_store_with_the_handbook_rules(store):
     n = store.seed_defaults(handbook_rules.RULES)
-    assert n == len(handbook_rules.RULES) == 9
+    assert n == len(handbook_rules.RULES) == 7
     rows = store.list_all()
     assert {r.rule_id for r in rows} == {r["rule_id"] for r in handbook_rules.RULES}
     # seeded as plain (non-custom) overrides, enabled, carrying the handbook's own values
@@ -187,12 +187,12 @@ def test_seed_defaults_populates_an_empty_store_with_the_handbook_rules(store):
 
 
 def test_seed_defaults_is_idempotent_and_never_clobbers(store):
-    assert store.seed_defaults(handbook_rules.RULES) == 9
+    assert store.seed_defaults(handbook_rules.RULES) == 7
     # an admin edits one rule AFTER the seed
     store.upsert(rule_id="ENV-01", actor_email="admin@x", enabled=False, severity="STYLE")
     # a second seed (e.g. next boot / another replica) is a no-op — store already populated
     assert store.seed_defaults(handbook_rules.RULES) == 0
-    assert len(store.list_all()) == 9  # not 18
+    assert len(store.list_all()) == 7
     assert store.get("ENV-01").enabled is False  # admin edit preserved, not reset by re-seed
 
 

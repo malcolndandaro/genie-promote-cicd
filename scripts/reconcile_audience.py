@@ -83,7 +83,7 @@ def _load(path: str | None) -> audience_spec.AudienceSpec | None:
     if not path or not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as handle:
-        return audience_spec.parse_sidecar(json.load(handle), warn=lambda m: print(f"::warning::{m}"))
+        return audience_spec.parse_sidecar(json.load(handle))
 
 
 def main() -> int:

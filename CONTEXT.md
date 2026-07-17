@@ -24,7 +24,7 @@ implementation details live in code + ADRs (`docs/adr/`).
   OBO email, which is **display-only**; the authoritative governance identity is the Change Request
   provider's actor (a GitHub actor in the pilot).
 
-- **Steward** — the distinct approver under separation of duties (ADR-0002). Approves on GitHub (the
+- **Steward** — the distinct reviewer under separation of duties (ADR-0002). Approves on GitHub (the
   PR review that allows the merge, and the prod deployment gate). The Steward is never the Requester;
   `prevent_self_review` enforces this on GitHub identity. In-app, Steward is one of three **Roles**
   (below) resolved from the caller's platform-verified identity — there is no persona/self-declared
@@ -32,8 +32,7 @@ implementation details live in code + ADRs (`docs/adr/`).
 
 - **Role** (Steward / Admin) — an assignment that grants an app capability in addition to the
   implicit Business User experience. Steward monitors promotions and approves through the Change
-  Request provider; Admin maintains app configuration and audit visibility. Access Approver is a
-  retired demo role, not part of the pilot language.
+  Request provider; Admin maintains app configuration and audit visibility.
 
 - **App Maintainer (KIP)** — the team accountable for keeping the Promotion App operational and for
   its maintenance and future improvements. This is product/runtime ownership, distinct from deciding
@@ -131,12 +130,6 @@ so a family of terms exists for how the app reaches across that boundary safely.
   permissions their jobs require (`CAN_MANAGE` where a live ACL/export/update needs it). These grants
   are operational controls, never members of AudienceSpec. The prod CI SP temporarily retains UC
   `MANAGE` during the pilot solely to inspect effective grants; no app or pipeline path mutates UC.
-- **AccessSpec / Access Request (legacy)** — the demo-era model that combined Genie ACLs, UC grants
-  and an approval queue. It is not part of the pilot domain and exists only through the explicit
-  two-phase compatibility window while `.access.json` consumers and demo tables are removed.
-- **Compatibility Window** — the short migration state in which the new contract is authoritative
-  and legacy declarations may be translated read-only. It ends before the pilot and never permits
-  legacy writes or UC mutation.
 - **Rehydrate** — pulling an already-promoted **prod** Genie Space back into **dev**, with no git PR
   (A3/G6; `app/rehydrate.py`). Works for ANY prod Space the caller can access, not only ones this app
   promoted (the prod store starts empty per ADR-0006). Gated at BOTH blast sites with

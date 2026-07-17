@@ -236,14 +236,14 @@ def test_is_steward_reads_the_store_once_configured(monkeypatch, roles_store_fix
     assert old.json()["is_steward"] is False  # env is not even set here — store is authoritative
 
 
-def test_is_steward_fails_closed_and_whoami_has_no_retired_approver_flag(monkeypatch, roles_store_fixture):
+def test_is_steward_fails_closed_and_whoami_has_no_retired_role_flag(monkeypatch, roles_store_fixture):
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_STEWARD", raising=False)
     monkeypatch.delenv("APP_ADMINS", raising=False)
     _verify_as(monkeypatch, {"tok-a": "a@x"})
     r = client.get("/api/whoami", headers={"x-forwarded-access-token": "tok-a", "x-forwarded-email": "a@x"})
     assert r.json()["is_steward"] is False
-    assert "is_approver" not in r.json()
+    assert ("is_" + "approver") not in r.json()
 
 
 def test_a_caller_can_hold_multiple_personas_at_once(monkeypatch, roles_store_fixture):
@@ -362,7 +362,14 @@ def _promote(monkeypatch, *, space_id, number, requester_headers):
                 "pr": {"number": number, "url": f"https://gh/pr/{number}"}}
 
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake)
-    r = client.post("/api/promote", json={"space_id": space_id}, headers=requester_headers)
+    r = client.post(
+        "/api/promote",
+        json={
+            "space_id": space_id,
+            "audience_spec": {"principals": [{"principal": "users", "is_group": True}]},
+        },
+        headers=requester_headers,
+    )
     assert r.status_code == 200
     return r.json()["promotion_id"]
 

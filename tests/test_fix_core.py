@@ -15,22 +15,22 @@ SPACE = {
                      "example_question_sqls": []},
 }
 FINDINGS = [
-    {"rule_id": "GRANT-01", "severity": "BLOCKER", "message": "sem SELECT"},
+    {"rule_id": "AUDIENCE-01", "severity": "SUGGESTION", "message": "sem SELECT"},
     {"rule_id": "EVAL-01", "severity": "BLOCKER", "message": "poucos benchmarks"},
     {"rule_id": "EVAL-02", "severity": "SUGGESTION", "message": "instrução vaga"},
     {"rule_id": "SQL-01", "severity": "STYLE", "message": "SELECT *"},
 ]
 
 
-def test_fixable_excludes_grant_and_eval01():
+def test_fixable_excludes_audience_and_eval01():
     ids = {f["rule_id"] for f in fix_core.fixable_findings(FINDINGS)}
-    assert ids == {"EVAL-02", "SQL-01"}  # GRANT-01/EVAL-01 are not auto-rewritten
+    assert ids == {"EVAL-02", "SQL-01"}
 
 
 def test_build_fix_prompt_has_fixable_and_space():
     system, user = fix_core.build_fix_prompt(SPACE, FINDINGS)
     assert "EVAL-02" in user and "SQL-01" in user
-    assert "GRANT-01" not in user  # not asked to auto-fix it
+    assert "AUDIENCE-01" not in user
     assert "prod_recebiveis.diamond.fato_recebiveis" in user
     assert "CORREÇÃO" in system
 
@@ -67,9 +67,9 @@ def test_authorization_guardrails():
 
 
 # --- S6 review hardening: ENV/PII exclusion, no-crash guards, injection rejection ---
-def test_fixable_excludes_env_pii_grant():
+def test_fixable_excludes_env_pii_audience():
     fs = [{"rule_id": r, "severity": "x", "message": r}
-          for r in ["ENV-01", "ENV-02", "PII-01", "GRANT-02", "EVAL-02", "SQL-01", "PII-02"]]
+          for r in ["ENV-01", "ENV-02", "PII-01", "AUDIENCE-01", "EVAL-02", "SQL-01", "PII-02"]]
     assert {f["rule_id"] for f in fix_core.fixable_findings(fs)} == {"EVAL-02", "SQL-01", "PII-02"}
 
 

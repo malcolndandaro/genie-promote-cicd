@@ -47,9 +47,9 @@ GENIE_OBJECT_TYPE = "genie"
 # Any of these permission levels means "may use the Space" for our purposes (read-export or
 # write-overwrite are both gated the same way today — the guard answers "can this identity touch
 # this Space at all", not which specific action). CAN_MANAGE/IS_OWNER/CAN_EDIT are the levels Genie
-# actually issues; CAN_RUN/CAN_VIEW are included for forward-compat with lower-privilege grants.
+# actually issues; CAN_RUN is the audience level managed by this app.
 _ACCESS_LEVELS = frozenset({
-    "IS_OWNER", "CAN_MANAGE", "CAN_EDIT", "CAN_RUN", "CAN_VIEW",
+    "IS_OWNER", "CAN_MANAGE", "CAN_EDIT", "CAN_RUN",
 })
 
 

@@ -1,7 +1,7 @@
 """Offline contract tests for promotion_store (LB2) — InMemoryBackend, NO live Lakebase.
 
 Asserts the store's external contract the rest of the app relies on: Promotion round-trip
-(create/get/list/find-by-PR), 1:1-PR, immutable+retained review snapshots, append-only audit trail
+(create/get/list/find-by-Change-Request), 1:1 Change Request, immutable review snapshots, audit trail
 with monotonic per-promotion seq, status-cache update, role-scoped listing, and the hard-dependency
 fail-fast at startup. The PgBackend SQL is proven separately against real Lakebase by
 scripts/verify_lakebase_store.py (kept out of CI — 'no live Lakebase in CI').
@@ -15,7 +15,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
 
 from promotion_store import (  # noqa: E402
-    DuplicatePRNumber, InMemoryBackend, LakebaseUnavailable, PromotionStore, build_store_from_env,
+    DuplicateChangeRequest, InMemoryBackend, LakebaseUnavailable, PromotionStore,
+    build_store_from_env,
 )
 
 
@@ -36,45 +37,41 @@ def store(clock):
     return PromotionStore(InMemoryBackend(), clock=clock)
 
 
-def _mk(store, *, pr_number=101, requester="ana@acme.com", resource_id="space-1"):
+def _mk(store, *, external_id=101, requester="ana@acme.com", resource_id="space-1"):
     return store.create_promotion(
         resource_id=resource_id, resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email=requester, pr_number=pr_number, pr_url=f"https://gh/pr/{pr_number}",
-        branch="promote/recebiveis", current_phase="open", live_status={"phase": "open"})
+        requester_email=requester, branch="promote/recebiveis", current_phase="open",
+        live_status={"phase": "open"}, change_provider="github", external_id=str(external_id),
+        external_url=f"https://gh/change/{external_id}")
 
 
 def test_promotion_round_trip(store):
     p = _mk(store)
     got = store.get_promotion(p.id)
     assert got is not None and got.id == p.id
-    assert got.resource_id == "space-1" and got.pr_number == 101 and got.terminal is False
-    assert store.find_by_pr(101).id == p.id
+    assert got.resource_id == "space-1" and got.external_id == "101" and got.terminal is False
+    assert store.find_by_change_request("github", "101").id == p.id
     assert store.get_promotion("missing") is None
 
 
-def test_one_to_one_pr(store):
-    _mk(store, pr_number=101)
-    # A second promotion for the SAME PR violates the 1:1-PR rule. Both backends raise the SAME
-    # type (DuplicatePRNumber) — Postgres maps its UNIQUE(pr_number) violation to it — so LB3 has
-    # one exception to catch regardless of backend.
-    with pytest.raises(DuplicatePRNumber):
-        _mk(store, pr_number=101, resource_id="space-2")
+def test_one_to_one_change_request(store):
+    _mk(store, external_id=101)
+    with pytest.raises(DuplicateChangeRequest):
+        _mk(store, external_id=101, resource_id="space-2")
 
 
-def test_provider_neutral_change_request_round_trip_and_legacy_pr_lookup(store):
+def test_provider_neutral_change_request_round_trip(store):
     p = store.create_promotion(
         resource_id="space-1",
         resource_kind="genie_space",
         resource_title="Recebíveis",
         requester_email="ana@acme.com",
-        pr_number=101,  # compatibility only
-        pr_url="https://gh/pr/101",
         branch="promote/recebiveis",
         current_phase="open",
         live_status=None,
         change_provider="github",
         external_id="101",
-        external_url="https://gh/pr/101",
+        external_url="https://gh/change/101",
         content_revision="b" * 64,
         engine_revision="a" * 40,
     )
@@ -82,10 +79,6 @@ def test_provider_neutral_change_request_round_trip_and_legacy_pr_lookup(store):
     assert got.id == p.id
     assert got.content_revision == "b" * 64
     assert got.engine_revision == "a" * 40
-
-    legacy = _mk(store, pr_number=202, resource_id="legacy")
-    assert legacy.change_provider is None
-    assert store.find_by_change_request("github", "202").id == legacy.id
 
 
 def test_child_writes_require_an_existing_promotion(store):
@@ -98,9 +91,9 @@ def test_child_writes_require_an_existing_promotion(store):
 
 
 def test_list_promotions_role_scoped_and_newest_first(store):
-    a1 = _mk(store, pr_number=1, requester="ana@acme.com")
-    b1 = _mk(store, pr_number=2, requester="bob@acme.com")
-    a2 = _mk(store, pr_number=3, requester="ana@acme.com")
+    a1 = _mk(store, external_id=1, requester="ana@acme.com")
+    b1 = _mk(store, external_id=2, requester="bob@acme.com")
+    a2 = _mk(store, external_id=3, requester="ana@acme.com")
     # scope=mine: only the caller's, newest first
     ana = store.list_promotions("ana@acme.com")
     assert [p.id for p in ana] == [a2.id, a1.id]
@@ -112,7 +105,7 @@ def test_list_promotions_role_scoped_and_newest_first(store):
 def test_snapshots_are_retained_and_latest_wins(store):
     p = _mk(store)
     s1 = store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="1 blocker",
-                               findings=[{"rule_id": "GRANT-01"}], eval={"status": "advisory"},
+                               findings=[{"rule_id": "AUDIENCE-01"}], eval={"status": "advisory"},
                                timeline=[{"key": "review", "status": "fail"}])
     s2 = store.append_snapshot(p.id, gate_conclusion="success", gate_summary="clean",
                                findings=[], eval={"status": "pass"}, timeline=[])
@@ -140,7 +133,7 @@ def test_audit_trail_is_append_only_with_monotonic_seq(store):
 
 
 def test_audit_seq_is_per_promotion(store):
-    p1, p2 = _mk(store, pr_number=1), _mk(store, pr_number=2)
+    p1, p2 = _mk(store, external_id=1), _mk(store, external_id=2)
     store.append_audit_event(p1.id, "requested")
     store.append_audit_event(p2.id, "requested")
     store.append_audit_event(p1.id, "pr_opened")
@@ -231,48 +224,9 @@ def test_build_store_succeeds_with_a_working_backend():
     assert store._b.migrated is True
 
 
-# --- F2: the declared AccessSpec persists WITH the Promotion -----------------
+# --- Required audience and optional table mapping persist with the Promotion ------------------
 
-_ACCESS_SPEC = {
-    "space_permissions": [{"principal": "data_analysts", "is_group": True, "level": "CAN_RUN"}],
-    "uc_principals": [{"principal": "ana@x.com", "is_group": False}],
-}
-
-
-def test_promotion_persists_and_round_trips_the_declared_access_spec(store):
-    p = store.create_promotion(
-        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
-        branch="promote/recebiveis", current_phase="open", live_status=None,
-        access_spec=_ACCESS_SPEC)
-    assert p.access_spec == _ACCESS_SPEC
-    got = store.get_promotion(p.id)
-    assert got.access_spec == _ACCESS_SPEC  # survives the round trip through the backend
-
-
-def test_promotion_access_spec_defaults_to_none_when_not_declared(store):
-    """A promotion with no declared AccessSpec (pre-F2 behavior) persists cleanly with None — F2
-    is additive, not a breaking schema change for existing promotions."""
-    p = _mk(store)
-    assert p.access_spec is None
-    assert store.get_promotion(p.id).access_spec is None
-
-
-def test_access_spec_survives_a_re_review_snapshot_without_being_overwritten(store):
-    """Appending a NEW review snapshot (a re-review) must not clobber the Promotion's already
-    -declared AccessSpec — access_spec lives on the Promotion row, not the snapshot."""
-    p = store.create_promotion(
-        resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
-        branch="promote/recebiveis", current_phase="open", live_status=None,
-        access_spec=_ACCESS_SPEC)
-    store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="blocked",
-                          findings=[], eval=None, timeline=[])
-    store.touch(p.id)
-    assert store.get_promotion(p.id).access_spec == _ACCESS_SPEC
-
-
-# --- G7: the declared table de-para persists WITH the Promotion (mirrors access_spec above) -----
+_AUDIENCE = {"principals": [{"principal": "data_analysts", "is_group": True}]}
 
 _TABLE_MAPPING = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
 
@@ -280,9 +234,11 @@ _TABLE_MAPPING = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond
 def test_promotion_persists_and_round_trips_the_declared_table_mapping(store):
     p = store.create_promotion(
         resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        requester_email="ana@acme.com", change_provider="github", external_id="101",
+        external_url="https://gh/change/101",
         branch="promote/recebiveis", current_phase="open", live_status=None,
-        table_mapping=_TABLE_MAPPING)
+        audience_spec=_AUDIENCE, table_mapping=_TABLE_MAPPING)
+    assert p.audience_spec == _AUDIENCE
     assert p.table_mapping == _TABLE_MAPPING
     got = store.get_promotion(p.id)
     assert got.table_mapping == _TABLE_MAPPING  # survives the round trip through the backend
@@ -296,65 +252,68 @@ def test_promotion_table_mapping_defaults_to_none_when_not_declared(store):
     assert store.get_promotion(p.id).table_mapping is None
 
 
-def test_table_mapping_survives_a_re_review_snapshot_without_being_overwritten(store):
-    """Mirrors test_access_spec_survives_a_re_review_snapshot_without_being_overwritten: a re-review
-    snapshot must not clobber the Promotion's already-declared table de-para."""
+def test_declarations_survive_a_re_review_snapshot_without_being_overwritten(store):
+    """A re-review snapshot does not clobber the Promotion declarations."""
     p = store.create_promotion(
         resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        requester_email="ana@acme.com", change_provider="github", external_id="101",
+        external_url="https://gh/change/101",
         branch="promote/recebiveis", current_phase="open", live_status=None,
-        table_mapping=_TABLE_MAPPING)
+        audience_spec=_AUDIENCE, table_mapping=_TABLE_MAPPING)
     store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="blocked",
                           findings=[], eval=None, timeline=[])
     store.touch(p.id)
+    assert store.get_promotion(p.id).audience_spec == _AUDIENCE
     assert store.get_promotion(p.id).table_mapping == _TABLE_MAPPING
 
 
-def test_update_declarations_refreshes_resource_title_access_spec_and_table_mapping(store):
-    """Found #3: a re-request can change any of the three declarations on an EXISTING Promotion —
+def test_update_declarations_refreshes_title_audience_and_table_mapping(store):
+    """A re-request can change all declarations on an existing Promotion —
     unlike `create_promotion`, which only ever sets them once. `update_declarations` replaces all
     three outright (no merge), same as a re-request's own semantics: whatever the LATEST request
     declared is what's stored."""
     p = store.create_promotion(
         resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis v1",
-        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        requester_email="ana@acme.com", change_provider="github", external_id="101",
+        external_url="https://gh/change/101",
         branch="promote/recebiveis", current_phase="open", live_status=None,
-        access_spec=_ACCESS_SPEC)
-    new_spec = {"space_permissions": [], "uc_principals": [{"principal": "bob@acme.com", "is_group": False}]}
-    store.update_declarations(p.id, resource_title="Recebíveis v2", access_spec=new_spec,
+        audience_spec=_AUDIENCE)
+    new_audience = {"principals": [{"principal": "bob@acme.com", "is_group": False}]}
+    store.update_declarations(p.id, resource_title="Recebíveis v2", audience_spec=new_audience,
                               table_mapping=_TABLE_MAPPING)
     got = store.get_promotion(p.id)
     assert got.resource_title == "Recebíveis v2"
-    assert got.access_spec == new_spec  # the FIRST round's _ACCESS_SPEC is gone, not merged into
+    assert got.audience_spec == new_audience
     assert got.table_mapping == _TABLE_MAPPING
 
 
-def test_update_declarations_can_clear_a_previously_declared_access_spec(store):
-    """Declare-latest-wins: a re-request with NO AccessSpec/table_mapping clears the previously
-    -declared ones outright — it must not keep echoing a stale value only a prior round declared."""
+def test_update_declarations_can_clear_optional_mapping(store):
+    """Declare-latest-wins clears an optional mapping while retaining the required audience."""
     p = store.create_promotion(
         resource_id="space-1", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@acme.com", pr_number=101, pr_url="https://gh/pr/101",
+        requester_email="ana@acme.com", change_provider="github", external_id="101",
+        external_url="https://gh/change/101",
         branch="promote/recebiveis", current_phase="open", live_status=None,
-        access_spec=_ACCESS_SPEC, table_mapping=_TABLE_MAPPING)
-    store.update_declarations(p.id, resource_title=None, access_spec=None, table_mapping=None)
+        audience_spec=_AUDIENCE, table_mapping=_TABLE_MAPPING)
+    store.update_declarations(
+        p.id, resource_title=None, audience_spec=_AUDIENCE, table_mapping=None)
     got = store.get_promotion(p.id)
     assert got.resource_title is None
-    assert got.access_spec is None
+    assert got.audience_spec == _AUDIENCE
     assert got.table_mapping is None
 
 
 def test_update_declarations_bumps_updated_at(store, clock):
     p = _mk(store)
     before = store.get_promotion(p.id).updated_at
-    store.update_declarations(p.id, resource_title="x", access_spec=None, table_mapping=None)
+    store.update_declarations(p.id, resource_title="x", audience_spec=_AUDIENCE, table_mapping=None)
     assert store.get_promotion(p.id).updated_at > before
 
 
 def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(store):
     # F4 review should-fix: the cross-Promotion audit is ONE joined query, newest-first, bounded.
-    p1 = _mk(store, pr_number=201, resource_id="space-A")
-    p2 = _mk(store, pr_number=202, resource_id="space-B")
+    p1 = _mk(store, external_id=201, resource_id="space-A")
+    p2 = _mk(store, external_id=202, resource_id="space-B")
     store.append_audit_event(p1.id, "requested", actor_app_email="ana@acme.com")   # oldest
     store.append_audit_event(p2.id, "requested", actor_app_email="bob@acme.com")
     store.append_audit_event(p1.id, "pr_opened", actor_github_login="genie-promote-bot")  # newest
@@ -373,7 +332,7 @@ def test_list_recent_audit_events_cross_promotion_newest_first_joined_bounded(st
 
 def test_list_recent_audit_events_offset_pages_past_the_limit(store):
     # S4 (app-ux-overhaul, GR4): offset-based pagination on top of the existing limit.
-    p = _mk(store, pr_number=301)
+    p = _mk(store, external_id=301)
     store.append_audit_event(p.id, "requested", actor_app_email="ana@acme.com")
     for i in range(3):
         store.append_audit_event(p.id, "re_reviewed", detail={"i": i})
@@ -384,8 +343,8 @@ def test_list_recent_audit_events_offset_pages_past_the_limit(store):
 
 
 def test_list_recent_audit_events_filters_by_resource_id(store):
-    p1 = _mk(store, pr_number=302, resource_id="space-A")
-    p2 = _mk(store, pr_number=303, resource_id="space-B")
+    p1 = _mk(store, external_id=302, resource_id="space-A")
+    p2 = _mk(store, external_id=303, resource_id="space-B")
     store.append_audit_event(p1.id, "requested", actor_app_email="ana@acme.com")
     store.append_audit_event(p2.id, "requested", actor_app_email="ana@acme.com")
     rows = store.list_recent_audit_events(limit=200, resource_id="space-A")
@@ -393,8 +352,8 @@ def test_list_recent_audit_events_filters_by_resource_id(store):
 
 
 def test_list_recent_audit_events_filters_by_actor_either_identity_field(store):
-    p1 = _mk(store, pr_number=304, requester="ana@acme.com")
-    p2 = _mk(store, pr_number=305, requester="bob@acme.com")
+    p1 = _mk(store, external_id=304, requester="ana@acme.com")
+    p2 = _mk(store, external_id=305, requester="bob@acme.com")
     store.append_audit_event(p1.id, "requested", actor_app_email="ana@acme.com")
     store.append_audit_event(p2.id, "requested", actor_app_email="bob@acme.com")
     store.append_audit_event(p1.id, "pr_review_approved", actor_github_login="genie-promote-bot")
@@ -407,7 +366,7 @@ def test_list_recent_audit_events_filters_by_actor_either_identity_field(store):
 
 
 def test_list_recent_audit_events_date_range(store, clock):
-    p = _mk(store, pr_number=306)
+    p = _mk(store, external_id=306)
     store.append_audit_event(p.id, "requested", actor_app_email="ana@acme.com")
     all_rows = store.list_recent_audit_events(limit=200)
     occurred_at = all_rows[0]["occurred_at"]

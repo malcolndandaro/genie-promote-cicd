@@ -26,36 +26,16 @@ def test_audience_is_required_deduplicated_and_serialized_in_stable_order():
 
 
 def test_wire_contract_never_accepts_a_permission_level():
-    with pytest.raises(ValueError, match="always derives CAN_RUN"):
+    with pytest.raises(ValueError, match="permission level"):
         audience_spec.AudienceSpec.from_dict({
-            "principals": [{"principal": "users", "is_group": True, "level": "CAN_VIEW"}]
+            "principals": [{"principal": "users", "is_group": True, "level": "CAN_EDIT"}]
         })
 
 
-def test_legacy_translation_keeps_can_run_discards_uc_and_rejects_can_view():
-    warnings = []
-    translated = audience_spec.from_legacy_access_spec({
-        "space_permissions": [
-            {"principal": "users", "is_group": True, "level": "CAN_RUN"},
-        ],
-        "uc_principals": [{"principal": "ana@example.com", "is_group": False}],
-    }, warn=warnings.append)
-    assert translated.to_dict() == {
+def test_sidecar_parser_accepts_only_the_canonical_shape():
+    spec = audience_spec.parse_sidecar({
         "principals": [{"principal": "users", "is_group": True}]
-    }
-    assert warnings and "discarded" in warnings[0]
-
-    with pytest.raises(audience_spec.LegacyAudienceError, match="CAN_VIEW"):
-        audience_spec.from_legacy_access_spec({
-            "space_permissions": [
-                {"principal": "users", "is_group": True, "level": "CAN_VIEW"},
-            ]
-        })
-
-
-def test_legacy_uc_only_declaration_is_not_silently_promoted_to_audience():
-    with pytest.raises(audience_spec.LegacyAudienceError, match="at least one"):
-        audience_spec.from_legacy_access_spec({
-            "space_permissions": [],
-            "uc_principals": [{"principal": "ana@example.com"}],
-        })
+    })
+    assert spec.names() == ("users",)
+    with pytest.raises(ValueError, match="principals"):
+        audience_spec.parse_sidecar({"entries": []})

@@ -343,8 +343,8 @@ def test_audit_records_via_real_in_memory_backend():
     store = promotion_store.PromotionStore(backend)
     promo = store.create_promotion(
         resource_id="prod-space", resource_kind="genie_space", resource_title="Recebíveis",
-        requester_email="ana@x", pr_number=1, pr_url="https://x", branch="promote/recebiveis",
-        current_phase="deployed", live_status=None)
+        requester_email="ana@x", branch="promote/recebiveis", current_phase="deployed",
+        live_status=None, change_provider="github", external_id="1", external_url="https://x")
 
     prod = _prod_transport("prod-space", ["ana@x"])
     dev = _acl_transport({}, genie=NS(create_space=lambda wh, ss, **kw: NS(space_id="new-id")))

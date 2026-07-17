@@ -46,12 +46,12 @@
               <div class="row__meta">
                 <StatusChip phase={p.current_phase} />
                 <time class="muted text-xs">{when(p.updated_at)}</time>
-                {#if p.pr_url}
-                  <a href={p.pr_url} target="_blank" rel="noopener noreferrer" class="pr-link">
+                {#if p.external_url}
+                  <a href={p.external_url} target="_blank" rel="noopener noreferrer" class="pr-link">
                     Ver no GitHub ↗
                   </a>
-                {:else if p.pr_number}
-                  <span class="muted text-xs">PR #{p.pr_number}</span>
+                {:else if p.external_id}
+                  <span class="muted text-xs">Mudança {p.external_id}</span>
                 {/if}
               </div>
             </li>

@@ -5,9 +5,7 @@ cites a rule_id per finding — no Vector Search needed (that's the scale path, 
 a future option). Source of truth: handbook/genie-handbook.md. Keep in sync.
 """
 
-# Column-name signal terms for PII / bank-secrecy (LGPD, sigilo bancário) — the ONE source of truth,
-# imported by both the PII-01 handbook rule text below and F2's app_logic._pii_access_findings (so a
-# declared AccessSpec can't silently grant broad SELECT over masked/PII columns). Lowercase.
+# Column-name signal terms for PII / bank-secrecy (LGPD, sigilo bancário). Lowercase.
 PII_SIGNAL_TERMS = ("cpf", "titular", "portador", "pan", "cartao", "cartão")
 
 RULES = [
@@ -25,22 +23,6 @@ RULES = [
         "severity_hint": "SUGGESTION",
         "citation": "Genie Promotion Handbook › Catalog-per-Env › ENV-02",
         "content": "O warehouse do espaço deve ser o de produção, não um de dev.",
-    },
-    {
-        "rule_id": "GRANT-01",
-        "severity_hint": "BLOCKER",
-        "citation": "Genie Promotion Handbook › Access › GRANT-01",
-        "content": (
-            "Toda tabela em data_sources deve ser legível (SELECT) pelo grupo consumidor "
-            "de produção. Espaço cujas fontes o grupo não pode ler é inutilizável — a falha "
-            "clássica do Acme. BLOCKER. (Verificação determinística de grants alimenta esta regra.)"
-        ),
-    },
-    {
-        "rule_id": "GRANT-02",
-        "severity_hint": "SUGGESTION",
-        "citation": "Genie Promotion Handbook › Access › GRANT-02",
-        "content": "O dono/CAN_MANAGE do espaço de produção deve ser um grupo, nunca um indivíduo.",
     },
     {
         "rule_id": "PII-01",

@@ -7,18 +7,18 @@ produção, com revisão automática, checagens determinísticas e segregação 
 
 1. **Autoria em dev** — o usuário de negócio cria/edita o Genie Space no Genie nativo do workspace
    de dev. Nada é autorado direto em produção.
-2. **Solicitar promoção** — no app, o autor escolhe o espaço, opcionalmente declara acesso (grants
-   e permissões do Space) e um de-para de tabelas, e solicita. O app roda a revisão e o bot abre um
+2. **Solicitar promoção** — no app, o autor escolhe o espaço, confirma o Público do Space
+   (`CAN_RUN`) e, opcionalmente, um de-para de tabelas. O app roda a revisão e o bot abre um
    PR `promote/<slug>` no repositório de conteúdo.
 3. **Checagens determinísticas (CI)** — pré-render (reescreve `dev_ → prod_`), allowlist de
-   identificadores (rejeita referências a ambiente/domínio errados), testes, `bundle validate`,
-   e a checagem de grants (GRANT-01). Rodam no CI como o service principal de produção.
-4. **Revisão do agente** — o Genie Reviewer avalia o espaço contra o handbook (regras ENV/GRANT/
+   identificadores (rejeita referências a ambiente/domínio errados), testes, `bundle validate`
+   e o Preflight de Público. Rodam no CI como o service principal de produção.
+4. **Revisão do agente** — o Genie Reviewer avalia o espaço contra o handbook (regras ENV/
    PII/EVAL/SQL). Achados BLOCKER travam; SUGGESTION/STYLE são advisory.
 5. **Merge + gate do Steward** — após o merge, o deploy pausa em um gate de Environment do GitHub
    que exige a aprovação de um Steward distinto do solicitante (segregação de funções).
-6. **Deploy** — o service principal aplica o bundle, os grants declarados e as permissões, e torna
-   o espaço utilizável pelo app.
+6. **Deploy** — o service principal aplica o bundle, converge apenas o Público `CAN_RUN`, preserva
+   ACLs elevadas e verifica o estado final. Acesso aos dados segue o processo Terraform da CERC.
 
 ## Segregação de funções (SoD)
 

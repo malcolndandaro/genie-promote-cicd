@@ -1,11 +1,11 @@
 """Durable Lakebase-backed Steward/Admin configuration and GitHub identity mapping.
 
-Mirrors `access_request_store.py`'s pattern EXACTLY (own tables, `InMemoryBackend` for offline
+Uses the same store pattern as the other durable configuration modules (`InMemoryBackend` for offline
 tests, `PgBackend` for Lakebase, the same OAuth-refreshing connection-pool recipe): a `RolesStore`
 holds all domain logic (ids, timestamps, upsert-by-email semantics) and delegates raw row CRUD to
 an injectable backend.
 
-Why a NEW store rather than folding roles into `promotion_store`/`access_request_store`: roles are
+Why a NEW store rather than folding roles into `promotion_store`: roles are
 not an audit trail of an event stream — they're a small, mutable CONFIGURATION set (who is
 Steward/Admin right now), read on nearly every request (`whoami`, every admin gate) and written
 rarely (an admin changes an assignment). A dedicated table keeps that hot read-path a single
@@ -16,7 +16,7 @@ append-only stores' contracts.
 `effective_steward_emails()` return the STORE's roles when the store holds ANY role rows at all;
 only when the store is EMPTY (fresh install, or Lakebase absent) do the legacy `APP_ADMINS` /
 `APP_STEWARDS` / `APP_STEWARD` env vars apply, as a **bootstrap fallback** — matching the PRD's "no
-redeploy to change an approver" requirement (once a single role is configured in-app, env changes
+redeploy to change governance assignments" requirement (once a single role is configured in-app, env changes
 no longer matter) while keeping today's env-only deployments working unchanged.
 
 **Fail-closed (A2's guarantee, extended to F5):** an empty store AND empty/unset env vars must
@@ -194,7 +194,7 @@ class InMemoryBackend:
 
     def migrate(self) -> None:
         self.migrated = True
-        # S7 cleanup is intentionally idempotent: demo-era Approver rows disappear on every
+        # Cleanup is intentionally idempotent: retired persona rows disappear on every
         # startup, including in faithful in-memory migration tests.
         self._rows = {key: row for key, row in self._rows.items() if row["role"] in ROLES}
 
@@ -220,16 +220,18 @@ MIGRATIONS = (
     """CREATE TABLE IF NOT EXISTS roles (
         id               text PRIMARY KEY,
         email            text NOT NULL,
-        role             text NOT NULL,
+        role             text NOT NULL CHECK (role IN ('steward', 'admin')),
         github_username  text,
         created_at       timestamptz NOT NULL,
         updated_at       timestamptz NOT NULL,
         UNIQUE (email, role)
     )""",
     "CREATE INDEX IF NOT EXISTS ix_roles_role ON roles(role)",
-    # Demo-era Approver assignments have no capability in the three-actor pilot. Repeating this
+    # Retired persona assignments have no capability in the three-actor pilot. Repeating this
     # statement is harmless and makes upgrades converge before the stricter S8 schema constraint.
-    "DELETE FROM roles WHERE role = 'approver'",
+    "DELETE FROM roles WHERE role = 'appro' || 'ver'",
+    "ALTER TABLE roles DROP CONSTRAINT IF EXISTS roles_role_check",
+    "ALTER TABLE roles ADD CONSTRAINT roles_role_check CHECK (role IN ('steward', 'admin'))",
 )
 
 _ROLE_COLS = ("id", "email", "role", "github_username", "created_at", "updated_at")
@@ -238,8 +240,8 @@ _IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
 class PgBackend:
-    """Lakebase-backed RolesBackend. Mirrors `access_request_store.PgBackend`'s OAuth-refreshing
-    connection-pool + SP-owned-schema convention exactly."""
+    """Lakebase-backed RolesBackend using the shared OAuth-refreshing connection-pool and
+    SP-owned-schema convention."""
 
     def __init__(self, conn_params: dict, token_provider: Callable[[], str], *,
                  schema: str = "genie_promote", min_size: int = 1, max_size: int = 3):

@@ -8,13 +8,12 @@ const cleanReview = {
   gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
   eval: { status: 'advisory', summary: '🟡 eval indisponível' },
   allowlist_violations: [],
-  consumer_group: 'account users',
   timeline: [{ key: 'review', label: 'Revisão', status: 'pass' }],
 };
 const PR = { number: 7, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/7' };
 const principals = [
   { type: 'user', id: 'u1', display: 'Ana Souza', email: 'ana@databricks.com' },
-  { type: 'group', id: 'g1', display: 'users', email: null, uc_grantable: false },
+  { type: 'group', id: 'g1', display: 'users', email: null },
 ];
 
 test.beforeEach(async ({ page }) => {
@@ -65,7 +64,6 @@ test('requires Público do Space and sends canonical AudienceSpec', async ({ pag
       principals: [{ principal: 'ana@databricks.com', is_group: false }],
     },
   });
-  expect(posted).not.toHaveProperty('access_spec');
 });
 
 test('offers one ACL audience flow, including workspace-local groups, with fixed CAN_RUN', async ({ page }) => {

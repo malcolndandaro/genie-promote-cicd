@@ -5,7 +5,8 @@ import { test, expect } from '@playwright/test';
 
 const QUEUE = [
   { id: 'p1', resource_id: 's1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
-    requester_email: 'ana@databricks.com', pr_number: 10, pr_url: 'https://github.com/x/y/pull/10',
+    requester_email: 'ana@databricks.com', change_provider: 'github', external_id: '10',
+    external_url: 'https://github.com/x/y/pull/10',
     current_phase: 'open', terminal: false,
     created_at: '2026-07-14T09:00:00Z', updated_at: '2026-07-14T09:05:00Z' },
 ];

@@ -13,7 +13,7 @@ def test_changed_slugs_covers_every_space_contract_sidecar():
     paths = [
         "src/genie/a.serialized_space.json", "src/genie/b.title",
         "src/genie/c.mapping.json", "src/genie/d.audience.json",
-        "src/genie/e.revision.json", "src/genie/f.access.json",
+        "src/genie/e.revision.json", "src/genie/f.mapping.json",
         "src/dashboards/nope.lvdash.json", "docs/readme.md",
     ]
     assert changed_space_slugs.changed_slugs(paths) == ["a", "b", "c", "d", "e", "f"]

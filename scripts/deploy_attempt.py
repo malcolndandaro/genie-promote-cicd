@@ -25,7 +25,7 @@ import audience_spec  # noqa: E402
 import change_request  # noqa: E402
 import content_revision  # noqa: E402
 import reconcile_audience  # noqa: E402
-from apply_access import resolve_space_id  # noqa: E402
+from workflow_support import resolve_space_id  # noqa: E402
 
 
 PREFLIGHT = "preflight"
@@ -175,8 +175,6 @@ class ProductionOperations:
             slug = rendered.name.removesuffix(".serialized_space.json")
             title = rendered.with_name(f"{slug}.title")
             audience = rendered.with_name(f"{slug}.audience.json")
-            if not audience.exists():
-                audience = rendered.with_name(f"{slug}.access.json")
             if not title.exists() or not title.read_text(encoding="utf-8").strip():
                 raise ValueError(f"{slug}: required non-empty title sidecar is missing")
             if not audience.exists():
@@ -239,11 +237,10 @@ class ProductionOperations:
         if self.previous_content_root is None:
             return None
         base = self.previous_content_root / "src" / "genie"
-        for suffix in ("audience.json", "access.json"):
-            path = base / f"{slug}.{suffix}"
-            if path.exists():
-                with path.open(encoding="utf-8") as handle:
-                    return audience_spec.parse_sidecar(json.load(handle))
+        path = base / f"{slug}.audience.json"
+        if path.exists():
+            with path.open(encoding="utf-8") as handle:
+                return audience_spec.parse_sidecar(json.load(handle))
         return None
 
     def reconcile_audience(self, targets: dict[str, str]) -> None:

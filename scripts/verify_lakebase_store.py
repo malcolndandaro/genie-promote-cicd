@@ -3,7 +3,7 @@
 
 The offline suite (tests/test_promotion_store.py) tests the store CONTRACT via InMemoryBackend with
 no live DB ('no live Lakebase in CI'). This script proves the actual Postgres path: it runs the
-idempotent migrations, then a full round-trip (create / get / list / find-by-PR / snapshot append /
+idempotent migrations, then a full round-trip (create / get / list / Change Request lookup / snapshot append /
 append-only audit with monotonic seq / status-cache update) against the dev Lakebase instance,
 authenticating via short-lived OAuth (no static password), and CLEANS UP its test rows after.
 
@@ -20,9 +20,9 @@ import sys
 from databricks.sdk import WorkspaceClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
-from promotion_store import _IDENT, DuplicatePRNumber, PgBackend, PromotionStore  # noqa: E402
+from promotion_store import _IDENT, DuplicateChangeRequest, PgBackend, PromotionStore  # noqa: E402
 
-_TEST_PR_FLOOR = 990000  # test promotions use pr_number >= this; cleaned up before + after
+_TEST_EXTERNAL_PREFIX = "verify-"
 
 
 def _backend(profile: str, instance: str, schema: str) -> PgBackend:
@@ -39,16 +39,20 @@ def _backend(profile: str, instance: str, schema: str) -> PgBackend:
 
 
 def _purge_test_rows(backend: PgBackend) -> None:
-    """Delete any leftover test promotions (pr_number >= floor) + their children. Test-only raw SQL
+    """Delete any leftover verifier promotions + their children. Test-only raw SQL
     — the store itself stays append-only (no delete API)."""
     with backend._pool.connection() as conn, conn.cursor() as cur:
+        pattern = _TEST_EXTERNAL_PREFIX + "%"
+        for table in ("deployment_attempts", "audit_events", "review_snapshots"):
+            cur.execute(
+                f"DELETE FROM {table} WHERE promotion_id IN "
+                "(SELECT id FROM promotions WHERE change_provider = 'verifier' AND external_id LIKE %s)",
+                (pattern,),
+            )
         cur.execute(
-            "DELETE FROM audit_events WHERE promotion_id IN "
-            "(SELECT id FROM promotions WHERE pr_number >= %s)", (_TEST_PR_FLOOR,))
-        cur.execute(
-            "DELETE FROM review_snapshots WHERE promotion_id IN "
-            "(SELECT id FROM promotions WHERE pr_number >= %s)", (_TEST_PR_FLOOR,))
-        cur.execute("DELETE FROM promotions WHERE pr_number >= %s", (_TEST_PR_FLOOR,))
+            "DELETE FROM promotions WHERE change_provider = 'verifier' AND external_id LIKE %s",
+            (pattern,),
+        )
 
 
 def main() -> int:
@@ -69,39 +73,41 @@ def main() -> int:
     store.migrate(); store.migrate()
 
     _purge_test_rows(backend)  # clean any leftovers from a prior failed run
-    pr = _TEST_PR_FLOOR + 1
+    external_id = _TEST_EXTERNAL_PREFIX + "1"
     try:
         p = store.create_promotion(
             resource_id="space-verify", resource_kind="genie_space", resource_title="Verify",
-            requester_email="verify@acme.com", pr_number=pr, pr_url="https://gh/pr/x",
-            branch="promote/verify", current_phase="open", live_status={"phase": "open"})
-        assert store.get_promotion(p.id).pr_number == pr, "get round-trip"
-        assert store.find_by_pr(pr).id == p.id, "find-by-PR"
+            requester_email="verify@acme.com", branch="promote/verify", current_phase="open",
+            live_status={"phase": "open"}, change_provider="verifier", external_id=external_id,
+            external_url="https://example.invalid/change/1",
+            audience_spec={"principals": [{"principal": "users", "is_group": True}]})
+        assert store.get_promotion(p.id).external_id == external_id, "get round-trip"
+        assert store.find_by_change_request("verifier", external_id).id == p.id, "lookup"
         assert any(x.id == p.id for x in store.list_promotions("verify@acme.com")), "list mine"
 
-        # 1:1-PR: a second promotion for the same PR raises DuplicatePRNumber (UNIQUE(pr_number)
-        # mapped to the same type the in-memory fake raises — proven against real Postgres).
+        # A second promotion for the same Change Request raises the provider-neutral duplicate.
         try:
             store.create_promotion(resource_id="dup", resource_kind="genie_space",
-                                   resource_title="dup", requester_email="x@acme.com", pr_number=pr,
-                                   pr_url="x", branch="b", current_phase="open", live_status={})
-            raise AssertionError("expected DuplicatePRNumber on a duplicate PR")
-        except DuplicatePRNumber:
+                                   resource_title="dup", requester_email="x@acme.com", branch="b",
+                                   current_phase="open", live_status={}, change_provider="verifier",
+                                   external_id=external_id, external_url="x")
+            raise AssertionError("expected DuplicateChangeRequest")
+        except DuplicateChangeRequest:
             pass
 
-        # found #3: a re-request refreshes the declared resource_title/access_spec/table_mapping on
+        # A re-request refreshes the declared title/audience/mapping on
         # the SAME Promotion row (rather than only ever setting them once, at creation).
         store.update_declarations(
             p.id, resource_title="Verify v2",
-            access_spec={"space_permissions": [], "uc_principals": [{"principal": "ana@acme.com", "is_group": False}]},
+            audience_spec={"principals": [{"principal": "ana@acme.com", "is_group": False}]},
             table_mapping={"dev_x.a.b": "prod_x.a.b"})
         refreshed = store.get_promotion(p.id)
         assert refreshed.resource_title == "Verify v2", "update_declarations: resource_title"
-        assert refreshed.access_spec["uc_principals"], "update_declarations: access_spec jsonb round-trips"
+        assert refreshed.audience_spec["principals"], "update_declarations: audience jsonb round-trips"
         assert refreshed.table_mapping == {"dev_x.a.b": "prod_x.a.b"}, "update_declarations: table_mapping jsonb round-trips"
 
         s1 = store.append_snapshot(p.id, gate_conclusion="failure", gate_summary="1 blocker",
-                                   findings=[{"rule_id": "GRANT-01"}], eval={"status": "advisory"},
+                                   findings=[{"rule_id": "AUDIENCE-01"}], eval={"status": "advisory"},
                                    timeline=[{"key": "review", "status": "fail"}])
         s2 = store.append_snapshot(p.id, gate_conclusion="success", gate_summary="clean",
                                    findings=[], eval={"status": "pass"}, timeline=[])

@@ -62,7 +62,7 @@ export class Promotion {
   requesterEmail = $state<string | null>(null);
   /** The signed-in viewer's OBO email (from /api/whoami) — the baseline requester for a fresh flow. */
   viewerEmail = $state<string | null>(null);
-  /** The configured Steward (from /api/whoami.steward) — the distinct approver, shown in the UI. */
+  /** The configured Steward (from /api/whoami.steward), shown in the UI. */
   steward = $state<string | null>(null);
   /** Whether the SIGNED-IN viewer IS the Steward (identity-derived from /api/whoami, not a toggle).
    * Drives whether the approval view is shown — replaces the old manual Autor/Steward switch. */

@@ -72,9 +72,9 @@ def _failed_check_runs(runs: list) -> list:
 
 # G9: found live — the app's annotation fallback was picking up GitHub's OWN generic noise (a
 # Node.js-version deprecation warning + the auto "Process completed with exit code N." failure
-# annotation every non-zero step gets) instead of anything useful, because our checks (e.g.
-# GRANT-01) weren't emitting real annotations at all — bare print()s never become one. Now that
-# `scripts/check_grants.py` emits real `::error::`/`::warning::` annotations, this needs to prefer
+# annotation every non-zero step gets) instead of anything useful, because our checks were not
+# emitting real annotations at all — bare print()s never become one. Canonical workflow checks emit
+# `::error::`/`::warning::` annotations, so this needs to prefer
 # those over GitHub's own noise rather than just joining everything in annotation order.
 _NOISE_PREFIXES = ("Process completed with exit code",)
 _NOISE_SUBSTRINGS = ("Node.js 20 is deprecated",)
@@ -86,7 +86,7 @@ def _is_noise_annotation(message: str) -> bool:
 
 def _summarize_annotations(annotations: list) -> str:
     """Join a failing check-run's annotation messages into its summary text — preferring
-    FAILURE-level annotations (our own `::error::` findings, e.g. GRANT-01's baseline BLOCKERs,
+    FAILURE-level annotations (our own deterministic `::error::` findings,
     report at this level; GitHub's warning-level deprecation notices don't) and filtering the
     well-known noise annotations, but ONLY when doing so still leaves something real to show —
     never filtering a run's summary down to nothing."""
@@ -237,7 +237,7 @@ class GitHubApp:
 
         `remove_files` (G9, found live PR #25): sidecar paths to DELETE from the branch when THIS
         request no longer declares them. `extra_files` only ever UPSERTS — a prior round's
-        `.access.json`/`.mapping.json` would otherwise survive on the branch forever once committed,
+        a stale optional sidecar would otherwise survive on the branch forever once committed,
         even after the Requester clears the declaration, and CI would keep reading the stale
         sidecar. Deleting is 404-tolerant (`_delete_file_if_exists`), so this is always safe to pass
         unconditionally, including on a path that was never committed.
@@ -283,8 +283,7 @@ class GitHubApp:
     def get_file_content(self, path: str, *, ref: str | None = None) -> str | None:
         """Read a committed file's raw text content (decoded from the GitHub contents API's base64
         body), or None if absent on `ref` (defaults to `self.base`, i.e. `main`). Used by callers
-        that need to MERGE into an existing committed artifact (e.g. F3 adding a principal to an
-        already-committed AccessSpec sidecar) rather than blindly overwrite it via
+        that need to inspect an existing committed artifact rather than blindly overwrite it via
         `open_or_update_promotion`."""
         ref = ref or self.base
         status, body = self._transport(
@@ -468,7 +467,7 @@ class GitHubApp:
 
     def _check_run_summary(self, run: dict) -> str:
         """The most useful text GitHub has for this failing run. Bare `run:` steps (e.g. the
-        GRANT-01/`bundle validate` gates, plain `print`/exit-code failures) rarely populate
+        deterministic/`bundle validate` gates, plain `print`/exit-code failures) rarely populate
         `output` — the CI's PT findings live in the job LOG, not the Checks API — so this falls
         back to the run's annotations, summarized (preferring real `::error::`/`::warning::`
         content over GitHub's own generic noise — `_summarize_annotations`); a run with neither

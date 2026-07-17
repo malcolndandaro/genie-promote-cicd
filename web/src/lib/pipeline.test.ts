@@ -8,7 +8,6 @@ const review: Review = {
   gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
   eval: { status: 'advisory', summary: '🟡 eval indisponível' },
   allowlist_violations: [],
-  consumer_group: 'account users',
   timeline: [
     { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)', status: 'pass' },
     { key: 'review', label: 'Revisão do agente (Genie Reviewer)', status: 'pass' },
@@ -27,7 +26,7 @@ const liveStatus = (over: Partial<PromoteStatus> = {}): PromoteStatus => ({
   ...over,
 });
 
-// G8: the live GitHub PR check-run (bundle validate + GRANT-01, run for real as the prod SP) is
+// The live GitHub PR check-run is
 // the AUTHORITATIVE run of the same gate the app previewed at review time — it must win even when
 // the app's own pre-PR preview (`review.timeline`) said `pass`.
 describe('buildPromotionSteps — G8 checks_detail', () => {
@@ -45,7 +44,7 @@ describe('buildPromotionSteps — G8 checks_detail', () => {
 
   it('escalates the checks step to fail and attaches checks_detail on a live GitHub failure', () => {
     const detail = [
-      { name: 'GRANT-01', conclusion: 'failure',
+      { name: 'AUDIENCE-01', conclusion: 'failure',
         summary: "'users' não tem SELECT em prod_recebiveis.diamond.dim_arranjo",
         details_url: 'https://github.com/o/r/pull/1/checks' },
     ];

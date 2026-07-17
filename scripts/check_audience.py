@@ -7,15 +7,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "genie_reviewer"))
+sys.path.insert(0, os.path.dirname(__file__))
 import audience_check  # noqa: E402
 import audience_spec  # noqa: E402
 
 from databricks.sdk import WorkspaceClient  # noqa: E402
 from databricks.sdk.service.catalog import SecurableType  # noqa: E402
-
-
-def _gh_escape(value: str) -> str:
-    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+from workflow_support import gh_escape  # noqa: E402
 
 
 def _effective_grants(w: WorkspaceClient, full_name: str) -> list[dict]:
@@ -37,9 +35,7 @@ def _principal_exists(w: WorkspaceClient, name: str, is_group: bool) -> bool:
 
 def _load(path: str) -> audience_spec.AudienceSpec:
     with open(path, encoding="utf-8") as handle:
-        return audience_spec.parse_sidecar(
-            json.load(handle), warn=lambda message: print(f"::warning title=AudienceSpec legacy::{_gh_escape(message)}")
-        )
+        return audience_spec.parse_sidecar(json.load(handle))
 
 
 def main() -> int:
@@ -59,7 +55,7 @@ def main() -> int:
         severity = finding["severity"]
         level = "error" if severity in {"BLOCKER", "OPERATIONAL"} else "warning"
         subject = finding.get("principal") or finding.get("table") or "AUDIENCE-01"
-        print(f"::{level} title=AUDIENCE-01::{_gh_escape(f'{subject}: {finding["message"]}')}")
+        print(f"::{level} title=AUDIENCE-01::{gh_escape(f'{subject}: {finding["message"]}')}")
     blockers = [f for f in findings if f["severity"] == "BLOCKER"]
     operational = [f for f in findings if f["severity"] == "OPERATIONAL"]
     if operational:

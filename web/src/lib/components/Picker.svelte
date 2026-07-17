@@ -1,6 +1,6 @@
 <script lang="ts">
   // G1 — the ONE reusable prefilled/searchable picker. Every field that used to accept a raw typed
-  // id/email/username (space pickers, F2 access principals, F3 access requests, F5 role emails)
+  // id/email/username (space pickers, audience principals and role emails)
   // renders through this component instead: free text is ONLY a search query fed to `search`; the
   // value(s) this component hands back (`value`/`values`) are always options `search` itself
   // returned, never the raw typed string. Pure filter/selection logic lives in `../picker.ts` (unit-

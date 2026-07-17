@@ -9,7 +9,7 @@ serialized_space; CAN_READ proved insufficient live (guard fail-closed 403). Sam
 the dev SP's per-Space CAN_MANAGE (provision_dev_sp.sh); the per-user guard stays the real
 authorization. Granting per-Space by hand does not
 scale (the stakeholder's exact complaint), so the PIPELINE does it: this runs in deploy.yml
-right after `apply_access.py`, AS the prod CI SP, for EVERY deployed space — the same
+as the prod CI SP, for EVERY deployed space — the same
 governed identity/step that created the Space makes it visible to the app. Config-driven
 (ADR-0004): the app name comes from APP_NAME (default genie-promote-app); the SP id is
 resolved live from the app itself, never hardcoded.
@@ -25,9 +25,8 @@ import sys
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import iam
 
-# Reuse the exact same resolve-by-title logic (and its fail-loud contract) as apply_access.
 sys.path.insert(0, os.path.dirname(__file__))
-from apply_access import resolve_space_id  # noqa: E402
+from workflow_support import gh_escape, resolve_space_id  # noqa: E402
 
 
 def main() -> int:
@@ -60,13 +59,11 @@ def main() -> int:
 
 
 def _run() -> int:
-    """CLI wrapper: emit the failure as a ::error annotation so the app's deploy-detail panel
-    shows the real reason (see apply_access.py's identical wrapper)."""
-    from check_grants import _gh_escape
+    """Emit a safe workflow annotation while preserving the failure."""
     try:
         return main()
     except BaseException as e:  # noqa: BLE001
-        print(f"::error title=grant-app-sp::{_gh_escape(f'{type(e).__name__}: {e}')}")
+        print(f"::error title=grant-app-sp::{gh_escape(f'{type(e).__name__}: {e}')}")
         raise
 
 

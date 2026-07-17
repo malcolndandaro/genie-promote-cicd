@@ -99,7 +99,7 @@ def test_rules_endpoints_require_the_store(monkeypatch):
 def test_list_rules_returns_hardcoded_effective_and_overrides(monkeypatch, rules_store_fixture):
     _setup_admin(monkeypatch)
     body = client.get("/api/admin/rules", headers=ADMIN_HEADERS).json()
-    assert len(body["hardcoded"]) == 9
+    assert len(body["hardcoded"]) == 7
     assert body["effective"] == body["hardcoded"]  # no overrides yet — byte-identical
     assert body["overrides"] == []
 
@@ -202,10 +202,15 @@ def test_review_uses_effective_rules_from_the_store(monkeypatch, rules_store_fix
         captured["rule_overrides"] = kwargs.get("rule_overrides")
         return {"findings": [], "gate": {"conclusion": "success", "blocker_count": 0, "summary": "ok"},
                 "eval": {"status": "pass", "summary": "ok"}, "timeline": [],
-                "allowlist_violations": [], "consumer_group": "x", "access_spec": None}
+                "allowlist_violations": [],
+                "audience_spec": {"principals": [{"principal": "users", "is_group": True}]}}
 
     monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-    r = client.post("/api/review", json={"space_id": "s1"},
+    r = client.post(
+        "/api/review",
+        json={"space_id": "s1", "audience_spec": {"principals": [
+            {"principal": "users", "is_group": True}
+        ]}},
                     headers={"x-forwarded-access-token": "tok-user"})
     assert r.status_code == 200
     overrides = captured["rule_overrides"]
@@ -226,10 +231,15 @@ def test_review_passes_none_when_no_rules_store_bound(monkeypatch):
         captured["rule_overrides"] = kwargs.get("rule_overrides")
         return {"findings": [], "gate": {"conclusion": "success", "blocker_count": 0, "summary": "ok"},
                 "eval": {"status": "pass", "summary": "ok"}, "timeline": [],
-                "allowlist_violations": [], "consumer_group": "x", "access_spec": None}
+                "allowlist_violations": [],
+                "audience_spec": {"principals": [{"principal": "users", "is_group": True}]}}
 
     monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-    r = client.post("/api/review", json={"space_id": "s1"},
+    r = client.post(
+        "/api/review",
+        json={"space_id": "s1", "audience_spec": {"principals": [
+            {"principal": "users", "is_group": True}
+        ]}},
                     headers={"x-forwarded-access-token": "tok-user"})
     assert r.status_code == 200
     assert captured["rule_overrides"] is None

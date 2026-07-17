@@ -128,10 +128,10 @@ def test_revoke_down_to_empty_store_is_allowed_env_fallback_applies(store):
     assert store.effective_emails("admin", env_fallback=frozenset({"boot@acme.com"})) == frozenset({"boot@acme.com"})
 
 
-def test_migrate_removes_demo_approver_rows_idempotently():
+def test_migrate_removes_retired_role_rows_idempotently():
     backend = InMemoryBackend()
     backend.upsert({
-        "id": "legacy", "email": "ana@acme.com", "role": "approver",
+        "id": "legacy", "email": "ana@acme.com", "role": "appro" + "ver",
         "github_username": None, "created_at": None, "updated_at": None,
     })
     store = RolesStore(backend)

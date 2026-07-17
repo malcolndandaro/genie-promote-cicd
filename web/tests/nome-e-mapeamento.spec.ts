@@ -11,7 +11,6 @@ const cleanReview = {
   gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
   eval: { status: 'advisory', summary: '🟡 eval indisponível' },
   allowlist_violations: [],
-  consumer_group: 'account users',
   timeline: [{ key: 'review', label: 'Revisão', status: 'pass' }],
 };
 const PR = { number: 9, url: 'https://github.com/malcolndandaro/genie-promote-cicd/pull/9' };
@@ -142,7 +141,7 @@ test('a preview load failure degrades gracefully — the name still defaults and
 });
 
 test('re-requesting the SAME space after a completed promotion resets the name/mapping form', async ({ page }) => {
-  // G9 (found live, PR #25 — same class of bug as the AccessSpec case): re-selecting the SAME
+  // Re-selecting the SAME
   // space after a completed promotion (the grid re-enables once reviewed) must NOT carry the
   // PRIOR round's edited name/table-mapping into the next request.
   const posted: Record<string, unknown>[] = [];

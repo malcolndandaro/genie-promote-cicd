@@ -15,7 +15,6 @@ const review = {
   gate: { conclusion: 'failure', blocker_count: 1, summary: '🔴 Promoção bloqueada — 1 achado BLOCKER.' },
   eval: { status: 'advisory', summary: '🟡 eval-run indisponível neste ambiente (sem CLI).' },
   allowlist_violations: [],
-  consumer_group: 'account users',
   timeline: [
     { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)', status: 'pass' },
     { key: 'review', label: 'Revisão do agente (Genie Reviewer)', status: 'fail' },
@@ -70,7 +69,7 @@ test('a KA advisory finding renders its markdown (bold/code/list), not raw ** an
     }],
     gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
     eval: { status: 'advisory', summary: 'x' },
-    allowlist_violations: [], consumer_group: 'account users', timeline: [],
+    allowlist_violations: [], timeline: [],
   };
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review: kaReview, pr: PR } }));
   await page.goto('/#/espacos');
@@ -140,7 +139,6 @@ test('renders a clean (success) review with no findings', async ({ page }) => {
           gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto para promoção.' },
           eval: { status: 'advisory', summary: '🟡 eval indisponível' },
           allowlist_violations: [],
-          consumer_group: 'account users',
           timeline: [
             { key: 'checks', label: 'Checagens', status: 'pass' },
             { key: 'review', label: 'Revisão', status: 'pass' },
@@ -170,7 +168,6 @@ test('a finding without suggestion/citation omits those lines', async ({ page })
           gate: { conclusion: 'failure', blocker_count: 1, summary: '🔴 Bloqueado.' },
           eval: { status: 'advisory', summary: '🟡 eval indisponível' },
           allowlist_violations: [],
-          consumer_group: 'account users',
           timeline: [{ key: 'checks', label: 'Checagens', status: 'fail' }],
         },
       },

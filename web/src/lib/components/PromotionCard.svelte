@@ -31,12 +31,14 @@
     </div>
     <div class="promo__meta">
       <StatusChip phase={p.current_phase} />
-      {#if p.pr_number && p.pr_url}
-        <a class="promo__pr" href={p.pr_url} target="_blank" rel="noopener noreferrer">
-          PR #{p.pr_number} ↗
+      {#if p.external_id && p.external_url}
+        <a class="promo__pr" href={p.external_url} target="_blank" rel="noopener noreferrer">
+          {p.change_provider === 'github' ? `PR #${p.external_id}` : `Mudança ${p.external_id}`} ↗
         </a>
-      {:else if p.pr_number}
-        <span class="promo__pr promo__pr--plain">PR #{p.pr_number}</span>
+      {:else if p.external_id}
+        <span class="promo__pr promo__pr--plain">
+          {p.change_provider === 'github' ? `PR #${p.external_id}` : `Mudança ${p.external_id}`}
+        </span>
       {/if}
       <time class="muted text-xs">{fmt(p.updated_at)}</time>
     </div>

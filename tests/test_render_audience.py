@@ -40,18 +40,4 @@ def test_render_materializes_only_canonical_audience_after_workflow_switch(tmp_p
     built = _render_repo(tmp_path, "receivables.audience.json", payload)
 
     assert json.loads((built / "receivables.audience.json").read_text()) == payload
-    assert not (built / "receivables.access.json").exists()
-    assert not (tmp_path / "src" / "genie" / "receivables.access.json").exists()
-
-
-def test_render_keeps_legacy_sidecar_read_only_until_content_repo_switch(tmp_path):
-    legacy = {
-        "space_permissions": [
-            {"principal": "finance-users", "is_group": True, "level": "CAN_RUN"}
-        ],
-        "uc_principals": [{"principal": "discarded@example.com", "is_group": False}],
-    }
-    built = _render_repo(tmp_path, "receivables.access.json", legacy)
-
-    assert json.loads((built / "receivables.access.json").read_text()) == legacy
-    assert not (built / "receivables.audience.json").exists()
+    assert "receivables.audience.json" in {path.name for path in built.iterdir()}

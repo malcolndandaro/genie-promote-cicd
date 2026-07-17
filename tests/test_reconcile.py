@@ -17,8 +17,9 @@ from promotion_store import InMemoryBackend, PromotionStore  # noqa: E402
 def _store():
     s = PromotionStore(InMemoryBackend())
     p = s.create_promotion(resource_id="sp1", resource_kind="genie_space", resource_title="Receb.",
-                           requester_email="ana@x", pr_number=6, pr_url="https://gh/pr/6",
-                           branch="promote/recebiveis", current_phase="open", live_status=None)
+                           requester_email="ana@x", branch="promote/recebiveis",
+                           current_phase="open", live_status=None, change_provider="github",
+                           external_id="6", external_url="https://gh/change/6")
     # The app writes `requested` at promote time (LB3); reconcile must not duplicate it.
     s.append_audit_event(p.id, "requested", actor_app_email="ana@x")
     return s, p
@@ -209,15 +210,16 @@ def test_reconciler_records_an_unviewed_overnight_merge_to_deploy():
     # No browser was open; the scheduled sweep must backfill the whole jump from the live status.
     s = PromotionStore(InMemoryBackend())
     p = s.create_promotion(resource_id="sp1", resource_kind="genie_space", resource_title="R",
-                           requester_email="ana@x", pr_number=6, pr_url="u", branch="b",
-                           current_phase="open", live_status=None)
+                           requester_email="ana@x", branch="b", current_phase="open",
+                           live_status=None, change_provider="github", external_id="6",
+                           external_url="u")
     s.append_audit_event(p.id, "requested", actor_app_email="ana@x")
     deploy = {"status": "completed", "conclusion": "success", "waiting_approval": False, "approver": "PSPedro176"}
     gh = _SweepGitHub({6: _status("deployed", merged=True, checks="success",
                                   review_decision="approved", deploy=deploy)},
                       facts={"merged_by": "PSPedro176", "review_approver": "PSPedro176"})
     result = reconcile_mod.reconcile_all(s, lambda: gh)
-    assert result["checked"] == 1 and result["transitioned"][0]["pr_number"] == 6
+    assert result["checked"] == 1 and result["transitioned"][0]["external_id"] == "6"
     types = [e.event_type for e in s.list_audit_events(p.id)]
     assert types == ["requested", "pr_opened", "pr_review_approved", "merged", "deploy_approved", "deployed"]
     assert s.get_promotion(p.id).terminal is True  # now terminal -> won't be swept again
@@ -227,13 +229,15 @@ def test_reconciler_skips_terminal_and_is_idempotent():
     s = PromotionStore(InMemoryBackend())
     # A terminal promotion (deployed) is never swept.
     term = s.create_promotion(resource_id="sp0", resource_kind="genie_space", resource_title="T",
-                              requester_email="ana@x", pr_number=1, pr_url="u", branch="b",
-                              current_phase="deployed", live_status=None)
+                              requester_email="ana@x", branch="b", current_phase="deployed",
+                              live_status=None, change_provider="github", external_id="1",
+                              external_url="u")
     s.update_cache(term.id, current_phase="deployed", live_status={"phase": "deployed"}, terminal=True)
     # A non-terminal one.
     p = s.create_promotion(resource_id="sp1", resource_kind="genie_space", resource_title="R",
-                           requester_email="ana@x", pr_number=6, pr_url="u", branch="b",
-                           current_phase="open", live_status=None)
+                           requester_email="ana@x", branch="b", current_phase="open",
+                           live_status=None, change_provider="github", external_id="6",
+                           external_url="u")
     s.append_audit_event(p.id, "requested")
     gh = _SweepGitHub({6: _status("checks_running")})  # only PR 6 is queried (terminal is skipped)
     r1 = reconcile_mod.reconcile_all(s, lambda: gh)

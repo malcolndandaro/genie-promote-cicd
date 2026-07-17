@@ -45,7 +45,7 @@ export function buildPromotionSteps(review: Review, live: PromoteStatus | null):
     const s = byKey.get(key) ?? { key, label: VERDICT_LABELS[key], status: 'pending' as StepStatus };
     if (key !== 'checks') return s;
     // G8: the app's own "checks" verdict is a PRE-PR preview (pre-render + allowlist + a grant
-    // preview); the live GitHub PR check-run (bundle validate + GRANT-01, as the prod SP, with
+    // preview); the live GitHub PR check-run (bundle validate + Audience preflight, as the prod SP, with
     // real prod visibility) is the AUTHORITATIVE run of the same gate — escalate to `fail` +
     // attach its own PT-friendly detail even when the preview said `pass`.
     if (live?.checks === 'failure') {

@@ -148,7 +148,7 @@ per action, not a hot loop), this is judged the correct trade-off.
    consistency for group membership changes, which is outside this component's control.
 3. **The guard authorizes "may touch this Space," not a finer-grained action distinction.**
    `assert_can_access` today answers a single yes/no per Space (read-export and write-overwrite are
-   gated identically, via `_ACCESS_LEVELS` accepting CAN_VIEW..CAN_MANAGE alike). If a future
+   gated identically, via `_ACCESS_LEVELS` accepting CAN_RUN through CAN_MANAGE). If a future
    feature needs to distinguish "may read" from "may overwrite" at the ACL-level-granularity, the
    function's `_ACCESS_LEVELS` set should be parameterized per call site rather than assuming today's
    single threshold — flagged here so a reviewer of a later PR knows this was a deliberate v1

@@ -33,8 +33,8 @@ done autonomously. All are scripted.
    ```bash
    GH_REPO=<owner>/genie-promote bash scripts/provision_ci.sh
    ```
-   This grants the CI/CD SP UC `MANAGE` on the domain catalog (needed so `apply_access.py` can grant
-   *other* declared principals, not just itself — workspace-admin alone does not imply UC `MANAGE`).
+   This grants the CI/CD SP the technical permissions needed to inspect production and deploy the
+   governed bundle. Audience reconciliation only changes Genie `CAN_RUN`; data access stays external.
    Then add your **Steward** as the required reviewer on the `prod` Environment.
 3. **Set the DEV repo variables** — `deploy.yml` bakes these into the deployed app's `app.yaml`
    (`APP_DEV_HOST`/`APP_DEV_WAREHOUSE_ID`) so the prod-hosted app knows which dev workspace to reach
@@ -47,7 +47,7 @@ done autonomously. All are scripted.
    both workspaces enforce IP access lists, so GitHub-hosted runners are rejected).
    The exact commands are printed by `provision_ci.sh` step 6.
 5. **Push to `main`** (or merge a first PR) to deploy the app + Lakebase to prod — see *Verify*
-   below. Nothing governance-related (access requests, admin console, roles, rehydrate) works until
+   below. History, configuration, audit and rehydrate require this durable store, so
    this lands: the app must start successfully against a migrated, empty Lakebase first.
 6. **Bootstrap the dev-reader/writer SP** (`provision_dev_sp.sh`, below) — a SEPARATE, later step.
    It unlocks the promotion export + rehydrate paths, not the app-in-prod milestone itself, so it's
@@ -87,8 +87,8 @@ The promotion PR (in the content repo `genie-spaces-content`) is gated by two re
 `pr-checks.yml`, both scoped to the spaces the PR changed (`git diff` vs the PR base — so unrelated /
 legacy content never blocks a PR):
 
-- **`bundle validate (prod)`** — runs as the prod CI SP: `bundle validate`, baseline **GRANT-01**
-  (`scripts/check_grants.py`), and **EVAL-01** the benchmark-COUNT floor (`scripts/check_eval.py`,
+- **`bundle validate (prod)`** — runs as the prod CI SP: `bundle validate`, **AUDIENCE-01**
+  (`scripts/check_audience.py`), and **EVAL-01** the benchmark-COUNT floor (`scripts/check_eval.py`,
   offline — the count is in the committed serialized_space; min via `EVAL_MIN_BENCHMARKS`, default 2).
 - **`eval-run pass-rate (dev)`** — runs as the **dev-reader SP** (the eval-run needs the live dev
   space with benchmarks): `scripts/check_eval_run.py` re-runs the benchmarks and fails on a
@@ -153,7 +153,8 @@ commit the `.pem`; if it ever transits an insecure channel, regenerate it in the
 
 ## Lakebase (durable promotion state / audit / cache) — provisioning + config (LB1, ADR-0005/0006)
 
-The app persists promotions, AccessSpecs, access requests, roles, rule overrides, and an
+The app persists promotions, review snapshots, Deployment Attempts, roles, rule overrides, prompt
+templates, KA configuration, rehydrate events, and an
 append-only audit trail in **Lakebase (Databricks Postgres)** — a durable index + audit log + status
 cache over GitHub-as-truth (ADR-0005). It is provisioned **all-DABs, config-driven** (ADR-0004) and
 lives with the app in the **prod target** (ADR-0006 — prod is the durable control plane; dev is wiped
@@ -179,6 +180,21 @@ The app's schema is config-driven too, via an app env var (defaults work for eve
 | App env | Default | What |
 |---|---|---|
 | `APP_LAKEBASE_SCHEMA` | `genie_promote` | Postgres schema the store owns (NOT `public` — see below) |
+
+### Pre-pilot demo-ledger reset
+
+The pilot does not need to retain demo execution history. Preview the reset first, then execute it
+with the explicit confirmation phrase:
+
+```bash
+python3 scripts/reset_demo_ledger.py --profile <prod-profile>
+python3 scripts/reset_demo_ledger.py --profile <prod-profile> \
+  --execute --confirm DELETE-DEMO-LEDGER
+```
+
+This deletes Promotions, Review Snapshots, Audit Trail rows, Deployment Attempts and Rehydrate
+Events. It preserves roles, rules and rule audit, reviewer prompt and Knowledge Assistant registry.
+The operation is idempotent and the normal startup migrations can bootstrap the schema from empty.
 
 **How the app connects — no static password (US-11).** The app `database` binding grants the app SP
 `CAN_CONNECT_AND_CREATE` and makes the platform inject `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER`

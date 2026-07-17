@@ -91,7 +91,10 @@ def _promote(monkeypatch, *, space_id, number, requester_headers, title=None):
                 "pr": {"number": number, "url": f"https://gh/pr/{number}"}}
 
     monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake)
-    body = {"space_id": space_id}
+    body = {
+        "space_id": space_id,
+        "audience_spec": {"principals": [{"principal": "users", "is_group": True}]},
+    }
     if title:
         body["resource_title"] = title
     r = client.post("/api/promote", json=body, headers=requester_headers)

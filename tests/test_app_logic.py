@@ -12,6 +12,14 @@ from types import SimpleNamespace as NS
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 import app_logic  # noqa: E402
 import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
+import audience_spec  # noqa: E402
+
+
+def _audience():
+    return audience_spec.AudienceSpec((
+        audience_spec.AudiencePrincipal("data_analysts", is_group=True),
+        audience_spec.AudiencePrincipal("ana@x.com"),
+    ))
 
 
 def test_build_timeline_clean_pending_approval():
@@ -34,21 +42,6 @@ def test_build_timeline_failed_checks():
     tl = app_logic.build_timeline(False, {"conclusion": "failure"}, {"status": "block"}, False, False)
     by = {t["key"]: t["status"] for t in tl}
     assert by["checks"] == "fail" and by["eval"] == "fail"
-
-
-def test_sod_author_cannot_approve():
-    ok, reason = app_logic.can_approve("author", "malcoln@x", "malcoln@x")
-    assert not ok and "Steward" in reason
-
-
-def test_sod_requester_cannot_self_approve_even_as_steward():
-    ok, reason = app_logic.can_approve("steward", "malcoln@x", "malcoln@x")
-    assert not ok and "Segregação" in reason
-
-
-def test_sod_distinct_steward_can_approve():
-    ok, _ = app_logic.can_approve("steward", "malcoln@x", "pedro@x")
-    assert ok is True
 
 
 # --- SDK-backed live calls: parsing verified with a fake WorkspaceClient (offline) ---
@@ -177,37 +170,17 @@ def test_list_principals_maps_users_and_groups():
     )
     out = app_logic.list_principals(client=fake)
     assert out == [
-        {"type": "user", "id": "uid-1", "display": "Ana Silva", "email": "ana@x.com", "uc_grantable": True},
-        {"type": "group", "id": "gid-1", "display": "grp_genie_receivables", "email": None, "uc_grantable": True},
+        {"type": "user", "id": "uid-1", "display": "Ana Silva", "email": "ana@x.com"},
+        {"type": "group", "id": "gid-1", "display": "grp_genie_receivables", "email": None},
     ]
 
 
 def test_list_principals_falls_back_to_user_name_without_display_name():
     fake = _fake_scim_client(users=[NS(id="uid-2", user_name="bob@x.com", display_name=None)])
     out = app_logic.list_principals(client=fake)
-    assert out == [{"type": "user", "id": "uid-2", "display": "bob@x.com", "email": "bob@x.com",
-                   "uc_grantable": True}]
-
-
-# --- G9: `uc_grantable` — a workspace-LOCAL group must never be offered to the UC-principals picker
-
-
-def test_list_principals_flags_workspace_local_group_as_not_uc_grantable():
-    fake = _fake_scim_client(groups=[NS(id="g1", display_name="users", meta=NS(resource_type="WorkspaceGroup"))])
-    out = app_logic.list_principals(client=fake)
-    assert out == [{"type": "group", "id": "g1", "display": "users", "email": None, "uc_grantable": False}]
-
-
-def test_list_principals_flags_account_group_as_uc_grantable():
-    fake = _fake_scim_client(groups=[NS(id="g2", display_name="data_analysts", meta=NS(resource_type="Group"))])
-    out = app_logic.list_principals(client=fake)
-    assert out[0]["uc_grantable"] is True
-
-
-def test_list_principals_group_without_meta_falls_back_to_builtin_name_exclusion():
-    fake = _fake_scim_client(groups=[NS(id="g3", display_name="admins")])  # no .meta attribute at all
-    out = app_logic.list_principals(client=fake)
-    assert out[0]["uc_grantable"] is False
+    assert out == [
+        {"type": "user", "id": "uid-2", "display": "bob@x.com", "email": "bob@x.com"}
+    ]
 
 
 def test_list_principals_blank_query_lists_everyone_unfiltered():
@@ -602,9 +575,7 @@ _FULL_REVIEW = {
     "eval": {"status": "advisory", "summary": "🟡 x"},
     "timeline": [{"key": "checks", "label": "Checagens", "status": "pass"}],
     "allowlist_violations": [],
-    "consumer_group": "account users",
-    "audience_spec": None,
-    "access_spec": {"space_permissions": [], "uc_principals": []},  # F2: no access declared
+    "audience_spec": _audience().to_dict(),
     "prod_serialized": {"big": "payload should be dropped"},
     "dev_serialized": {"display_name": "Recebíveis", "n": 2},  # what the PR commits
 }
@@ -613,8 +584,9 @@ _FULL_REVIEW = {
 def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
-    out = app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                      resource_title="Recebíveis", github=gh)
+    out = app_logic.request_promotion(
+        "sp1", user_token="tok", requester_email="malcoln@x",
+        resource_title="Recebíveis", audience_spec_=_audience(), github=gh)
 
     # returns the UI review subset (NOT the big prod_serialized/dev_serialized) + the PR coordinates
     assert out["pr"] == {"number": 7, "url": "https://github.com/o/r/pull/7"}
@@ -647,7 +619,7 @@ def test_blocked_review_stops_before_change_request(monkeypatch):
 
     out = app_logic.request_promotion(
         "sp1", user_token="tok", requester_email="malcoln@x",
-        resource_title="Recebíveis", github=gh,
+        resource_title="Recebíveis", audience_spec_=_audience(), github=gh,
     )
 
     assert out["blocked"] is True and out["pr"] is None
@@ -700,28 +672,8 @@ def test_secret_decodes_base64_value():
 
 # --- Pilot AudienceSpec declared at promotion (app-direct declaration, governed enforcement) ---
 
-import access_spec  # noqa: E402
-import audience_spec  # noqa: E402
 
-
-def _spec_with_access():
-    return access_spec.AccessSpec(
-        space_permissions=(
-            access_spec.SpacePermission(access_spec.Principal("data_analysts", is_group=True), "CAN_RUN"),
-        ),
-        uc_principals=(access_spec.Principal("data_analysts", is_group=True),
-                      access_spec.Principal("ana@x.com")),
-    )
-
-
-def _audience():
-    return audience_spec.AudienceSpec((
-        audience_spec.AudiencePrincipal("data_analysts", is_group=True),
-        audience_spec.AudiencePrincipal("ana@x.com"),
-    ))
-
-
-def test_request_promotion_commits_audience_sidecar_and_removes_legacy(monkeypatch):
+def test_request_promotion_commits_required_audience_sidecar(monkeypatch):
     captured_spec = {}
 
     def fake_review_space(space_id, *a, audience_spec_=None, **k):
@@ -742,32 +694,17 @@ def test_request_promotion_commits_audience_sidecar_and_removes_legacy(monkeypat
     # the review payload the Steward sees carries the SAME declaration that was passed through
     assert captured_spec["spec"] is spec
     assert out["review"]["audience_spec"] == spec.to_dict()
-    assert "src/genie/sp1.access.json" in gh.promo["remove_files"]
 
 
-def test_request_promotion_omits_audience_sidecar_for_legacy_missing_declaration(monkeypatch):
+def test_request_promotion_rejects_missing_audience(monkeypatch):
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
-    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
-    assert "src/genie/sp1.audience.json" not in gh.promo["extra_files"]
-
-
-def test_request_promotion_clears_stale_audience_and_access_sidecars_when_empty(monkeypatch):
-    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
-    gh = _FakeGitHubApp()
-    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
-    assert "src/genie/sp1.access.json" in gh.promo["remove_files"]
-    assert "src/genie/sp1.audience.json" in gh.promo["remove_files"]
-
-
-def test_request_promotion_keeps_canonical_audience_and_always_removes_legacy(monkeypatch):
-    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
-    gh = _FakeGitHubApp()
-    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                audience_spec_=_audience(), github=gh)
-    assert "src/genie/sp1.audience.json" not in gh.promo["remove_files"]
-    assert "src/genie/sp1.audience.json" in gh.promo["extra_files"]
-    assert "src/genie/sp1.access.json" in gh.promo["remove_files"]
+    try:
+        app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    except ValueError as exc:
+        assert "AudienceSpec is required" in str(exc)
+    else:  # pragma: no cover - the contract must fail closed
+        raise AssertionError("missing audience was accepted")
 
 
 # --- G7: the declared prod Space name + table de-para (app-direct declaration, CI enforcement) ---
@@ -780,20 +717,20 @@ def test_request_promotion_custom_prod_title_flows_to_the_title_sidecar_and_comm
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                resource_title="Recebíveis PROD", github=gh)
+                                resource_title="Recebíveis PROD", audience_spec_=_audience(), github=gh)
     assert gh.promo["extra_files"]["src/genie/sp1.title"].strip() == "Recebíveis PROD"
     # surfaced in the comment too, for Steward/reviewer transparency
     assert "**Nome do space em produção:** `Recebíveis PROD`" in gh.comment["body"]
 
 
 def test_request_promotion_commits_mapping_sidecar_when_declared(monkeypatch):
-    """A non-empty table_mapping is committed as a NEW per-space sidecar (mirrors `.access.json`) —
+    """A non-empty table_mapping is committed as its own per-space sidecar —
     the DECLARATION is app-direct (this call); the actual rebind is CI's job (render.sh)."""
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
     mapping = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                table_mapping=mapping, github=gh)
+                                audience_spec_=_audience(), table_mapping=mapping, github=gh)
     sidecar_path = "src/genie/sp1.mapping.json"
     assert sidecar_path in gh.promo["extra_files"]
     assert json.loads(gh.promo["extra_files"][sidecar_path]) == mapping
@@ -803,21 +740,24 @@ def test_request_promotion_commits_mapping_sidecar_when_declared(monkeypatch):
 
 
 def test_request_promotion_omits_mapping_sidecar_when_not_declared(monkeypatch):
-    """No table_mapping declared (the default case) -> no sidecar file, no noisy empty commit —
-    mirrors test_request_promotion_omits_access_sidecar_when_not_declared."""
+    """No table_mapping declared means no sidecar file and no noisy empty commit."""
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
-    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    app_logic.request_promotion(
+        "sp1", user_token="tok", requester_email="malcoln@x",
+        audience_spec_=_audience(), github=gh)
     assert "src/genie/sp1.mapping.json" not in gh.promo["extra_files"]
     assert "De-para de tabelas" not in gh.comment["body"]
 
 
 def test_request_promotion_clears_a_stale_mapping_sidecar_when_re_requested_empty(monkeypatch):
-    """G9: mirrors the access-sidecar case — a re-request that no longer declares a table_mapping
+    """A re-request that no longer declares a table_mapping
     must ask for the PRIOR round's `.mapping.json` to be removed, not just left uncommitted-to."""
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
     gh = _FakeGitHubApp()
-    app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x", github=gh)
+    app_logic.request_promotion(
+        "sp1", user_token="tok", requester_email="malcoln@x",
+        audience_spec_=_audience(), github=gh)
     assert "src/genie/sp1.mapping.json" in gh.promo["remove_files"]
 
 
@@ -826,7 +766,7 @@ def test_request_promotion_never_removes_the_mapping_sidecar_when_still_declared
     gh = _FakeGitHubApp()
     mapping = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                table_mapping=mapping, github=gh)
+                                audience_spec_=_audience(), table_mapping=mapping, github=gh)
     assert "src/genie/sp1.mapping.json" not in gh.promo["remove_files"]
     assert "src/genie/sp1.mapping.json" in gh.promo["extra_files"]
 
@@ -839,7 +779,7 @@ def test_request_promotion_never_applies_the_mapping_itself(monkeypatch):
     gh = _FakeGitHubApp()
     mapping = {"dev_recebiveis.diamond.dim_cedente": "prod_recebiveis.diamond.dim_cedente_v2"}
     app_logic.request_promotion("sp1", user_token="tok", requester_email="malcoln@x",
-                                table_mapping=mapping, github=gh)
+                                audience_spec_=_audience(), table_mapping=mapping, github=gh)
     # the committed serialized_space artifact is the DEV-shaped export as-is — untouched by the
     # mapping (which lives ONLY in the separate sidecar, applied later by CI).
     committed = json.loads(gh.promo["content"])
@@ -863,120 +803,10 @@ def test_request_promotion_never_calls_a_live_grant_or_permission_api(monkeypatc
     assert out["pr"]["number"] == 7  # completed without ever invoking the fake grant/permission APIs
 
 
-def _stub_review_space_llm_leg(monkeypatch):
-    """Everything review_space needs downstream of the GRANT-01 preview — shared by every
-    grant-preview test below so each one only wires up the grants-specific parts."""
-    monkeypatch.setattr(app_logic.review_core, "build_space_context",
-                        lambda space: {"n_benchmark": 5})
-    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
-    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
-    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
-                        lambda *a, **k: {"status": "advisory", "summary": "ok"})
-
-
-def test_review_space_grant01_preview_separates_baseline_from_declared_principals(monkeypatch):
-    """G9: the in-app GRANT-01 PREVIEW (only runs with a reachable grant_profile) checks the base
-    consumer_group and the AccessSpec's declared principals SEPARATELY — no longer union'd into one
-    flat list, since a missing grant means something different for each class."""
-    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
-        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
-    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())  # NS() has no .groups -> best-effort None
-
-    captured = {}
-
-    def fake_check_grants(space, consumer_group, getter, declared_principals=None, non_grantable_principals=None):
-        captured["consumer_group"] = consumer_group
-        captured["declared_principals"] = list(declared_principals or [])
-        captured["non_grantable_principals"] = list(non_grantable_principals or [])
-        return []
-
-    monkeypatch.setattr(app_logic.grant_check, "check_grants", fake_check_grants)
-    _stub_review_space_llm_leg(monkeypatch)
-
-    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),
-                                                 access_spec.Principal("data_analysts", is_group=True)))
-    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
-    assert captured["consumer_group"] == "account users"  # baseline, never unioned with declared
-    assert set(captured["declared_principals"]) == {"ana@x.com", "data_analysts"}
-    assert captured["non_grantable_principals"] == []  # unresolvable (fake has no .groups) -> best-effort empty
-    assert result["access_spec"] == spec.to_dict()
-
-
-def test_review_space_grant01_preview_declared_miss_is_advisory_not_blocker(monkeypatch):
-    """A declared principal missing SELECT surfaces as a non-blocking SUGGESTION in the app's own
-    review result (mirrors CI) — it must NOT flip the gate to failure."""
-    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
-        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
-
-    def fake_client(*a, **k):
-        return NS(grants=NS(get_effective=lambda securable_type, full_name: NS(privilege_assignments=[
-            NS(principal="account users", privileges=[NS(privilege="SELECT")]),
-        ])))
-
-    monkeypatch.setattr(app_logic, "_client", fake_client)
-    _stub_review_space_llm_leg(monkeypatch)
-
-    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),))
-    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
-    grant_findings = [f for f in result["findings"] if f["rule_id"] == "GRANT-01"]
-    assert len(grant_findings) == 1
-    assert grant_findings[0]["severity"] == "SUGGESTION"
-    assert "apply_access" in grant_findings[0]["message"]
-    assert result["gate"]["conclusion"] != "failure"  # advisory-only -> does not block
-
-
-def test_review_space_grant01_preview_baseline_miss_still_blocks(monkeypatch):
-    """Baseline (unchanged): a missing BASELINE grant still fails the gate even with an AccessSpec
-    declared — the pipeline never grants the baseline group."""
-    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
-        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
-
-    def fake_client(*a, **k):
-        return NS(grants=NS(get_effective=lambda securable_type, full_name: NS(privilege_assignments=[])))
-
-    monkeypatch.setattr(app_logic, "_client", fake_client)
-    _stub_review_space_llm_leg(monkeypatch)
-
-    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("ana@x.com"),))
-    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
-    grant_findings = [f for f in result["findings"] if f["rule_id"] == "GRANT-01"]
-    severities = {f["principal"]: f["severity"] for f in grant_findings}
-    assert severities["account users"] == "BLOCKER"
-    assert severities["ana@x.com"] == "SUGGESTION"
-    assert result["gate"]["conclusion"] == "failure"  # the BLOCKER alone fails the gate
-
-
-def test_review_space_grant01_preview_flags_non_grantable_declared_group(monkeypatch):
-    """Additional scope: a declared GROUP that isn't UC-grantable (workspace-local) gets the
-    'não pode receber grant UC' advisory instead of the 'será concedido no deploy' promise."""
-    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
-        {"identifier": "prod_recebiveis.diamond.fato_recebiveis", "column_configs": []}]}})
-
-    def fake_client(*a, **k):
-        return NS(
-            grants=NS(get_effective=lambda securable_type, full_name: NS(privilege_assignments=[
-                NS(principal="account users", privileges=[NS(privilege="SELECT")]),
-            ])),
-            groups=NS(list=lambda filter: [NS(display_name="users", meta=NS(resource_type="WorkspaceGroup"))]),
-        )
-
-    monkeypatch.setattr(app_logic, "_client", fake_client)
-    _stub_review_space_llm_leg(monkeypatch)
-
-    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("users", is_group=True),))
-    result = app_logic.review_space("sp1", grant_profile="prod-profile", access_spec_=spec)
-    grant_findings = [f for f in result["findings"] if f["rule_id"] == "GRANT-01"]
-    assert len(grant_findings) == 1
-    assert grant_findings[0]["severity"] == "SUGGESTION"
-    assert "grupo local do workspace" in grant_findings[0]["message"]
-    assert "apply_access" not in grant_findings[0]["message"]
-
-
 # --- eval-run gate threading (W2): review_space must target the SAME workspace as the export ---
 
-def _stub_review_space_llm_leg_only(monkeypatch):
-    """Same LLM-leg stubbing as `_stub_review_space_llm_leg`, WITHOUT touching `run_eval_gate_rest`
-    — the tests below need to observe/control that call themselves."""
+def _stub_review_space(monkeypatch):
+    """Common review stubbing, without touching `run_eval_gate_rest`."""
     monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": []}})
     monkeypatch.setattr(app_logic.review_core, "build_space_context", lambda space: {"n_benchmark": 5})
     monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
@@ -987,7 +817,7 @@ def test_review_space_eval_uses_dev_sp_client_when_user_token_present(monkeypatc
     """W2: once the app is prod-hosted, OBO cannot reach dev (ADR-0006) — a user_token means the
     eval-run gate MUST target the dev-reader/writer SP (scope="dev-sp"), the SAME transport
     export_serialized itself uses, never a bare prod-local client."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     dev_sp_sentinel = object()
 
     def fake_client(*a, **k):
@@ -1002,7 +832,7 @@ def test_review_space_eval_uses_dev_sp_client_when_user_token_present(monkeypatc
 
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
 
-    app_logic.review_space("sp1", user_token="tok")
+    app_logic.review_space("sp1", user_token="tok", audience_spec_=_audience())
     assert captured["client"] is dev_sp_sentinel
 
 
@@ -1010,7 +840,7 @@ def test_review_space_eval_uses_plain_profile_client_without_user_token(monkeypa
     """Local/offline convenience (a bare profile, no OBO token in the loop): the eval-run gate must
     target the profile directly — never scope="dev-sp", which requires the dev SP to be bootstrapped
     at all (same convention as export_serialized's own profile-only path)."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     calls = []
 
     def fake_client(*a, **k):
@@ -1026,7 +856,7 @@ def test_review_space_eval_uses_plain_profile_client_without_user_token(monkeypa
 
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
 
-    app_logic.review_space("sp1", profile="local-profile")
+    app_logic.review_space("sp1", profile="local-profile", audience_spec_=_audience())
     assert all(k.get("scope") != "dev-sp" for _, k in calls)
     assert ("local-profile",) in [a for a, _ in calls]
 
@@ -1034,7 +864,7 @@ def test_review_space_eval_uses_plain_profile_client_without_user_token(monkeypa
 def test_review_space_eval_degrades_when_dev_sp_not_configured(monkeypatch):
     """If the dev-reader/writer SP isn't bootstrapped (no APP_DEV_HOST), the eval step must degrade
     to advisory — never blow up the whole review — exactly like an unreachable eval-run endpoint."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     monkeypatch.setattr(app_logic, "APP_DEV_HOST", None)  # dev SP never bootstrapped
     real_client = app_logic._client
 
@@ -1045,7 +875,7 @@ def test_review_space_eval_degrades_when_dev_sp_not_configured(monkeypatch):
 
     monkeypatch.setattr(app_logic, "_client", fake_client)
 
-    result = app_logic.review_space("sp1", user_token="tok")
+    result = app_logic.review_space("sp1", user_token="tok", audience_spec_=_audience())
     assert result["eval"]["status"] == "advisory"
     assert "APP_DEV_HOST" in result["eval"]["summary"]
     assert result["gate"] is not None  # the rest of the review still completed normally
@@ -1055,13 +885,13 @@ def test_review_space_blocking_eval_run_fails_the_gate(monkeypatch):
     """A `block` eval-run (pass-rate < threshold) must inject an EVAL-RUN BLOCKER finding and flip
     the whole gate to `failure` — so the app shows 'promoção bloqueada' and offers no merge (the
     fix for a failed eval-run that previously left the gate green + PR merge-ready)."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
                         lambda *a, **k: {"status": "block", "pass_rate": 0.4, "n": 5,
                                          "summary": "🔴 acertou 2 (40%) — abaixo do limiar."})
 
-    result = app_logic.review_space("sp1", profile="p")
+    result = app_logic.review_space("sp1", profile="p", audience_spec_=_audience())
     assert result["eval"]["status"] == "block"
     assert result["gate"]["conclusion"] == "failure"
     ev = [f for f in result["findings"] if f["rule_id"] == "EVAL-RUN"]
@@ -1072,12 +902,12 @@ def test_review_space_blocking_eval_run_fails_the_gate(monkeypatch):
 def test_review_space_advisory_eval_run_does_not_fail_the_gate(monkeypatch):
     """Graceful degradation preserved: an `advisory` eval-run (unavailable / no benchmarks) must NOT
     add a BLOCKER nor fail the gate — only a real `block` verdict gates."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
                         lambda *a, **k: {"status": "advisory", "summary": "🟡 indisponível — não bloqueia."})
 
-    result = app_logic.review_space("sp1", profile="p")
+    result = app_logic.review_space("sp1", profile="p", audience_spec_=_audience())
     assert result["eval"]["status"] == "advisory"
     assert result["gate"]["conclusion"] != "failure"
     assert [f for f in result["findings"] if f["rule_id"] == "EVAL-RUN"] == []
@@ -1089,7 +919,7 @@ def test_review_space_threads_admin_configured_eval_threshold_to_the_gate(monkey
     """The EVAL-01 override's `eval_run_threshold` param must reach `run_eval_gate_rest` as
     `threshold=` — resolved via `rules_config.eval_run_threshold`, the SAME override rows already
     threaded for `effective_rules`/`eval01_config`."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
     captured = {}
 
@@ -1100,14 +930,14 @@ def test_review_space_threads_admin_configured_eval_threshold_to_the_gate(monkey
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
 
     overrides = [{"rule_id": "EVAL-01", "enabled": True, "params": {"eval_run_threshold": 0.6}}]
-    app_logic.review_space("sp1", rule_overrides=overrides)
+    app_logic.review_space("sp1", audience_spec_=_audience(), rule_overrides=overrides)
     assert captured["threshold"] == 0.6
 
 
 def test_review_space_defaults_eval_threshold_when_no_override(monkeypatch):
     """No `rule_overrides` (or none touching EVAL-01) -> the default 0.8, unchanged from before
     this admin knob existed."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
     captured = {}
 
@@ -1117,7 +947,7 @@ def test_review_space_defaults_eval_threshold_when_no_override(monkeypatch):
 
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", fake_run_eval_gate_rest)
 
-    app_logic.review_space("sp1")
+    app_logic.review_space("sp1", audience_spec_=_audience())
     assert captured["threshold"] == 0.8
 
 
@@ -1125,7 +955,7 @@ def test_review_space_eval_degrade_path_carries_the_effective_threshold(monkeypa
     """Even when run_eval_gate_rest itself blows up (degrade-to-advisory path), the EFFECTIVE
     (admin-configured) threshold — not the bare 0.8 default — must ride along on the advisory
     payload, so the UI's rich panel shows the real configured value."""
-    _stub_review_space_llm_leg_only(monkeypatch)
+    _stub_review_space(monkeypatch)
     monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
 
     def _boom(*a, **k):
@@ -1134,15 +964,13 @@ def test_review_space_eval_degrade_path_carries_the_effective_threshold(monkeypa
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest", _boom)
 
     overrides = [{"rule_id": "EVAL-01", "enabled": True, "params": {"eval_run_threshold": 0.6}}]
-    result = app_logic.review_space("sp1", rule_overrides=overrides)
+    result = app_logic.review_space("sp1", audience_spec_=_audience(), rule_overrides=overrides)
     assert result["eval"]["status"] == "advisory"
     assert result["eval"]["threshold"] == 0.6
 
 
-def test_review_space_pii_interplay_flags_declared_access_to_masked_column(monkeypatch):
-    """PII-01/02 interplay (F2 acceptance criteria): declaring access that reaches a column with a
-    PII/bank-secrecy signal (CPF here) surfaces a grounded SUGGESTION so the Steward double-checks
-    masking before approving — it never silently grants broad SELECT past that concern."""
+def test_review_space_pii_interplay_flags_declared_audience_on_sensitive_column(monkeypatch):
+    """A declared audience reaching a sensitive column surfaces a grounded advisory."""
     monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
         {"identifier": "prod_recebiveis.diamond.dim_cedente",
          "column_configs": [{"column_name": "cpf"}, {"column_name": "nome"}]}]}})
@@ -1154,31 +982,10 @@ def test_review_space_pii_interplay_flags_declared_access_to_masked_column(monke
     monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
                         lambda *a, **k: {"status": "advisory", "summary": "ok"})
 
-    spec = access_spec.AccessSpec(uc_principals=(access_spec.Principal("data_analysts", is_group=True),))
-    result = app_logic.review_space("sp1", access_spec_=spec)  # no grant_profile -> GRANT-01 preview skipped
+    result = app_logic.review_space("sp1", audience_spec_=_audience())
     pii = [f for f in result["findings"] if f["rule_id"] == "PII-01"]
     assert len(pii) == 1 and pii[0]["severity"] == "SUGGESTION"
     assert "cpf" in pii[0]["message"].lower()
-
-
-def test_review_space_no_pii_finding_when_no_access_declared(monkeypatch):
-    """No AccessSpec declared -> no PII interplay noise, even on a Space with a flagged column
-    (the existing LLM-driven PII-01 still runs; this is only the F2-specific access-interplay note)."""
-    monkeypatch.setattr(app_logic, "export_serialized", lambda *a, **k: {"data_sources": {"tables": [
-        {"identifier": "prod_recebiveis.diamond.dim_cedente",
-         "column_configs": [{"column_name": "cpf"}]}]}})
-    monkeypatch.setattr(app_logic, "_client", lambda *a, **k: NS())
-    monkeypatch.setattr(app_logic.review_core, "build_space_context",
-                        lambda space: {"n_benchmark": 5})
-    monkeypatch.setattr(app_logic.review_core, "build_review_prompt", lambda *a, **k: ("s", "u"))
-    monkeypatch.setattr(app_logic, "_claude", lambda *a, **k: '{"summary": "ok", "findings": []}')
-    monkeypatch.setattr(app_logic.eval_gate, "run_eval_gate_rest",
-                        lambda *a, **k: {"status": "advisory", "summary": "ok"})
-
-    result = app_logic.review_space("sp1")
-    assert [f for f in result["findings"] if f["rule_id"] == "PII-01"] == []
-
-
 # --- S7b (app-ux-overhaul): KA advisory findings — additive only, never a BLOCKER --------------
 
 
@@ -1197,9 +1004,9 @@ def _review_space_fixture(monkeypatch):
 
 def test_review_space_with_no_ka_endpoints_is_unaffected(monkeypatch):
     _review_space_fixture(monkeypatch)
-    result = app_logic.review_space("sp1", ka_endpoints=None)
+    result = app_logic.review_space("sp1", audience_spec_=_audience(), ka_endpoints=None)
     assert [f for f in result["findings"] if f["rule_id"].startswith("KA:")] == []
-    result_empty = app_logic.review_space("sp1", ka_endpoints=[])
+    result_empty = app_logic.review_space("sp1", audience_spec_=_audience(), ka_endpoints=[])
     assert [f for f in result_empty["findings"] if f["rule_id"].startswith("KA:")] == []
 
 
@@ -1208,7 +1015,8 @@ def test_review_space_ka_success_adds_a_suggestion_finding(monkeypatch):
     monkeypatch.setattr(app_logic, "_query_ka_endpoint",
                         lambda *a, **k: "Considere revisar a convenção de nomes de colunas.")
     result = app_logic.review_space(
-        "sp1", ka_endpoints=[{"name": "Handbook KA", "serving_endpoint_name": "ka-handbook"}])
+        "sp1", audience_spec_=_audience(),
+        ka_endpoints=[{"name": "Handbook KA", "serving_endpoint_name": "ka-handbook"}])
     ka = [f for f in result["findings"] if f["rule_id"] == "KA:Handbook KA"]
     assert len(ka) == 1
     assert ka[0]["severity"] == "SUGGESTION"
@@ -1225,7 +1033,8 @@ def test_review_space_ka_failure_degrades_to_a_quiet_style_notice_never_breaks_t
 
     monkeypatch.setattr(app_logic, "_query_ka_endpoint", _boom)
     result = app_logic.review_space(
-        "sp1", ka_endpoints=[{"name": "Flaky KA", "serving_endpoint_name": "ka-flaky"}])
+        "sp1", audience_spec_=_audience(),
+        ka_endpoints=[{"name": "Flaky KA", "serving_endpoint_name": "ka-flaky"}])
     ka = [f for f in result["findings"] if f["rule_id"] == "KA:Flaky KA"]
     assert len(ka) == 1
     assert ka[0]["severity"] == "STYLE"  # a notice, never a BLOCKER
@@ -1244,7 +1053,8 @@ def test_review_space_persona_template_reaches_the_system_prompt(monkeypatch):
         return real_build(*a, **k)
 
     monkeypatch.setattr(app_logic.review_core, "build_review_prompt", spy_build)
-    app_logic.review_space("sp1", persona_template="Seja mais rigoroso.")
+    app_logic.review_space(
+        "sp1", audience_spec_=_audience(), persona_template="Seja mais rigoroso.")
     assert captured["persona_template"] == "Seja mais rigoroso."
 
 
@@ -1258,7 +1068,7 @@ def test_review_space_no_persona_template_passes_none_through(monkeypatch):
         return real_build(*a, **k)
 
     monkeypatch.setattr(app_logic.review_core, "build_review_prompt", spy_build)
-    app_logic.review_space("sp1")
+    app_logic.review_space("sp1", audience_spec_=_audience())
     assert captured["persona_template"] is None
 
 
@@ -1290,7 +1100,7 @@ def test_review_space_multiple_ka_endpoints_each_get_their_own_finding(monkeypat
         return f"resposta de {serving_endpoint_name}"
 
     monkeypatch.setattr(app_logic, "_query_ka_endpoint", _fake_query)
-    result = app_logic.review_space("sp1", ka_endpoints=[
+    result = app_logic.review_space("sp1", audience_spec_=_audience(), ka_endpoints=[
         {"name": "A", "serving_endpoint_name": "ka-a"},
         {"name": "B", "serving_endpoint_name": "ka-b"},
     ])

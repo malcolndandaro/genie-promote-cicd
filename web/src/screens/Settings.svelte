@@ -199,32 +199,31 @@
   }
 
   // Rules whose enforcement is DETERMINISTIC in the pipeline (not the LLM): EVAL-01 (benchmark
-  // count in review_core.finalize_findings), GRANT-01 (scripts/check_grants.py in CI), ENV-01
+  // count in review_core.finalize_findings) and ENV-01
   // (scripts/pre_render.py allowlist in CI). Disabling/editing their TEXT here only changes what the
   // reviewer LLM is grounded on — the deterministic backstop in the pipeline still runs regardless.
   // Surfacing this prevents the (otherwise misleading) impression that toggling them off in the UI
   // turns the guard off.
-  const DETERMINISTIC_RULES = new Set(['EVAL-01', 'GRANT-01', 'ENV-01']);
+  const DETERMINISTIC_RULES = new Set(['EVAL-01', 'ENV-01']);
 
-  // Of the deterministic rules, ENV-01 + GRANT-01 are enforced ENTIRELY in the CI pipeline
-  // (scripts/pre_render.py allowlist; scripts/check_grants.py), which has NO Lakebase access — so
+  // Of the deterministic rules, ENV-01 is enforced ENTIRELY in the CI pipeline
+  // (scripts/pre_render.py allowlist), which has NO Lakebase access — so
   // there is NOTHING an admin can toggle/edit here that changes their enforcement. Their row is
   // READ-ONLY (text, enabled, severity): informational only, "what it checks", no editing, no
   // disabling. EVAL-01 is the exception: its backstop (review_core.finalize_findings) reads the
   // store, so its enable/min_benchmarks/threshold/severity ARE the real, configurable knobs — its
   // TEXT stays read-only (also a deterministic check) but its parameters remain editable.
-  const PIPELINE_LOCKED = new Set(['ENV-01', 'GRANT-01']);
+  const PIPELINE_LOCKED = new Set(['ENV-01']);
 
   // Short "what this check does" summary for the deterministic rules (shown read-only in place of an
   // editable handbook text — the point the user made: for a code-enforced check, inform, don't edit).
   const DETERMINISTIC_CHECKS: Record<string, string> = {
     'ENV-01': 'O pipeline rejeita qualquer referência a catálogo de outro ambiente (dev_/sbx_/…) — só prod_<domínio> passa. Verificado no CI (pre_render), independente do texto.',
-    'GRANT-01': 'O pipeline verifica no CI (check_grants) que o grupo consumidor de produção tem SELECT em toda tabela do espaço. Grant faltando = BLOCKER, independente do texto.',
     'EVAL-01': 'O revisor conta as perguntas de benchmark do espaço e exige o mínimo configurado abaixo. Aplicado deterministicamente (não pelo LLM).',
   };
 
   // Fixed display order for the deterministic group so they always sit together, in sequence.
-  const DETERMINISTIC_ORDER = ['ENV-01', 'GRANT-01', 'EVAL-01'];
+  const DETERMINISTIC_ORDER = ['ENV-01', 'EVAL-01'];
 
   // Split the hardcoded rules into the two sections the UI renders. Deterministic ones are ordered
   // per DETERMINISTIC_ORDER; the rest keep their handbook order. `data` is the getRules() payload.
@@ -457,7 +456,7 @@
         <h4 class="rules-group__title">Verificações determinísticas</h4>
         <p class="muted text-xs rules-group__desc">
           Aplicadas pelo pipeline (código), não pelo revisor (LLM). O texto é informativo e não
-          editável. ENV-01 e GRANT-01 rodam no CI e estão sempre ativas; só o EVAL-01 é configurável.
+          editável. ENV-01 roda no CI e está sempre ativa; o EVAL-01 é configurável.
         </p>
         <ul class="row-list">
           {#each groups.deterministic as rule (rule.rule_id)}
@@ -487,7 +486,7 @@
               </div>
               <div class="row__meta rule-row__controls">
                 {#if locked}
-                  <!-- ENV-01 / GRANT-01: enforcement 100% no CI (sem Lakebase). Nada aqui muda o gate. -->
+                  <!-- ENV-01: enforcement 100% no CI (sem Lakebase). Nada aqui muda o gate. -->
                   <Badge tone={SEVERITY_TONE[rule.severity_hint]}>{rule.severity_hint}</Badge>
                 {:else}
                   <!-- EVAL-01: os knobs reais (o backstop lê o store). -->

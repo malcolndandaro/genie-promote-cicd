@@ -3,8 +3,7 @@
 Imperative shell around the pure cores: serialized_space JSON -> build_space_context ->
 build_review_prompt (ALL handbook rules inline, PT) -> Claude -> parse_review.
 Deployable to Model Serving via the agent-as-code lifecycle (reuses bimbo's pattern).
-The handbook is small, so rules are grounded fully in-context (Vector Search is the
-scale path, not needed at 9 rules).
+The handbook is small, so rules are grounded fully in-context (Vector Search is the scale path).
 """
 from __future__ import annotations
 
@@ -51,8 +50,8 @@ def _call_llm(system: str, user: str) -> str:
 class GenieReviewer(ResponsesAgent):
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         # input = the serialized_space JSON, or {"serialized_space": {...},
-        # "grant_findings": [...], "rule_overrides": [...]} with the deterministic GRANT-01 check
-        # results + G2's admin rule overrides (optional — absent/None -> handbook_rules.RULES
+        # "deterministic_findings": [...], "rule_overrides": [...]} with deterministic check
+        # results + admin rule overrides (optional — absent/None -> handbook_rules.RULES
         # unchanged, this model's pre-G2 behavior).
         raw_in = _input_text(request)
         try:
@@ -62,10 +61,10 @@ class GenieReviewer(ResponsesAgent):
                 "summary": "Entrada inválida — não é um serialized_space JSON.",
                 "findings": [], "gate": {"conclusion": "neutral", "blocker_count": 0,
                                          "summary": "⚠️ entrada ilegível — revisar manualmente."}})
-        grant_findings, rule_overrides = None, None
+        deterministic_findings, rule_overrides = None, None
         if isinstance(payload, dict) and "serialized_space" in payload:
             space = payload["serialized_space"]
-            grant_findings = payload.get("grant_findings")
+            deterministic_findings = payload.get("deterministic_findings")
             rule_overrides = payload.get("rule_overrides")
         else:
             space = payload
@@ -75,13 +74,14 @@ class GenieReviewer(ResponsesAgent):
         effective = rules_config.effective_rules(rule_overrides)
         min_bench, eval01_severity = rules_config.eval01_config(rule_overrides)
         ctx = review_core.build_space_context(space)
-        system, user = review_core.build_review_prompt(ctx, effective, grant_findings)
+        system, user = review_core.build_review_prompt(ctx, effective, deterministic_findings)
         raw = _call_llm(system, user)
         review = review_core.parse_review(raw)
-        # Deterministic GRANT-01/EVAL-01 are merged into the gate — they can't be
+        # Deterministic checks are merged into the gate — they cannot be
         # softened or injection-suppressed by the LLM (S5 review fix).
-        findings = review_core.finalize_findings(review["findings"], grant_findings, ctx["n_benchmark"],
-                                                  min_benchmark=min_bench, eval01_severity=eval01_severity)
+        findings = review_core.finalize_findings(
+            review["findings"], deterministic_findings, ctx["n_benchmark"],
+            min_benchmark=min_bench, eval01_severity=eval01_severity)
         gate = review_core.decide_gate(findings)
         # A non-empty but unparseable LLM response must not read as a clean pass.
         if raw.strip() and not review["summary"] and not review["findings"] and gate["conclusion"] == "success":

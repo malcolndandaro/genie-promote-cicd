@@ -4,7 +4,7 @@ import { confirmPilotPromotion } from './promotion-helpers';
 const PR = { number: 42, url: 'https://github.com/o/r/pull/42' };
 const cleanReview = {
   findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto.' },
-  eval: { status: 'advisory', summary: 'Sem eval.' }, allowlist_violations: [], consumer_group: '',
+  eval: { status: 'advisory', summary: 'Sem eval.' }, allowlist_violations: [],
   timeline: [
     { key: 'checks', label: 'Checagens', status: 'pass' },
     { key: 'review', label: 'Revisão', status: 'pass' },

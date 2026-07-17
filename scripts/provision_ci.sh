@@ -7,7 +7,7 @@
 #   3. mints an OAuth M2M secret,
 #   4. pushes host + client-id (GitHub *variables*) and the secret (GitHub *secret*),
 #   5. creates the `prod` Environment with a required reviewer AND prevent-self-review
-#      (enforces Requester != Approver — ADR-0002 SoD; reviewers alone do NOT),
+#      (enforces Requester != Steward — ADR-0002 SoD; reviewers alone do NOT),
 #   6. prints the self-hosted runner registration command.
 #
 # Portable (ADR-0004): everything is parameterized below — workflows read vars/secrets,
@@ -58,7 +58,7 @@ gh secret   set DATABRICKS_PROD_SP_SECRET     --repo "$GH_REPO" --body "$SECRET"
 gh variable set DATABRICKS_PROD_WAREHOUSE_ID  --repo "$GH_REPO" --body "$PROD_WAREHOUSE_ID"
 
 # ---- 5. prod Environment: required reviewer + PREVENT SELF-REVIEW (SoD) ------
-# prevent_self_review=true is what actually enforces Requester != Approver. Without
+# prevent_self_review=true is what actually enforces Requester != Steward. Without
 # it, the PR author can approve their own deploy (ADR-0002 violation). B2.
 if [ -n "$STEWARD_GH" ]; then
   REVIEWER_ID=$(gh api "users/$STEWARD_GH" --jq .id)

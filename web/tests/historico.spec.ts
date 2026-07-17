@@ -9,7 +9,6 @@ const review = {
   gate: { conclusion: 'success', blocker_count: 0, summary: '🟢 Pronto.' },
   eval: { status: 'pass', summary: 'ok' },
   allowlist_violations: [],
-  consumer_group: '',
   timeline: [{ key: 'review', label: 'Revisão', status: 'pass' }],
 };
 const mine = [

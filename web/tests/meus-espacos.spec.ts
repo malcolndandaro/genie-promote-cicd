@@ -75,7 +75,7 @@ test('confirming the panel shows a busy state while the promotion is in flight',
       json: {
         pr: { number: 1, url: 'https://gh/pr/1' },
         review: { findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
-          eval: { status: 'advisory', summary: 'x' }, allowlist_violations: [], consumer_group: '', timeline: [] },
+          eval: { status: 'advisory', summary: 'x' }, allowlist_violations: [], timeline: [] },
       },
     });
   });
@@ -130,7 +130,7 @@ test('a no-op promotion (already in prod) shows a "nada a promover" notice, no p
       json: {
         pr: null, no_change: true,
         review: { findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
-          eval: { status: 'advisory', summary: 'x' }, allowlist_violations: [], consumer_group: '', timeline: [] },
+          eval: { status: 'advisory', summary: 'x' }, allowlist_violations: [], timeline: [] },
       },
     }),
   );

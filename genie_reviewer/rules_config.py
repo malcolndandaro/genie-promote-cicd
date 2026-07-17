@@ -7,14 +7,9 @@ is exactly what consumes its output).
 `handbook_rules.RULES` — the "no store configured / no overrides" guarantee G2's acceptance
 criteria requires: offline CI and a fresh install behave EXACTLY like before this slice shipped.
 
-Two of the 9 rules are enforced OUTSIDE the LLM-grounded prompt, as deterministic backstops the LLM
-can't soften (`review_core.finalize_findings`'s synthetic EVAL-01 finding; `grant_check.py`'s
-GRANT-01 findings) — so overriding them can't just mean "edit the rules_block text" the way the
-other 7 work. `eval01_config()` is the second half of the merge for EVAL-01 specifically.
-GRANT-01 is deliberately NOT made configurable here: its authoritative run is `scripts/
-check_grants.py` in CI, executed by the prod SP on a self-hosted runner that has no Lakebase
-connectivity to this app's store — threading admin config into it would mean giving CI a database
-dependency it doesn't otherwise have, a bigger change than this slice takes on.
+EVAL-01 is enforced outside the LLM-grounded prompt as a deterministic backstop the LLM cannot
+soften. `eval01_config()` is the second half of the merge for that rule specifically. ENV-01 and
+AUDIENCE-01 are enforced by the content workflow and are intentionally not store-configurable.
 """
 from __future__ import annotations
 
