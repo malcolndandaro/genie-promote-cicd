@@ -19,6 +19,7 @@ injectable-client pattern.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import time
 import urllib.error
@@ -29,6 +30,7 @@ from change_request import (
     ChangeRequestObservation,
     CheckObservation,
     DeploymentObservation,
+    DeploymentStepObservation,
     RevisionPair,
     reject_mismatched_deployment,
 )
@@ -48,6 +50,15 @@ _NO_DEPLOY = {"status": "none", "conclusion": None, "waiting_approval": False, "
               "run_id": None, "approver": None, "source_sha": None}
 _ATTEMPT_PREFIX = "DEPLOY_ATTEMPT:"
 _ATTEMPT_STATES = {"running", "operational_failed", "partial_failed", "succeeded"}
+
+
+@dataclasses.dataclass(frozen=True)
+class _DeploymentRunEvidence:
+    """Best-effort enrichment from one GitHub Actions jobs read."""
+
+    steps: tuple[DeploymentStepObservation, ...] = ()
+    attempt: dict | None = None
+    failure_detail: dict | None = None
 
 
 def _aggregate_checks(runs: list) -> str:
@@ -370,12 +381,11 @@ class GitHubApp:
         # calls below). Only fetched on a failing verdict, so the happy-path poll pays nothing extra.
         checks_detail = self._checks_detail(runs) if checks == "failure" else None
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
-        attempt = self._deployment_attempt(deploy["run_id"]) if deploy.get("run_id") else None
-        # Fix C: WHY the DEPLOY failed (e.g. audience reconciliation failing mid-attempt) —
-        # same "only on a failing verdict" gating as checks_detail, no new bot permission
-        # (actions:read already covers /jobs; annotations reuse the checks_detail scope).
-        deploy_detail = (self._deploy_detail(deploy["run_id"], deploy["run_url"])
-                         if deploy["run_id"] and deploy["conclusion"] == "failure" else None)
+        run_evidence = (self._deployment_run_evidence(deploy["run_id"], deploy["run_url"])
+                        if deploy.get("run_id") else _DeploymentRunEvidence())
+        attempt = run_evidence.attempt
+        deploy_detail = (run_evidence.failure_detail
+                         if deploy["conclusion"] == "failure" else None)
         # A merged PR was approvable by definition; otherwise read the live PR-review decision.
         review_decision = "approved" if merged else self._pr_review_decision(number)
         revisions = self._revision_pair(number, head_sha)
@@ -398,6 +408,7 @@ class GitHubApp:
             approver=deploy["approver"],
             revisions=deploy_revisions,
             attempt=attempt,
+            steps=run_evidence.steps,
         )
         observation = ChangeRequestObservation(
             provider="github",
@@ -555,64 +566,55 @@ class GitHubApp:
                 "waiting_approval": status == "waiting", "run_url": wf.get("html_url"),
                 "run_id": run_id, "approver": approver, "source_sha": wf.get("head_sha")}
 
-    def _deploy_detail(self, run_id: int, run_url: str | None) -> dict | None:
-        """PT-friendly detail for a FAILED deploy run (Fix C — mirrors G8's `_checks_detail`, one
-        level down: a deploy failure is a WORKFLOW JOB failing, not a PR check-run). Walks the
-        run's jobs for the first step with `conclusion == "failure"`, and — best-effort — that
-        job's own check-run annotations (a job IS a check run on GitHub Actions; `check_run_url`
-        carries its id), summarized with the SAME noise filtering as `_check_run_summary`.
-        Degrades to `None` on any hiccup — `get_status` must never fail because this enrichment
-        did (same contract as `_checks_detail`)."""
-        try:
-            _, body = self._api(
-                "GET", self._repo_path(f"/actions/runs/{run_id}/jobs"), "workflow run jobs")
-            for job in (body or {}).get("jobs", []):
-                failed_step = next(
-                    (s for s in (job.get("steps") or []) if s.get("conclusion") == "failure"), None)
-                if failed_step is None:
-                    continue
-                return {
-                    "failed_step": failed_step.get("name") or job.get("name") or "step",
-                    "summary": _truncate(self._job_annotations_summary(job)),
-                    "details_url": job.get("html_url") or run_url,
-                }
-            return None
-        except Exception:  # noqa: BLE001 — a detail-fetch hiccup must not break the status read
-            return None
+    def _deployment_run_evidence(self, run_id: int, run_url: str | None) -> _DeploymentRunEvidence:
+        """Read the provider's exact job steps + Attempt evidence through one deep interface.
 
-    def _deployment_attempt(self, run_id: int) -> dict | None:
-        """Best-effort canonical staged-deploy evidence from this workflow run's annotations."""
+        Step names/statuses are preserved as GitHub reports them, so the support UI correlates 1:1
+        with the runner. Annotations remain supplementary evidence for mutation/revision facts.
+        Any enrichment hiccup degrades safely without breaking the authoritative phase read.
+        """
         try:
             _, body = self._api(
                 "GET", self._repo_path(f"/actions/runs/{run_id}/jobs"), "workflow run jobs")
+            steps: list[DeploymentStepObservation] = []
             annotations: list = []
+            failure_detail = None
             for job in (body or {}).get("jobs", []):
+                job_url = job.get("html_url") or run_url
+                job_annotations = []
                 check_run_url = job.get("check_run_url") or ""
                 check_id = check_run_url.rstrip("/").rsplit("/", 1)[-1]
-                if not check_id:
-                    continue
-                _, found = self._api(
-                    "GET", self._repo_path(f"/check-runs/{check_id}/annotations"),
-                    "deployment attempt annotations")
-                annotations.extend(found or [])
-            return _parse_deployment_attempt_annotations(annotations)
-        except Exception:  # noqa: BLE001 — evidence enrichment never breaks the status poll
-            return None
-
-    def _job_annotations_summary(self, job: dict) -> str:
-        """Best-effort annotations for a failing job, via its check-run id (parsed from
-        `check_run_url`, e.g. `.../check-runs/12345`). "" if the job carries none or the fetch
-        hiccups — the caller's fallback is just failed_step + details_url."""
-        check_run_url = job.get("check_run_url") or ""
-        run_id = check_run_url.rstrip("/").rsplit("/", 1)[-1]
-        if not run_id:
-            return ""
-        try:
-            _, annotations = self._api(
-                "GET", self._repo_path(f"/check-runs/{run_id}/annotations"), "check run annotations")
-        except GitHubError:
-            return ""
-        return _summarize_annotations(annotations or [])
+                if check_id:
+                    try:
+                        _, found = self._api(
+                            "GET", self._repo_path(f"/check-runs/{check_id}/annotations"),
+                            "deployment run annotations")
+                        job_annotations = found or []
+                        annotations.extend(job_annotations)
+                    except Exception:  # noqa: BLE001 — steps remain useful without annotations
+                        job_annotations = []
+                for raw in (job.get("steps") or []):
+                    steps.append(DeploymentStepObservation(
+                        name=raw.get("name") or job.get("name") or "step",
+                        status=raw.get("status"),
+                        conclusion=raw.get("conclusion"),
+                        number=raw.get("number"),
+                        job_name=job.get("name"),
+                        details_url=job_url,
+                    ))
+                    if failure_detail is None and raw.get("conclusion") == "failure":
+                        failure_detail = {
+                            "failed_step": raw.get("name") or job.get("name") or "step",
+                            "summary": _truncate(_summarize_annotations(job_annotations)),
+                            "details_url": job_url,
+                        }
+            return _DeploymentRunEvidence(
+                steps=tuple(steps),
+                attempt=_parse_deployment_attempt_annotations(annotations),
+                failure_detail=failure_detail,
+            )
+        except Exception:  # noqa: BLE001 — enrichment never breaks the status read
+            return _DeploymentRunEvidence()
 
     def audit_facts(self, number: int) -> dict:
         """GitHub-sourced governance identities + timestamps for the durable audit trail (LB4).

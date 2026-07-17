@@ -74,6 +74,21 @@ class CheckObservation:
 
 
 @dataclasses.dataclass(frozen=True)
+class DeploymentStepObservation:
+    """One provider-reported workflow step, preserved verbatim for operator correlation."""
+
+    name: str
+    status: str | None
+    conclusion: str | None
+    number: int | None
+    job_name: str | None
+    details_url: str | None
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
 class DeploymentObservation:
     status: str
     conclusion: str | None
@@ -83,12 +98,14 @@ class DeploymentObservation:
     approver: str | None
     revisions: RevisionPair | None = None
     attempt: Mapping | None = None
+    steps: tuple[DeploymentStepObservation, ...] = ()
     rejected: bool = False
     rejection_reason: str | None = None
 
     def to_dict(self) -> dict:
         out = dataclasses.asdict(self)
         out["revisions"] = self.revisions.to_dict() if self.revisions else None
+        out["steps"] = [step.to_dict() for step in self.steps]
         return out
 
 

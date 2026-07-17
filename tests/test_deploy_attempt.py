@@ -90,7 +90,8 @@ def test_mid_deploy_failure_is_partial_and_records_completed_stages_and_targets(
 def test_success_order_is_fixed_audience_last_and_unrelated_acl_is_preserved():
     operations = _Operations()
     evidence = _evidence()
-    assert deploy_attempt.run_attempt(operations, evidence, _Emitter()) == 0
+    emitter = _Emitter()
+    assert deploy_attempt.run_attempt(operations, evidence, emitter) == 0
     assert operations.calls == [
         "preflight", "bundle_deploy", "resolve_space", "assert_app_manage",
         "reconcile_audience", "verify_live_state",
@@ -98,6 +99,10 @@ def test_success_order_is_fixed_audience_last_and_unrelated_acl_is_preserved():
     assert operations.calls.index("reconcile_audience") > operations.calls.index("assert_app_manage")
     assert evidence.completed_stages == ["preflight", *deploy_attempt.MUTATION_STAGES]
     assert evidence.terminal_state == "succeeded"
+    # GitHub retains at most 10 notice annotations from one step. Keep the canonical Attempt stream
+    # below that ceiling so the final `succeeded` evidence is never dropped (regression: 15 emits
+    # left the app stuck at verify_live_state/running after a green workflow).
+    assert len(emitter.states) == 9
     assert operations.live["unrelated"] == "CAN_EDIT"
 
 

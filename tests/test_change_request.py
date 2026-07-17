@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import sys
 
@@ -52,6 +53,22 @@ def test_canonical_observation_keeps_provider_payloads_out_and_legacy_aliases_te
     assert wire["deployment"]["revisions"] == pair.to_dict()
     assert wire["deploy"] == wire["deployment"]
     assert "workflow_runs" not in wire and "pull_request" not in wire
+
+
+def test_deployment_steps_round_trip_through_the_provider_neutral_observation():
+    observation = _observation(None)
+    step = change_request.DeploymentStepObservation(
+        name="Safe staged deployment", status="completed", conclusion="failure", number=9,
+        job_name="Promote to prod", details_url="https://github.example/job/9",
+    )
+    wire = dataclasses.replace(
+        observation,
+        deployment=dataclasses.replace(observation.deployment, steps=(step,)),
+    ).to_dict()
+    assert wire["deploy"]["steps"] == [{
+        "name": "Safe staged deployment", "status": "completed", "conclusion": "failure",
+        "number": 9, "job_name": "Promote to prod", "details_url": "https://github.example/job/9",
+    }]
 
 
 def test_revision_mismatch_rejects_deployment_observation():

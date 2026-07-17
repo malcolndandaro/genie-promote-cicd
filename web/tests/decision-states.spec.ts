@@ -28,6 +28,17 @@ const attempt = (state: string, mutationStarted: boolean, runAttempt = 1) => ({
   reason: state.includes('failed') ? 'InvalidParameterValue: principal unavailable' : null,
   run_url: 'https://github.com/o/r/actions/runs/900', terminal_state: state, sequence: 8,
 });
+const githubSteps = (stagedConclusion: string = 'failure') => [
+  { name: 'Set up job', status: 'completed', conclusion: 'success', number: 1,
+    job_name: 'Promote to prod (Steward approval)', details_url: 'https://github.com/o/r/actions/runs/900/jobs/1' },
+  { name: 'Checkout content (merged main)', status: 'completed', conclusion: 'success', number: 2,
+    job_name: 'Promote to prod (Steward approval)', details_url: 'https://github.com/o/r/actions/runs/900/jobs/1' },
+  { name: 'Safe staged deployment (preflight + forward-only reconciliation)', status: 'completed',
+    conclusion: stagedConclusion, number: 9, job_name: 'Promote to prod (Steward approval)',
+    details_url: 'https://github.com/o/r/actions/runs/900/jobs/1' },
+  { name: 'Post Checkout content (merged main)', status: 'completed', conclusion: 'skipped', number: 10,
+    job_name: 'Promote to prod (Steward approval)', details_url: 'https://github.com/o/r/actions/runs/900/jobs/1' },
+];
 
 async function start(page: Page, review: any, statuses: any[]): Promise<void> {
   let poll = 0;
@@ -88,16 +99,22 @@ test('partial failure shows changed production and exact support evidence withou
   const partial = attempt('partial_failed', true);
   await start(page, cleanReview, [{ ...baseStatus, merged: true, phase: 'deploy_failed', deploy: {
     status: 'completed', conclusion: 'failure', waiting_approval: false,
-    run_url: partial.run_url, attempt: partial,
+    run_url: partial.run_url, attempt: partial, steps: githubSteps(),
   } }]);
   await expect(page.getByRole('heading', { name: 'A publicação parou depois de alterar produção' })).toBeVisible();
   await expect(page.getByText('Produção mudou parcialmente', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toHaveCount(0);
 
   await page.getByText('Detalhes para suporte e auditoria', { exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Etapas técnicas do deploy em produção' })).toBeVisible();
-  await expect(page.getByText('Evidência da run de deploy', { exact: true })).toBeVisible();
-  await expect(page.locator('.attempt-timeline li[data-state="failed"]')).toContainText('Público');
+  await expect(page.getByRole('heading', { name: 'Steps reais do job de deploy' })).toBeVisible();
+  await expect(page.getByText('GitHub Actions · fonte oficial', { exact: true })).toBeVisible();
+  await expect(page.locator('.deploy-steps li')).toHaveCount(4);
+  await expect(page.locator('.deploy-steps li[data-state="failed"]')).toContainText(
+    'Safe staged deployment (preflight + forward-only reconciliation)',
+  );
+  await expect(page.locator('.deploy-steps li[data-state="failed"]')).toContainText('Falhou');
+  await expect(page.getByText('Resolver Space', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Deployment Attempt' })).toBeVisible();
   await expect(page.getByText('github:900:1', { exact: true })).toBeVisible();
   await expect(page.getByText('receivables=space-prod-1', { exact: true })).toBeVisible();
   await expect(page.getByText(/InvalidParameterValue/)).toBeVisible();
@@ -144,17 +161,15 @@ test('a partial failure keeps polling and becomes KIP resuming with the same rev
   await expect(page.getByText('a'.repeat(40), { exact: true })).toBeVisible();
 });
 
-test('Attempt timeline becomes vertical and stays inside a phone viewport', async ({ page }) => {
+test('GitHub job steps stay readable and inside a phone viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const partial = attempt('partial_failed', true);
   await start(page, cleanReview, [{ ...baseStatus, merged: true, phase: 'deploy_failed', deploy: {
-    status: 'completed', conclusion: 'failure', waiting_approval: false, run_url: partial.run_url, attempt: partial,
+    status: 'completed', conclusion: 'failure', waiting_approval: false, run_url: partial.run_url,
+    attempt: partial, steps: githubSteps(),
   } }]);
   await page.getByText('Detalhes para suporte e auditoria', { exact: true }).click();
-  const columns = await page.locator('.attempt-timeline ol').evaluate((node) =>
-    getComputedStyle(node).gridTemplateColumns.split(' ').length,
-  );
-  expect(columns).toBe(1);
+  await expect(page.locator('.deploy-steps li')).toHaveCount(4);
   const widths = await page.evaluate(() => ({ client: document.documentElement.clientWidth,
     scroll: document.documentElement.scrollWidth }));
   expect(widths.scroll).toBeLessThanOrEqual(widths.client);

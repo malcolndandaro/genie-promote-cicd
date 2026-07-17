@@ -637,6 +637,40 @@ def test_status_deploy_failed():
     assert s["phase"] == "deploy_failed"
 
 
+def test_deploy_steps_preserve_github_job_names_order_and_statuses_one_to_one():
+    jobs = {9: [{
+        "id": 101, "name": "Promote to prod (Steward approval)",
+        "status": "completed", "conclusion": "success",
+        "html_url": "https://github.com/o/r/actions/runs/9/jobs/101",
+        "check_run_url": "https://api.github.com/repos/o/r/check-runs/101",
+        "steps": [
+            {"name": "Set up job", "status": "completed", "conclusion": "success", "number": 1},
+            {"name": "Safe staged deployment (preflight + forward-only reconciliation)",
+             "status": "completed", "conclusion": "success", "number": 9},
+            {"name": "Post Checkout content (merged main)",
+             "status": "completed", "conclusion": "skipped", "number": 10},
+        ],
+    }]}
+    s = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "success",
+          "html_url": "r", "id": 9}], jobs=jobs,
+    ).get_status(1)
+    assert s["deploy"]["steps"] == [
+        {"name": "Set up job", "status": "completed", "conclusion": "success", "number": 1,
+         "job_name": "Promote to prod (Steward approval)",
+         "details_url": "https://github.com/o/r/actions/runs/9/jobs/101"},
+        {"name": "Safe staged deployment (preflight + forward-only reconciliation)",
+         "status": "completed", "conclusion": "success", "number": 9,
+         "job_name": "Promote to prod (Steward approval)",
+         "details_url": "https://github.com/o/r/actions/runs/9/jobs/101"},
+        {"name": "Post Checkout content (merged main)", "status": "completed",
+         "conclusion": "skipped", "number": 10,
+         "job_name": "Promote to prod (Steward approval)",
+         "details_url": "https://github.com/o/r/actions/runs/9/jobs/101"},
+    ]
+
+
 # --- Fix C: "why did the DEPLOY fail?" without leaving the app ------------------------------
 
 
@@ -764,22 +798,22 @@ def test_deploy_detail_none_when_the_jobs_fetch_errors():
     assert s["deploy_detail"] is None
 
 
-def test_deploy_detail_never_breaks_the_status_read_on_an_unexpected_error(monkeypatch):
+def test_deploy_enrichment_never_breaks_the_status_read_on_an_unexpected_error():
     jobs = {9: [{
         "id": 101, "name": "deploy", "conclusion": "failure", "html_url": "u",
         "check_run_url": "https://api.github.com/repos/o/r/check-runs/101",
-        "steps": [{"name": "Apply declared access", "status": "completed", "conclusion": "failure"}],
+        # Malformed provider payload forces the deep enrichment module's catch-all path.
+        "steps": ["not-a-step-object"],
     }]}
     gh = _status_transport(
         _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
         [{"name": "deploy", "status": "completed", "conclusion": "failure", "html_url": "r", "id": 9}],
         jobs=jobs,
     )
-    monkeypatch.setattr(gh, "_job_annotations_summary",
-                        lambda job: (_ for _ in ()).throw(RuntimeError("boom")))
     s = gh.get_status(1)
     assert s["phase"] == "deploy_failed"   # the status read itself is unharmed
     assert s["deploy_detail"] is None      # the enrichment degrades wholesale, not partially
+    assert s["deploy"]["steps"] == []
 
 
 def test_status_closed_not_merged():

@@ -265,6 +265,16 @@ export interface DeploymentAttemptEvidence {
   sequence?: number;
 }
 
+/** One workflow step exactly as reported by the deployment provider's jobs endpoint. */
+export interface DeploymentStep {
+  name: string;
+  status: string | null;
+  conclusion: string | null;
+  number: number | null;
+  job_name: string | null;
+  details_url: string | null;
+}
+
 export interface PromoteStatus {
   provider?: string;
   external_id?: string;
@@ -289,6 +299,7 @@ export interface PromoteStatus {
     rejected?: boolean;
     rejection_reason?: string | null;
     attempt?: DeploymentAttemptEvidence | null;
+    steps?: DeploymentStep[];
   };
   /** Fix C: WHY the deploy failed — only populated when `deploy.conclusion === 'failure'` (the
    * bot degrades to `null` on any GitHub read hiccup, same contract as `checks_detail`). */

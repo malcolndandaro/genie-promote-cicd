@@ -131,7 +131,6 @@ def run_attempt(operations: Operations, evidence: AttemptEvidence,
         if stage == "bundle_deploy":
             # The CLI can mutate before returning an error, so mark this before invoking it.
             evidence.mutation_started = True
-        emitter.emit()
         try:
             actions[stage]()
         except BaseException as exc:  # noqa: BLE001 - convert to durable partial evidence
