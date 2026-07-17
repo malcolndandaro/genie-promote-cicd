@@ -86,7 +86,7 @@ async function openFromHistory(
   await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();
   // S3: history is nested under its space now — expand the row, then open the attempt.
   await page.getByRole('button', { name: /Expandir histórico de/ }).click();
-  await page.getByRole('button', { name: /Abrir/ }).click();
+  await page.getByRole('button', { name: 'Abrir promoção: Recebíveis' }).click();
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 }
 
@@ -138,7 +138,7 @@ test('the Steward view reflects a completed deploy (no approve link)', async ({ 
     review: cleanReview, status: deployStatus('deployed', { approver: 'pedro-gh' }),
   });
   // The PR banner's phase badge already reflects the deployed state.
-  await expect(page.getByText('Implantado em produção')).toBeVisible();
+  await expect(page.locator('.pr-banner').getByText('Implantado em produção')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
@@ -147,6 +147,6 @@ test('the Steward view reflects a failed deploy (no approve link)', async ({ pag
     viewer: 'pedro@databricks.com', isAdmin: true, requester: 'malcoln@databricks.com',
     review: cleanReview, status: deployStatus('deploy_failed'),
   });
-  await expect(page.getByText('Falha no deploy')).toBeVisible();
+  await expect(page.locator('.pr-banner').getByText('Falha no deploy')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });

@@ -108,7 +108,7 @@ test('reflects the live PR status (polled) as a badge in the PR banner', async (
   await confirmPilotPromotion(page);
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
-  await expect(page.getByText('Checagens em execução')).toBeVisible(); // live phase badge (polled)
+  await expect(page.locator('.pr-banner').getByText('Checagens em execução')).toBeVisible(); // live phase badge (polled)
 });
 
 test('shows the animated running pipeline while the promotion is in flight', async ({ page }) => {

@@ -92,7 +92,7 @@ test('recovers the stored promotion on load WITHOUT re-running the reviewer', as
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   await expect(page.getByText('AUDIENCE-01', { exact: true })).toBeVisible();
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
-  await expect(page.getByText('Checagens em execução')).toBeVisible(); // live status resumed
+  await expect(page.locator('.pr-banner').getByText('Checagens em execução')).toBeVisible(); // live status resumed
   await expect(page.getByRole('link', { name: /Ver no GitHub/ })).toHaveAttribute('href', PR.url);
 
   // The audit trail (LB4): GitHub-attributed governance events. Scope to the audit section so the

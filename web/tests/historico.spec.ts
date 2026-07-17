@@ -50,11 +50,25 @@ test('a non-admin sees only their promotions; expanding a row and opening it sho
   await expect(page.getByText('Todas (Steward/Admin)')).toHaveCount(0); // no scope toggle for a non-admin
 
   await page.getByRole('button', { name: /Expandir histórico de/ }).click();
-  await page.getByRole('button', { name: /Abrir/ }).click();
-  // Switches to the review view and renders the STORED snapshot — no reviewer re-run.
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
-  await expect(page.getByText('🟢 Pronto.')).toBeVisible();
+  await page.getByRole('button', { name: 'Abrir promoção: Recebíveis' }).click();
+  // The exact STORED snapshot fills the contextual right panel — no route change and no re-run.
+  await expect(page).toHaveURL(/#\/espacos$/);
+  const panel = page.locator('.working-panel');
+  await expect(panel.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(panel.getByText('🟢 Pronto.')).toBeVisible();
   expect(promoteCalled).toBe(false);
+});
+
+test('clicking a Space card opens its most recent run in the right panel', async ({ page }) => {
+  routes(page, { isAdmin: false });
+  await page.goto('/#/espacos');
+
+  await page.getByRole('button', { name: 'Abrir promoção mais recente: Recebíveis' }).click();
+
+  await expect(page).toHaveURL(/#\/espacos$/);
+  const panel = page.locator('.working-panel');
+  await expect(panel.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(panel.getByText('🟢 Pronto.')).toBeVisible();
 });
 
 test('an admin gets the scope toggle and can list all promotions, grouped by space', async ({ page }) => {
@@ -74,7 +88,7 @@ test('the open promotion on a space is visible on its row before expanding (D7)'
   await page.goto('/');
   await page.getByRole('link', { name: 'Meus espaços' }).click();
 
-  // "Recebíveis" has an open (non-terminal) promotion by ana — visible on the collapsed row.
-  await expect(page.getByText('Aguardando merge')).toBeVisible();
+  // The resumed run's live phase (not its older list snapshot) is visible on the collapsed row.
+  await expect(page.getByLabel('Spaces disponíveis').getByText('Checagens em execução')).toBeVisible();
   await expect(page.getByText('— ana@databricks.com')).toBeVisible();
 });

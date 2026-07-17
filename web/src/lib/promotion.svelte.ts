@@ -52,6 +52,9 @@ export class Promotion {
    * espaços" gates the inline pipeline/review on this so it appears only when the user actually
    * requests a promotion, never automatically pinned to the last one at the bottom of the list. */
   initiatedHere = $state(false);
+  /** A stored promotion explicitly selected from the Space/history list is being loaded. Kept
+   * separate from `reviewing`: opening a snapshot must never look like the reviewer is running. */
+  opening = $state(false);
   /** The append-only, GitHub-attributed audit trail (LB4) — accrues as the poll reconciles. */
   audit = $state<AuditEvent[]>([]);
 
@@ -121,6 +124,7 @@ export class Promotion {
     this.audit = [];
     this.requesterEmail = this.viewerEmail; // a fresh flow is requested by the viewer
     this.initiatedHere = false; // a bare selection isn't yet a requested promotion
+    this.opening = false;
     this.noChange = false;
     this.pendingAudienceSpec = undefined;
     this.pendingProdTitle = undefined;
@@ -247,15 +251,20 @@ export class Promotion {
     // during the fetch. The id guard drops a stale result if a different row is opened mid-flight.
     this.select(null);
     this.promotionId = summary.id;
+    this.opening = true;
     try {
       const detail = await getPromotionDetail(summary.id);
       if (this.promotionId !== summary.id) return; // another open() raced in — drop this result
       this._apply(summary, detail);
       this.phase = detail.review ? 'reviewed' : 'idle';
+      this.initiatedHere = true; // explicit selection: render this snapshot in Meus Espaços
     } catch (e) {
       if (this.promotionId !== summary.id) return;
       this.error = e instanceof Error ? e.message : String(e);
       this.phase = 'error';
+      this.initiatedHere = true;
+    } finally {
+      if (this.promotionId === summary.id) this.opening = false;
     }
   }
 

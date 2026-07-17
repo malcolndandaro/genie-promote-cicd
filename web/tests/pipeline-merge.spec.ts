@@ -208,14 +208,14 @@ test('deployed but prod_space_id could not be resolved (no/ambiguous title match
     }),
   );
   await promote(page, DEPLOYED()); // no prod_space_id on the status payload
-  await expect(page.getByText('Implantado em produção')).toBeVisible(); // deployed, still rendered
+  await expect(page.locator('.pr-banner').getByText('Implantado em produção')).toBeVisible(); // deployed, still rendered
   await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
 });
 
 test('deployed with prod_space_id but no prod_host configured → the deep-link is omitted', async ({ page }) => {
   // beforeEach's default /api/whoami mock has no prod_host — no override needed here.
   await promote(page, { ...DEPLOYED(), prod_space_id: 'prod-999' });
-  await expect(page.getByText('Implantado em produção')).toBeVisible();
+  await expect(page.locator('.pr-banner').getByText('Implantado em produção')).toBeVisible();
   await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
 });
 

@@ -75,10 +75,11 @@
     configuracoes: 'Configurações',
   };
 
-  // Open a promotion's detail via its shareable deep-link (#/promocoes/:id) — the detail view loads
-  // the STORED snapshot (no reviewer re-run).
+  // Keep history exploration contextual: clicking a Space/run fills the right-hand panel on the
+  // same page with its STORED snapshot (no reviewer re-run). Shared #/promocoes/:id links remain
+  // supported by PromotionDetail for URLs opened directly.
   function openPromotion(summary: PromotionSummary): void {
-    router.navigate('promocoes', summary.id);
+    void promotion.open(summary);
   }
 </script>
 

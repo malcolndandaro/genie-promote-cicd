@@ -20,6 +20,11 @@
     busy?: boolean;
     disabled?: boolean;
     selected?: boolean;
+    /** When this Space owns the run currently shown on the right, its live/selected phase takes
+     * precedence over the list snapshot so both sides can never contradict each other. */
+    activePhase?: string | null;
+    activeRequester?: string | null;
+    activeTerminal?: boolean;
   }
   let {
     resource,
@@ -31,13 +36,19 @@
     busy = false,
     disabled = false,
     selected = false,
+    activePhase = null,
+    activeRequester = null,
+    activeTerminal = false,
   }: Props = $props();
 
   const latest = $derived(promotions[0] ?? null);
-  const chip = $derived(latest ? phaseChip(latest.current_phase) : null);
+  const displayedPhase = $derived(activePhase ?? latest?.current_phase ?? null);
+  const chip = $derived(displayedPhase ? phaseChip(displayedPhase) : null);
   // D7: an open (non-terminal) latest promotion IS the status shown here — so a second promoter
   // sees "who already has this in flight" before clicking anything, not just after.
-  const showsRequester = $derived(!!latest && !latest.terminal && !!latest.requester_email);
+  const displayedRequester = $derived(activePhase ? activeRequester : latest?.requester_email);
+  const displayedTerminal = $derived(activePhase ? activeTerminal : (latest?.terminal ?? false));
+  const showsRequester = $derived(!!displayedPhase && !displayedTerminal && !!displayedRequester);
 </script>
 
 <div class="espaco-row">
@@ -52,10 +63,10 @@
     >
       <span class="espaco-row__chevron" class:espaco-row__chevron--open={expanded} aria-hidden="true">▸</span>
     </button>
-    {#if latest && chip}
+    {#if chip}
       <Badge tone={chip.tone}>{chip.label}</Badge>
       {#if showsRequester}
-        <span class="muted text-xs">— {latest.requester_email}</span>
+        <span class="muted text-xs">— {displayedRequester}</span>
       {/if}
       <span class="muted text-xs">
         {promotions.length} {promotions.length === 1 ? 'promoção' : 'promoções'}
@@ -65,7 +76,14 @@
     {/if}
   </div>
 
-  <SpaceCard {resource} {onPromote} {busy} {disabled} {selected} />
+  <SpaceCard
+    {resource}
+    {onPromote}
+    onOpen={latest ? () => onOpenPromotion(latest) : undefined}
+    {busy}
+    {disabled}
+    {selected}
+  />
 
   {#if expanded && promotions.length > 0}
     <div class="espaco-row__history">

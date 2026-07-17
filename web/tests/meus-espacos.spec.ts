@@ -98,6 +98,37 @@ test('confirming the panel shows a busy state while the promotion is in flight',
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
 });
 
+test('the Space status follows the active run instead of a stale deployed history snapshot', async ({ page }) => {
+  const deployed = {
+    id: 'p-old', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
+    requester_email: 'malcoln@databricks.com', current_phase: 'deployed', terminal: true,
+    created_at: '2026-07-16T10:00:00Z', updated_at: '2026-07-16T11:00:00Z',
+  };
+  const review = {
+    findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
+    eval: { status: 'pass', summary: 'ok' }, allowlist_violations: [], timeline: [],
+  };
+  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [deployed] } }));
+  await page.route('**/api/promote', (route) => route.fulfill({ json: {
+    promotion_id: 'p-new', review, pr: { number: 2, url: 'https://gh/pr/2' },
+  } }));
+  await page.route('**/api/promote/2/status', (route) => route.fulfill({ json: {
+    pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+    deploy: { status: 'queued', conclusion: null, waiting_approval: true, run_url: 'https://gh/run/2' },
+    pr_url: 'https://gh/pr/2', phase: 'awaiting_approval',
+  } }));
+
+  await page.goto('/#/espacos');
+  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await confirmPilotPromotion(page);
+
+  const row = page.locator('.espaco-row').filter({ hasText: 'Recebíveis' });
+  await expect(row.locator('.espaco-row__summary').getByText('Aguardando aprovação do Steward')).toBeVisible();
+  await expect(row.locator('.espaco-row__summary').getByText('Implantado em produção')).toHaveCount(0);
+  await expect(page.locator('.working-panel').getByText('A publicação aguarda a decisão do Steward')).toBeVisible();
+});
+
 test('each space card carries a dev env badge next to the kind badge', async ({ page }) => {
   await page.route('**/api/spaces', oneSpace);
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
@@ -220,7 +251,14 @@ test('Prod to Dev export is contextual and only enabled after a deployed version
   await page.route('**/api/spaces', oneSpace);
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [deployed] } }));
   await page.route('**/api/promotions/p-live', (route) => route.fulfill({ json: {
-    promotion: deployed, review: null, live_status: { phase: 'deployed' }, audit: [],
+    promotion: deployed,
+    review: { findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
+      eval: { status: 'pass', summary: 'ok' }, allowlist_violations: [], timeline: [] },
+    pr: { number: 12, url: 'https://gh/pr/12' },
+    live_status: { phase: 'deployed', pr_state: 'closed', merged: true, checks: 'success',
+      review_decision: 'approved', deploy: { status: 'completed', conclusion: 'success',
+        waiting_approval: false, run_url: 'https://gh/run/12' }, pr_url: 'https://gh/pr/12' },
+    audit: [],
   } }));
   await page.goto('/');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
@@ -228,7 +266,8 @@ test('Prod to Dev export is contextual and only enabled after a deployed version
   const exportButton = page.getByRole('button', { name: 'Exportar versão Prod para Dev' });
   await expect(exportButton).toBeEnabled();
   await exportButton.click();
-  await expect(page).toHaveURL(/#\/promocoes\/p-live$/);
+  await expect(page).toHaveURL(/#\/espacos$/);
+  await expect(page.locator('.working-panel').getByRole('button', { name: 'Exportar para dev' })).toBeVisible();
 });
 
 test('author journey has no document-level horizontal overflow on mobile', async ({ page }) => {

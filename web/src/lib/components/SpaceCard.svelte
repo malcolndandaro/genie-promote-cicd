@@ -16,23 +16,35 @@
     /** THIS card is the one currently selected in the confirmation step (G3) — highlighted even
      * while disabled, so it stays clear which space the panel below is bound to. */
     selected?: boolean;
+    /** Open this Space's most recent stored promotion in the contextual panel. */
+    onOpen?: () => void;
   }
-  let { resource, onPromote, busy = false, disabled = false, selected = false }: Props = $props();
+  let {
+    resource, onPromote, busy = false, disabled = false, selected = false, onOpen,
+  }: Props = $props();
 </script>
 
 <article class="space-card" class:space-card--selected={selected}>
-  <div class="space-card__top">
-    <span class="space-card__icon" aria-hidden="true"><Icon name="grid" size={18} /></span>
-    <div class="space-card__badges">
-      {#if resource.env}
-        <Badge tone={resource.env === 'prod' ? 'success' : 'neutral'}>
-          {resource.env === 'prod' ? 'prod' : 'dev'}
-        </Badge>
-      {/if}
-      <Badge tone="accent">{kindMeta(resource.kind).label}</Badge>
+  <button
+    type="button"
+    class="space-card__preview"
+    onclick={onOpen}
+    disabled={!onOpen}
+    aria-label={onOpen ? `Abrir promoção mais recente: ${resource.title}` : undefined}
+  >
+    <div class="space-card__top">
+      <span class="space-card__icon" aria-hidden="true"><Icon name="grid" size={18} /></span>
+      <div class="space-card__badges">
+        {#if resource.env}
+          <Badge tone={resource.env === 'prod' ? 'success' : 'neutral'}>
+            {resource.env === 'prod' ? 'prod' : 'dev'}
+          </Badge>
+        {/if}
+        <Badge tone="accent">{kindMeta(resource.kind).label}</Badge>
+      </div>
     </div>
-  </div>
-  <h3 class="space-card__title" title={resource.title}>{resource.title}</h3>
+    <h3 class="space-card__title" title={resource.title}>{resource.title}</h3>
+  </button>
   <div class="space-card__foot">
     <Button
       onclick={() => onPromote(resource)}
@@ -74,6 +86,25 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
+  }
+  .space-card__preview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+  }
+  .space-card__preview:not(:disabled) { cursor: pointer; }
+  .space-card__preview:disabled { cursor: default; }
+  .space-card__preview:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: var(--radius-sm);
   }
   .space-card__badges {
     display: flex;

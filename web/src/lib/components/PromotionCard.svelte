@@ -1,6 +1,5 @@
 <script lang="ts">
   import Badge from './Badge.svelte';
-  import Button from './Button.svelte';
   import StatusChip from './StatusChip.svelte';
   import { kindMeta } from '../resources';
   import type { PromotionSummary } from '../api';
@@ -22,34 +21,36 @@
 </script>
 
 <li class="promo">
-  <div class="promo__main">
-    <div class="promo__title">
-      <Badge tone="accent">{kindMeta(p.resource_kind as ResourceKind)?.label ?? p.resource_kind}</Badge>
-      <span class="promo__name" title={p.resource_title ?? p.resource_id}>
-        {p.resource_title ?? p.resource_id}
-      </span>
-    </div>
-    <div class="promo__meta">
-      <StatusChip phase={p.current_phase} />
-      {#if p.external_id && p.external_url}
-        <a class="promo__pr" href={p.external_url} target="_blank" rel="noopener noreferrer">
-          {p.change_provider === 'github' ? `PR #${p.external_id}` : `Mudança ${p.external_id}`} ↗
-        </a>
-      {:else if p.external_id}
-        <span class="promo__pr promo__pr--plain">
-          {p.change_provider === 'github' ? `PR #${p.external_id}` : `Mudança ${p.external_id}`}
-        </span>
-      {/if}
-      <time class="muted text-xs">{fmt(p.updated_at)}</time>
-    </div>
-  </div>
-  <Button
-    variant="outline"
+  <button
+    type="button"
+    class="promo__main"
     onclick={() => onOpen(p)}
-    ariaLabel={`Abrir promoção: ${p.resource_title ?? p.resource_id}`}
+    aria-label={`Abrir promoção: ${p.resource_title ?? p.resource_id}`}
   >
-    Abrir →
-  </Button>
+    <span class="promo__content">
+      <span class="promo__title">
+        <Badge tone="accent">{kindMeta(p.resource_kind as ResourceKind)?.label ?? p.resource_kind}</Badge>
+        <span class="promo__name" title={p.resource_title ?? p.resource_id}>
+          {p.resource_title ?? p.resource_id}
+        </span>
+      </span>
+      <span class="promo__meta">
+        <StatusChip phase={p.current_phase} />
+        {#if p.external_id}
+          <span class="promo__pr promo__pr--plain">
+            {p.change_provider === 'github' ? `PR #${p.external_id}` : `Mudança ${p.external_id}`}
+          </span>
+        {/if}
+        <time class="muted text-xs">{fmt(p.updated_at)}</time>
+      </span>
+    </span>
+    <span class="promo__open" aria-hidden="true">Abrir →</span>
+  </button>
+  {#if p.external_id && p.external_url}
+    <a class="promo__external" href={p.external_url} target="_blank" rel="noopener noreferrer">
+      {p.change_provider === 'github' ? `PR #${p.external_id}` : `Mudança ${p.external_id}`} ↗
+    </a>
+  {/if}
 </li>
 
 <style>
@@ -72,9 +73,29 @@
   }
   .promo__main {
     display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    min-width: 0;
+    flex: 1;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .promo__content {
+    display: flex;
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
+  }
+  .promo__main:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: var(--radius-sm);
   }
   .promo__title {
     display: flex;
@@ -101,5 +122,20 @@
   }
   .promo__pr--plain {
     color: var(--muted-foreground);
+  }
+  .promo__open {
+    padding: 0.45rem 0.75rem;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+    color: var(--foreground);
+    font-size: 0.8rem;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .promo__external {
+    color: var(--accent-hover);
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
 </style>

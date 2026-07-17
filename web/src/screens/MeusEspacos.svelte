@@ -35,14 +35,23 @@
     return getPromotions(s).catch(() => []);
   }
   let promotionsP = $state(loadPromotions('mine'));
+  // After the initial await, refresh history in the background as the active run advances. Keeping
+  // this separate from `promotionsP` avoids replacing the whole workspace with skeletons on every
+  // phase transition while still making the newly-created run/count immediately discoverable.
+  let refreshedPromotions = $state<PromotionSummary[] | null>(null);
+  let historyRefreshKey = '';
   function setScope(s: 'mine' | 'all'): void {
     scope = s;
+    refreshedPromotions = null;
+    historyRefreshKey = '';
     promotionsP = loadPromotions(s);
   }
 
   // `promotion` is the single source of truth for the selection — no parallel local state.
   const reload = () => {
     resourcesP = getResources();
+    refreshedPromotions = null;
+    historyRefreshKey = '';
     promotionsP = loadPromotions(scope);
     promotion.select(null); // a fresh list invalidates any prior (possibly gone) selection
   };
@@ -100,8 +109,10 @@
   // sort by most-recently-promoted; never-promoted spaces (empty history) sort last.
   function sortGroups(groups: EspacoGroup[]): EspacoGroup[] {
     return [...groups].sort((a, b) => {
-      const aOpen = a.promotions.some((p) => !p.terminal);
-      const bOpen = b.promotions.some((p) => !p.terminal);
+      const aActive = activePhaseFor(a.resource.id);
+      const bActive = activePhaseFor(b.resource.id);
+      const aOpen = aActive ? !TERMINAL_PHASES.has(aActive) : a.promotions.some((p) => !p.terminal);
+      const bOpen = bActive ? !TERMINAL_PHASES.has(bActive) : b.promotions.some((p) => !p.terminal);
       if (aOpen !== bOpen) return aOpen ? -1 : 1;
       const aDate = a.promotions[0]?.created_at ?? '';
       const bDate = b.promotions[0]?.created_at ?? '';
@@ -127,8 +138,8 @@
       return false;
     }
     if (statusFilter === 'all') return true;
-    const latest = group.promotions[0];
-    return !!latest && statusBucket(latest.current_phase) === statusFilter;
+    const phase = activePhaseFor(group.resource.id) ?? group.promotions[0]?.current_phase;
+    return !!phase && statusBucket(phase) === statusFilter;
   }
 
   let expandedIds = $state<Set<string>>(new Set());
@@ -137,6 +148,24 @@
     next.has(id) ? next.delete(id) : next.add(id);
     expandedIds = next;
   }
+
+  const TERMINAL_PHASES = new Set(['deployed', 'deploy_failed', 'revision_mismatch', 'closed']);
+  function activePhaseFor(resourceId: string): string | null {
+    if (!promotion.initiatedHere || promotion.resource?.id !== resourceId) return null;
+    return promotion.liveStatus?.phase
+      ?? (promotion.phase === 'reviewing' ? 'checks_running' : promotion.pr ? 'open' : null);
+  }
+
+  $effect(() => {
+    const id = promotion.promotionId;
+    if (!promotion.initiatedHere || !id) return;
+    const key = `${scope}:${id}:${promotion.liveStatus?.phase ?? promotion.phase}`;
+    if (key === historyRefreshKey) return;
+    historyRefreshKey = key;
+    void loadPromotions(scope).then((rows) => {
+      if (historyRefreshKey === key) refreshedPromotions = rows;
+    });
+  });
 </script>
 
 <div class="author-home">
@@ -157,7 +186,8 @@
       <Skeleton height="34rem" />
     </div>
   {:then [resources, promotions]}
-    {@const allGroups = sortGroups(groupBySpace(resources, promotions))}
+    {@const currentPromotions = refreshedPromotions ?? promotions}
+    {@const allGroups = sortGroups(groupBySpace(resources, currentPromotions))}
     {@const shownGroups = allGroups.filter(matchesFilter)}
     {@const selectedGroup = allGroups.find((group) => group.resource.id === promotion.resource?.id)}
 
@@ -199,6 +229,7 @@
             </div>
           {:else}
             {#each shownGroups as group (group.resource.id)}
+              {@const activePhase = activePhaseFor(group.resource.id)}
               <EspacoRow
                 resource={group.resource}
                 promotions={group.promotions}
@@ -209,13 +240,22 @@
                 busy={promotion.phase === 'reviewing' && promotion.resource?.id === group.resource.id}
                 disabled={promotion.phase === 'reviewing' && promotion.resource?.id !== group.resource.id}
                 selected={promotion.resource?.id === group.resource.id}
+                {activePhase}
+                activeRequester={activePhase ? promotion.requesterEmail : null}
+                activeTerminal={activePhase ? TERMINAL_PHASES.has(activePhase) : false}
               />
             {/each}
           {/if}
         </section>
 
         <section class="working-panel" aria-live="polite">
-          {#if confirming}
+          {#if promotion.opening}
+            <div class="working-panel__loading" aria-label="Carregando promoção selecionada">
+              <Skeleton height="3.5rem" />
+              <Skeleton height="10rem" />
+              <Skeleton height="16rem" />
+            </div>
+          {:else if confirming}
             {#key promotion.selectionSeq}
               <PromotionConfirm
                 {promotion}
@@ -362,6 +402,16 @@
     border: 1px dashed var(--border-strong);
     border-radius: var(--radius);
     background: color-mix(in srgb, var(--surface) 75%, transparent);
+  }
+  .working-panel__loading {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-5);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
   }
   .working-panel__empty > span { color: var(--accent-hover); font-size: 1.5rem; }
   .working-panel__empty h2 {
