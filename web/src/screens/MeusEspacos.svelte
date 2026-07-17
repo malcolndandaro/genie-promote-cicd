@@ -225,11 +225,7 @@
               />
             {/key}
           {:else if promotion.initiatedHere}
-            <div class="working-panel__handoff">
-              <p class="hero__crumb">Revisão iniciada</p>
-              <h2>Acompanhe a decisão logo abaixo</h2>
-              <p class="muted text-sm">O Space continua disponível em produção durante a revisão.</p>
-            </div>
+            <PromotionReview {promotion} userEmail={who?.email ?? null} {devHost} {prodHost} />
           {:else}
             <div class="working-panel__empty">
               <span aria-hidden="true">↖</span>
@@ -251,9 +247,6 @@
     </div>
   {/await}
 
-  {#if promotion.initiatedHere}
-    <PromotionReview {promotion} userEmail={who?.email ?? null} {devHost} {prodHost} />
-  {/if}
 </div>
 
 <style>
@@ -358,8 +351,7 @@
     min-width: 0;
     border-radius: var(--radius);
   }
-  .working-panel__empty,
-  .working-panel__handoff {
+  .working-panel__empty {
     min-height: 24rem;
     display: flex;
     flex-direction: column;
@@ -372,8 +364,7 @@
     background: color-mix(in srgb, var(--surface) 75%, transparent);
   }
   .working-panel__empty > span { color: var(--accent-hover); font-size: 1.5rem; }
-  .working-panel__empty h2,
-  .working-panel__handoff h2 {
+  .working-panel__empty h2 {
     margin-top: var(--space-2);
     font-family: var(--font-display, Georgia, serif);
   }

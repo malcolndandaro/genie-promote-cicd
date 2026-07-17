@@ -83,6 +83,14 @@ test('confirming the panel shows a busy state while the promotion is in flight',
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
+  // The pipeline replaces the right-hand confirmation panel immediately; it never drops below the
+  // full Space/history list or renders a second copy at the bottom of the page.
+  const workingPanel = page.locator('.working-panel');
+  await expect(workingPanel.getByText('Executando pipeline de promoção…')).toBeVisible();
+  await expect(workingPanel.getByLabel('Pipeline de promoção')).toBeVisible();
+  await expect(page.getByLabel('Pipeline de promoção')).toHaveCount(1);
+  await expect(page.getByText('Acompanhe a decisão logo abaixo')).toHaveCount(0);
+
   // The confirm button goes busy; the OTHER space's card stays disabled (already was, on selection).
   await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeDisabled();
