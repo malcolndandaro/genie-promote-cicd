@@ -92,3 +92,113 @@ test('the open promotion on a space is visible on its row before expanding (D7)'
   await expect(page.getByLabel('Spaces disponíveis').getByText('Checagens em execução')).toBeVisible();
   await expect(page.getByText('— ana@databricks.com')).toBeVisible();
 });
+
+test('a stale merged summary is reconciled to the live deployed status before the Space is clicked', async ({ page }) => {
+  const stale = {
+    ...mine[0],
+    id: 'p-stale',
+    pr_number: 13,
+    pr_url: 'https://gh/pr/13',
+    current_phase: 'merged',
+    terminal: false,
+  };
+  let releaseStatus!: () => void;
+  let markStatusStarted!: () => void;
+  const statusGate = new Promise<void>((resolve) => { releaseStatus = resolve; });
+  const statusStarted = new Promise<void>((resolve) => { markStatusStarted = resolve; });
+  await page.route('**/api/whoami', (r) =>
+    r.fulfill({ json: { email: 'ana@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }));
+  await page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
+  await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [stale] } }));
+  await page.route('**/api/promotions/p-stale', (r) => r.fulfill({ json: {
+    promotion: stale,
+    review,
+    pr: { number: 13, url: 'https://gh/pr/13' },
+    live_status: {
+      pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+      deploy: { status: 'none', conclusion: null, waiting_approval: false, run_url: null },
+      pr_url: 'https://gh/pr/13', phase: 'merged',
+    },
+    audit: [],
+  } }));
+  await page.route('**/api/promotions/p-stale/audit', (r) => r.fulfill({ json: { audit: [] } }));
+  await page.route('**/api/promote/13/status', (r) => {
+    markStatusStarted();
+    return statusGate.then(() => r.fulfill({ json: {
+      pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+      deploy: { status: 'completed', conclusion: 'success', waiting_approval: false,
+        run_url: 'https://gh/actions/13', run_id: 13 },
+      pr_url: 'https://gh/pr/13', phase: 'deployed', prod_space_id: 'prod-13',
+    } }));
+  });
+
+  await page.goto('/#/espacos');
+  await statusStarted;
+
+  const spaces = page.getByLabel('Spaces disponíveis');
+  await expect(spaces.getByText('Atualizando status…')).toBeVisible();
+  await expect(spaces.getByText('Merge concluído')).toHaveCount(0);
+  await expect(page.getByLabel('Atualizando status no GitHub')).toBeVisible();
+  await expect(page.getByText('A publicação aguarda a decisão do Steward')).toHaveCount(0);
+
+  releaseStatus();
+  await expect(spaces.getByText('Implantado em produção')).toBeVisible();
+});
+
+test('expanding support details shows progress while GitHub evidence is loading', async ({ page }) => {
+  const stale = {
+    ...mine[0], id: 'p-loading', pr_number: 14, pr_url: 'https://gh/pr/14',
+    current_phase: 'merged', terminal: false,
+  };
+  let releaseEvidence!: () => void;
+  let markEvidenceStarted!: () => void;
+  const evidenceGate = new Promise<void>((resolve) => { releaseEvidence = resolve; });
+  const evidenceStarted = new Promise<void>((resolve) => { markEvidenceStarted = resolve; });
+  let coreStatusReads = 0;
+  await page.route('**/api/whoami', (r) =>
+    r.fulfill({ json: { email: 'ana@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }));
+  await page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
+  await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [stale] } }));
+  await page.route('**/api/promotions/p-loading', (r) => r.fulfill({ json: {
+    promotion: stale, review, pr: { number: 14, url: 'https://gh/pr/14' },
+    live_status: {
+      pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+      deploy: { status: 'in_progress', conclusion: null, waiting_approval: false,
+        run_url: 'https://gh/actions/14', run_id: 14 },
+      pr_url: 'https://gh/pr/14', phase: 'merged',
+    },
+    audit: [],
+  } }));
+  await page.route('**/api/promotions/p-loading/audit', (r) => r.fulfill({ json: { audit: [] } }));
+  await page.route('**/api/promote/14/status**', (r) => {
+    if (!new URL(r.request().url()).searchParams.has('include_deployment_evidence')) {
+      coreStatusReads += 1;
+      return r.fulfill({ json: {
+        pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+        deploy: { status: 'in_progress', conclusion: null, waiting_approval: false,
+          run_url: 'https://gh/actions/14', run_id: 14 },
+        pr_url: 'https://gh/pr/14', phase: 'deploying',
+      } });
+    }
+    markEvidenceStarted();
+    return evidenceGate.then(() => r.fulfill({ json: {
+      pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+      deploy: { status: 'in_progress', conclusion: null, waiting_approval: false,
+        run_url: 'https://gh/actions/14', run_id: 14,
+        steps: [{ name: 'Checkout content', status: 'completed', conclusion: 'success', number: 1,
+          job_name: 'deploy', details_url: 'https://gh/actions/14' }] },
+      pr_url: 'https://gh/pr/14', phase: 'deploying',
+    } }));
+  });
+
+  await page.goto('/#/espacos');
+  await expect(page.getByLabel('Spaces disponíveis').getByText('Implantando…')).toBeVisible();
+  await page.getByText('Detalhes para suporte e auditoria', { exact: true }).click();
+  await evidenceStarted;
+
+  await expect(page.getByLabel('Carregando detalhes do GitHub Actions')).toBeVisible();
+  releaseEvidence();
+  await expect(page.getByText('Checkout content', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Carregando detalhes do GitHub Actions')).toHaveCount(0);
+  expect(coreStatusReads).toBe(1);
+});

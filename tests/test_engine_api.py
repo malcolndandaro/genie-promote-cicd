@@ -872,11 +872,19 @@ def test_promote_github_error_maps_to_503(monkeypatch):
 
 
 def test_promote_status_returns_bot_read(monkeypatch):
-    monkeypatch.setattr(engine_api.app_logic, "promotion_status",
-                        lambda number, *a, **k: {"phase": "deployed", "merged": True, "number": number})
+    evidence_flags = []
+
+    def fake_status(number, *a, include_deployment_evidence=False, **k):
+        evidence_flags.append(include_deployment_evidence)
+        return {"phase": "deployed", "merged": True, "number": number}
+
+    monkeypatch.setattr(engine_api.app_logic, "promotion_status", fake_status)
     r = client.get("/api/promote/6/status")
     assert r.status_code == 200
     assert r.json() == {"phase": "deployed", "merged": True, "number": 6}
+    detailed = client.get("/api/promote/6/status?include_deployment_evidence=true")
+    assert detailed.status_code == 200
+    assert evidence_flags == [False, True]
 
 
 def test_promote_status_github_error_maps_to_503(monkeypatch):

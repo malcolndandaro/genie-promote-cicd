@@ -740,13 +740,14 @@ def _with_prod_space_id(status: dict | None, resource_title: str | None) -> dict
 
 
 @api.get("/promote/{number}/status")
-def promote_status(number: int) -> dict:
+def promote_status(number: int, include_deployment_evidence: bool = False) -> dict:
     """GH3 + LB4: live status of a promotion PR (checks + merge + prod deploy/gate), read as the BOT
     (app SP). On each read it RECONCILES the persisted promotion against this live status — appending
     any newly-reached audit events (GitHub-sourced identities) + refreshing the cached status — so
     the audit trail self-heals + a reload renders the cached status instantly. Reflect, never assert.
     W3: also resolves `prod_space_id` onto the response once the phase is `deployed` (see
-    `_with_prod_space_id`)."""
+    `_with_prod_space_id`). The default hot path excludes expensive job/annotation evidence;
+    `include_deployment_evidence=true` is used only when support details are expanded."""
     store = getattr(app.state, "store", None)
     promotion = store.find_by_change_request("github", str(number)) if store is not None else None
     expected = ({
@@ -755,7 +756,11 @@ def promote_status(number: int) -> dict:
     } if promotion is not None and promotion.content_revision and promotion.engine_revision else None)
     status = _engine_call(
         "promotion_status",
-        lambda: app_logic.promotion_status(number, approved_revisions=expected),
+        lambda: app_logic.promotion_status(
+            number,
+            approved_revisions=expected,
+            include_deployment_evidence=include_deployment_evidence,
+        ),
     )
     if promotion is not None:
         # github_factory is lazy: reconcile builds the bot only if it must attribute a new

@@ -197,9 +197,10 @@ class _SweepGitHub:
         self.facts = facts or {}
         self.status_calls = 0
 
-    def get_status(self, number, approved_revisions=None):
+    def get_status(self, number, approved_revisions=None, *, include_deployment_evidence=True):
         self.status_calls += 1
         self.approved_revisions = approved_revisions
+        self.include_deployment_evidence = include_deployment_evidence
         return self.status_by_pr[number]
 
     def audit_facts(self, number):
@@ -220,6 +221,7 @@ def test_reconciler_records_an_unviewed_overnight_merge_to_deploy():
                       facts={"merged_by": "PSPedro176", "review_approver": "PSPedro176"})
     result = reconcile_mod.reconcile_all(s, lambda: gh)
     assert result["checked"] == 1 and result["transitioned"][0]["external_id"] == "6"
+    assert gh.include_deployment_evidence is False  # the background hot path never fetches jobs
     types = [e.event_type for e in s.list_audit_events(p.id)]
     assert types == ["requested", "pr_opened", "pr_review_approved", "merged", "deploy_approved", "deployed"]
     assert s.get_promotion(p.id).terminal is True  # now terminal -> won't be swept again

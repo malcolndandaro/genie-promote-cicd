@@ -313,8 +313,12 @@ export interface PromoteStatus {
 }
 
 /** Read the live status of a promotion PR (bot read; reflects GitHub, never asserts a deploy). */
-export function getPromoteStatus(prNumber: number): Promise<PromoteStatus> {
-  return getJSON<PromoteStatus>(`/api/promote/${prNumber}/status`);
+export function getPromoteStatus(
+  prNumber: number,
+  includeDeploymentEvidence = false,
+): Promise<PromoteStatus> {
+  const query = includeDeploymentEvidence ? '?include_deployment_evidence=true' : '';
+  return getJSON<PromoteStatus>(`/api/promote/${prNumber}/status${query}`);
 }
 
 /** A3/F1: one-click prod->dev reseed (no git PR). `mode: 'overwrite'` requires `devSpaceId`. */

@@ -683,6 +683,26 @@ def test_deploy_detail_none_when_deploy_succeeds():
     assert s["deploy_detail"] is None
 
 
+def test_hot_status_poll_skips_deployment_jobs_until_evidence_is_requested():
+    jobs = {9: [{
+        "id": 101, "name": "deploy", "html_url": "https://x/job",
+        "steps": [{"name": "Expensive evidence", "status": "completed",
+                   "conclusion": "success", "number": 1}],
+    }]}
+    gh = _status_transport(
+        _MERGED_PR, [{"status": "completed", "conclusion": "success"}],
+        [{"name": "deploy", "status": "completed", "conclusion": "success",
+          "html_url": "r", "id": 9}], jobs=jobs,
+    )
+
+    lean = gh.get_status(1, include_deployment_evidence=False)
+    detailed = gh.get_status(1, include_deployment_evidence=True)
+
+    assert lean["phase"] == "deployed"
+    assert lean["deploy"]["steps"] == []
+    assert detailed["deploy"]["steps"][0]["name"] == "Expensive evidence"
+
+
 def test_deploy_detail_reports_the_first_failing_step_and_its_annotations():
     # Root-cause regression scenario: apply_access.py crashed on a raw-dict SDK call (Fix A) —
     # this is what a business user would have seen in the app instead of a bare "Falha".

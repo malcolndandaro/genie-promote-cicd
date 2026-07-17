@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Card from './Card.svelte';
   import Button from './Button.svelte';
   import Badge from './Badge.svelte';
@@ -63,8 +64,12 @@
   const TERMINAL = new Set(['deployed', 'closed']);
   $effect(() => {
     if (!promotion.pr) return;
-    promotion.refreshStatus();
-    promotion.refreshAudit();
+    // The methods mutate their own loading/result state. Keep those internal reads out of this
+    // effect's dependency graph or each mutation would immediately restart the poll loop.
+    untrack(() => {
+      void promotion.refreshStatus();
+      void promotion.refreshAudit();
+    });
     const id = setInterval(async () => {
       await promotion.refreshStatus();
       await promotion.refreshAudit();
@@ -104,7 +109,9 @@
         <div class="pr-banner" role="status">
           <span class="pr-banner__dot" aria-hidden="true"></span>
           <span>PR de promoção aberto: <strong>#{promotion.pr.number}</strong></span>
-          {#if promotion.liveStatus}
+          {#if promotion.waitingForLiveStatus}
+            <Badge tone="neutral">Atualizando status…</Badge>
+          {:else if promotion.liveStatus}
             <Badge tone={phaseTone(promotion.liveStatus.phase)}>
               {PHASE_LABEL[promotion.liveStatus.phase]}
             </Badge>
@@ -124,13 +131,36 @@
           {/if}
         </div>
       {/if}
+      {#if promotion.waitingForLiveStatus}
+        <div class="status-sync" role="status" aria-label="Atualizando status no GitHub">
+          {#if promotion.statusError}
+            <div>
+              <strong>Não foi possível confirmar o status atual.</strong>
+              <p>O último estado salvo não será tratado como atual até o GitHub responder.</p>
+              <p class="status-sync__review">Resultado da revisão: {promotion.review.gate.summary}</p>
+            </div>
+            <Button variant="outline" onclick={() => promotion.refreshStatus()}>Tentar novamente</Button>
+          {:else}
+            <span class="status-sync__spinner" aria-hidden="true"></span>
+            <div>
+              <strong>Atualizando status no GitHub…</strong>
+              <p>Confirmando a etapa atual antes de exibir a decisão vigente.</p>
+              <p class="status-sync__review">Resultado da revisão: {promotion.review.gate.summary}</p>
+            </div>
+          {/if}
+        </div>
+      {/if}
       <ReviewPanel
         review={promotion.review}
         {userEmail}
-        liveStatus={promotion.liveStatus}
+        liveStatus={promotion.statusFresh ? promotion.liveStatus : null}
+        statusPending={promotion.waitingForLiveStatus}
         {devHost}
         devSpaceId={promotion.resource?.id ?? null}
         showPipeline={!!promotion.pr && !promotion.noChange}
+        evidenceLoading={promotion.evidenceLoading}
+        evidenceError={promotion.evidenceError}
+        onLoadEvidence={() => promotion.refreshDeploymentEvidence()}
       >
         {#snippet approval()}
           {#if driftP}
@@ -162,6 +192,33 @@
 {/if}
 
 <style>
+  .status-sync {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 8rem;
+    margin-bottom: var(--space-5);
+    padding: var(--space-5);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-inset);
+  }
+  .status-sync p {
+    margin: var(--space-1) 0 0;
+    color: var(--muted-foreground);
+    font-size: 0.8rem;
+  }
+  .status-sync .status-sync__review { color: var(--foreground); font-weight: 650; }
+  .status-sync__spinner {
+    width: 1.35rem;
+    height: 1.35rem;
+    flex: 0 0 auto;
+    border: 3px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: status-spin 0.7s linear infinite;
+  }
+  @keyframes status-spin { to { transform: rotate(360deg); } }
   .drift-section {
     margin-bottom: var(--space-4);
   }

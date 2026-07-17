@@ -168,7 +168,11 @@ def reconcile_all(store: PromotionStore, github_factory: Callable[[], object],
                 "content_revision": p.content_revision,
                 "engine_revision": p.engine_revision,
             } if p.content_revision and p.engine_revision else None)
-            status = gh.get_status(_github_number(p), approved_revisions=expected)
+            status = gh.get_status(
+                _github_number(p),
+                approved_revisions=expected,
+                include_deployment_evidence=False,
+            )
             appended = reconcile(store, p, status, factory)
             checked += 1
             if appended:

@@ -25,6 +25,7 @@
     activePhase?: string | null;
     activeRequester?: string | null;
     activeTerminal?: boolean;
+    activePhaseLoading?: boolean;
   }
   let {
     resource,
@@ -39,6 +40,7 @@
     activePhase = null,
     activeRequester = null,
     activeTerminal = false,
+    activePhaseLoading = false,
   }: Props = $props();
 
   const latest = $derived(promotions[0] ?? null);
@@ -63,7 +65,15 @@
     >
       <span class="espaco-row__chevron" class:espaco-row__chevron--open={expanded} aria-hidden="true">▸</span>
     </button>
-    {#if chip}
+    {#if activePhaseLoading}
+      <span class="phase-loading" role="status">
+        <span class="phase-loading__spinner" aria-hidden="true"></span>
+        Atualizando status…
+      </span>
+      <span class="muted text-xs">
+        {promotions.length} {promotions.length === 1 ? 'promoção' : 'promoções'}
+      </span>
+    {:else if chip}
       <Badge tone={chip.tone}>{chip.label}</Badge>
       {#if showsRequester}
         <span class="muted text-xs">— {displayedRequester}</span>
@@ -129,6 +139,23 @@
     font-size: 0.7rem;
     transition: transform 0.15s ease;
   }
+  .phase-loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
+    color: var(--muted-foreground);
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+  .phase-loading__spinner {
+    width: 0.78rem;
+    height: 0.78rem;
+    border: 2px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: phase-spin 0.7s linear infinite;
+  }
+  @keyframes phase-spin { to { transform: rotate(360deg); } }
   .espaco-row__chevron--open {
     transform: rotate(90deg);
   }

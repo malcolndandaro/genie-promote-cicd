@@ -367,7 +367,8 @@ class GitHubApp:
         return {"number": pr["number"], "html_url": pr["html_url"]}
 
     # --- live status (GH3): reflect, never assert ---------------------------
-    def get_status(self, number: int, approved_revisions: dict | RevisionPair | None = None) -> dict:
+    def get_status(self, number: int, approved_revisions: dict | RevisionPair | None = None,
+                   *, include_deployment_evidence: bool = True) -> dict:
         """Read the live promotion state from GitHub (as the bot): PR check conclusion, merge
         state, and — once merged — the prod deploy run + whether its Environment gate is waiting.
         Reflects GitHub; it never asserts a deploy that didn't happen."""
@@ -381,8 +382,12 @@ class GitHubApp:
         # calls below). Only fetched on a failing verdict, so the happy-path poll pays nothing extra.
         checks_detail = self._checks_detail(runs) if checks == "failure" else None
         deploy = self._deploy_status(pr.get("merge_commit_sha")) if merged else dict(_NO_DEPLOY)
+        # The hot status poll only needs the authoritative phase. Jobs + per-job annotations are
+        # intentionally optional because they add several GitHub round-trips; the UI requests them
+        # lazily when support/audit details are expanded.
         run_evidence = (self._deployment_run_evidence(deploy["run_id"], deploy["run_url"])
-                        if deploy.get("run_id") else _DeploymentRunEvidence())
+                        if include_deployment_evidence and deploy.get("run_id")
+                        else _DeploymentRunEvidence())
         attempt = run_evidence.attempt
         deploy_detail = (run_evidence.failure_detail
                          if deploy["conclusion"] == "failure" else None)

@@ -834,8 +834,13 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
 
 
 def promotion_status(number: int, profile: str | None = None, *, github: GitHubApp | None = None,
-                     approved_revisions: dict | None = None) -> dict:
+                     approved_revisions: dict | None = None,
+                     include_deployment_evidence: bool = False) -> dict:
     """GH3: the live state of a promotion PR (checks + merge + prod deploy/gate), read as the BOT
     (app SP) — no user token needed, the bot reads GitHub regardless of which user is viewing."""
     gh = github or _github_app(profile)
-    return gh.get_status(number, approved_revisions=approved_revisions)
+    return gh.get_status(
+        number,
+        approved_revisions=approved_revisions,
+        include_deployment_evidence=include_deployment_evidence,
+    )

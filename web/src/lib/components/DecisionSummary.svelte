@@ -3,8 +3,18 @@
   import type { DeploymentStep, PromoteStatus } from '../api';
   import type { Review } from '../types';
 
-  interface Props { review: Review; liveStatus?: PromoteStatus | null; mode?: 'decision' | 'evidence' | 'all' }
-  let { review, liveStatus = null, mode = 'all' }: Props = $props();
+  interface Props {
+    review: Review;
+    liveStatus?: PromoteStatus | null;
+    mode?: 'decision' | 'evidence' | 'all';
+    evidenceLoading?: boolean;
+    evidenceError?: string | null;
+    onLoadEvidence?: () => void | Promise<void>;
+  }
+  let {
+    review, liveStatus = null, mode = 'all', evidenceLoading = false, evidenceError = null,
+    onLoadEvidence,
+  }: Props = $props();
 
   const decision = $derived(decisionPresentation(review, liveStatus));
   const attempt = $derived(liveStatus?.deploy.attempt ?? null);
@@ -30,6 +40,10 @@
       : state === 'skipped' ? 'Ignorado'
       : 'Pendente';
   }
+
+  function handleEvidenceToggle(event: Event): void {
+    if ((event.currentTarget as HTMLDetailsElement).open) void onLoadEvidence?.();
+  }
 </script>
 
 {#if mode !== 'evidence'}
@@ -49,9 +63,20 @@
 {/if}
 
 {#if mode !== 'decision'}
-  <details class="support-details">
+  <details class="support-details" ontoggle={handleEvidenceToggle}>
     <summary>Detalhes para suporte e auditoria</summary>
     <div class="support-details__body">
+      {#if evidenceLoading}
+        <div class="evidence-loading" role="status" aria-label="Carregando detalhes do GitHub Actions">
+          <span class="evidence-loading__spinner" aria-hidden="true"></span>
+          <span><strong>Carregando steps do GitHub Actions…</strong><small>Consultando o job e suas anotações.</small></span>
+        </div>
+      {:else if evidenceError}
+        <div class="evidence-error" role="alert">
+          <span>Não foi possível carregar os detalhes técnicos agora.</span>
+          <button type="button" onclick={() => void onLoadEvidence?.()}>Tentar novamente</button>
+        </div>
+      {/if}
       {#if deploySteps.length > 0}
         <section class="deploy-steps" aria-label="Steps reais do job no GitHub Actions">
           <p class="technical-source">GitHub Actions · fonte oficial</p>
@@ -97,7 +122,7 @@
             </dd></div>
           </dl>
         </section>
-      {:else}
+      {:else if !evidenceLoading}
         <p class="support-details__unknown">
           Evidência de Deployment Attempt ainda não disponível; o estado de mutação não será inferido.
         </p>
@@ -160,6 +185,45 @@
   .decision__action strong { font-size: 0.86rem; }
   .decision__review-summary { margin: var(--space-3) 0 0; font-size: 0.78rem; color: var(--muted-foreground); }
   .deploy-steps { margin: 0 0 var(--space-5); }
+  .evidence-loading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 4.5rem;
+    margin-bottom: var(--space-4);
+    padding: var(--space-3);
+    border: 1px solid #294148;
+    border-radius: var(--radius-sm);
+    background: #10242a;
+  }
+  .evidence-loading > span:last-child { display: flex; flex-direction: column; gap: 0.15rem; }
+  .evidence-loading small { color: #89a49e; }
+  .evidence-loading__spinner {
+    width: 1.2rem;
+    height: 1.2rem;
+    flex: 0 0 auto;
+    border: 3px solid #294148;
+    border-top-color: #79d5c7;
+    border-radius: 50%;
+    animation: evidence-spin 0.7s linear infinite;
+  }
+  @keyframes evidence-spin { to { transform: rotate(360deg); } }
+  .evidence-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+    color: #ffb0a8;
+  }
+  .evidence-error button {
+    border: 1px solid #47716a;
+    border-radius: var(--radius-sm);
+    padding: 0.35rem 0.65rem;
+    background: transparent;
+    color: #79d5c7;
+    cursor: pointer;
+  }
   .technical-source {
     margin: 0 0 var(--space-1);
     color: #79d5c7;

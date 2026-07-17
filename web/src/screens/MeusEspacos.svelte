@@ -243,6 +243,9 @@
                 {activePhase}
                 activeRequester={activePhase ? promotion.requesterEmail : null}
                 activeTerminal={activePhase ? TERMINAL_PHASES.has(activePhase) : false}
+                activePhaseLoading={promotion.initiatedHere
+                  && promotion.resource?.id === group.resource.id
+                  && promotion.waitingForLiveStatus}
               />
             {/each}
           {/if}

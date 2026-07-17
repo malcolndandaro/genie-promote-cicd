@@ -24,10 +24,15 @@
     /** Whether to render the 7-step promotion pipeline. False on a no-op promotion (no PR opened),
      * where a pipeline would be misleading — the findings still render for reference. Default true. */
     showPipeline?: boolean;
+    evidenceLoading?: boolean;
+    evidenceError?: string | null;
+    onLoadEvidence?: () => void | Promise<void>;
+    statusPending?: boolean;
   }
   let {
     review, userEmail, liveStatus = null, devHost = null, devSpaceId = null, approval,
-    showPipeline = true,
+    showPipeline = true, evidenceLoading = false, evidenceError = null, onLoadEvidence,
+    statusPending = false,
   }: Props = $props();
 
   // Findings have no stable id; the list never reorders, so a rule_id+index key is unique & safe.
@@ -41,7 +46,9 @@
 </script>
 
 <div class="review">
-  <DecisionSummary {review} {liveStatus} mode="decision" />
+  {#if !statusPending}
+    <DecisionSummary {review} {liveStatus} mode="decision" />
+  {/if}
 
   <!-- Decision-first findings: blockers are never hidden; guidance is available but collapsed. -->
   <section>
@@ -100,7 +107,16 @@
     </section>
   {/if}
 
-  <DecisionSummary {review} {liveStatus} mode="evidence" />
+  {#if !statusPending}
+    <DecisionSummary
+      {review}
+      {liveStatus}
+      mode="evidence"
+      {evidenceLoading}
+      {evidenceError}
+      {onLoadEvidence}
+    />
+  {/if}
 
   <!-- Read-only here; reconciliation is governed by CI and never applied from this screen. -->
   {#if audienceSpec && audienceSpec.principals.length > 0}

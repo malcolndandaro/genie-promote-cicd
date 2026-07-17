@@ -41,6 +41,15 @@ export class Promotion {
   pr = $state<PullRequestRef | null>(null);
   /** Live PR/CI/deploy status (GH3) — polled from GitHub via the bot; reflects, never asserts. */
   liveStatus = $state<PromoteStatus | null>(null);
+  /** A restored Lakebase snapshot is useful context, but it is not presented as current until the
+   * first GitHub read completes. This prevents a stale "merged" cache contradicting live prod. */
+  statusFresh = $state(false);
+  statusRefreshing = $state(false);
+  statusError = $state<string | null>(null);
+  /** Deep GitHub job/annotation evidence is intentionally lazy so the hot phase poll stays fast. */
+  evidenceLoading = $state(false);
+  evidenceError = $state<string | null>(null);
+  evidenceLoadedRunId = $state<number | null>(null);
   /** The persisted Promotion id (LB3) — drives the audit-trail fetch (LB4). */
   promotionId = $state<string | null>(null);
   /** True when the last request found NOTHING to promote — the space is already in prod byte-
@@ -74,6 +83,11 @@ export class Promotion {
   /** The selected resource id (or '' for none) — convenient for binding a Select. */
   get selectedId(): string {
     return this.resource?.id ?? '';
+  }
+
+  /** True from snapshot restore until GitHub has confirmed the current phase at least once. */
+  get waitingForLiveStatus(): boolean {
+    return !!this.pr && !this.statusFresh;
   }
 
   /** A BLOCKER finding stands (the gate failed). */
@@ -120,6 +134,12 @@ export class Promotion {
     this.phase = 'idle';
     this.pr = null;
     this.liveStatus = null;
+    this.statusFresh = false;
+    this.statusRefreshing = false;
+    this.statusError = null;
+    this.evidenceLoading = false;
+    this.evidenceError = null;
+    this.evidenceLoadedRunId = null;
     this.promotionId = null;
     this.audit = [];
     this.requesterEmail = this.viewerEmail; // a fresh flow is requested by the viewer
@@ -147,13 +167,62 @@ export class Promotion {
   /** Poll the live status of the open PR (bot read). Keeps the last value on a transient error. */
   async refreshStatus(): Promise<void> {
     const pr = this.pr;
-    if (!pr) return;
+    if (!pr || this.statusRefreshing || this.evidenceLoading) return;
+    this.statusRefreshing = true;
+    this.statusError = null;
     try {
       const s = await getPromoteStatus(pr.number);
-      if (this.pr?.number === pr.number) this.liveStatus = s; // ignore if the PR changed mid-flight
-    } catch {
-      /* transient — keep the last known status */
+      if (this.pr?.number === pr.number) {
+        this._applyLiveStatus(s);
+        this.statusFresh = true;
+      }
+    } catch (e) {
+      if (this.pr?.number === pr.number) {
+        this.statusError = e instanceof Error ? e.message : String(e);
+      }
+    } finally {
+      if (this.pr?.number === pr.number) this.statusRefreshing = false;
     }
+  }
+
+  /** Load exact provider job steps only when the operator opens support/audit details. */
+  async refreshDeploymentEvidence(): Promise<void> {
+    const pr = this.pr;
+    const runId = this.liveStatus?.deploy.run_id ?? null;
+    if (!pr || !runId || this.evidenceLoading || this.evidenceLoadedRunId === runId) return;
+    this.evidenceLoading = true;
+    this.evidenceError = null;
+    try {
+      const s = await getPromoteStatus(pr.number, true);
+      if (this.pr?.number === pr.number) {
+        this._applyLiveStatus(s);
+        this.statusFresh = true;
+        this.evidenceLoadedRunId = s.deploy.run_id ?? runId;
+      }
+    } catch (e) {
+      if (this.pr?.number === pr.number) {
+        this.evidenceError = e instanceof Error ? e.message : String(e);
+      }
+    } finally {
+      if (this.pr?.number === pr.number) this.evidenceLoading = false;
+    }
+  }
+
+  /** Keep already-loaded deep evidence across later lean polling responses for the same run. */
+  private _applyLiveStatus(next: PromoteStatus): void {
+    const previous = this.liveStatus;
+    const sameRun = !!previous?.deploy.run_id && previous.deploy.run_id === next.deploy.run_id;
+    if (!sameRun) {
+      this.evidenceLoadedRunId = null;
+      this.evidenceError = null;
+    }
+    const steps = next.deploy.steps?.length ? next.deploy.steps : sameRun ? previous?.deploy.steps : undefined;
+    const attempt = next.deploy.attempt ?? (sameRun ? previous?.deploy.attempt : undefined);
+    this.liveStatus = {
+      ...next,
+      deploy: { ...next.deploy, steps, attempt },
+      deploy_detail: next.deploy_detail ?? (sameRun ? previous?.deploy_detail : undefined),
+    };
   }
 
   /** Required Público do Space for the current flow. Every principal derives to CAN_RUN. */
@@ -189,6 +258,12 @@ export class Promotion {
     this.error = null;
     this.pr = null;
     this.liveStatus = null;
+    this.statusFresh = false;
+    this.statusRefreshing = false;
+    this.statusError = null;
+    this.evidenceLoading = false;
+    this.evidenceError = null;
+    this.evidenceLoadedRunId = null;
     const resource = this.resource;
     try {
       const res = await postPromote(
@@ -300,7 +375,15 @@ export class Promotion {
     this.review = detail.review;
     this.pr = detail.pr;
     this.promotionId = summary.id;
-    this.liveStatus = detail.live_status; // cached status -> the phase badge renders immediately
+    this.liveStatus = detail.live_status; // retained as context, but hidden as current until refreshed
+    this.statusFresh = false; // cached is context only; the GitHub poll makes it authoritative
+    this.statusRefreshing = false;
+    this.statusError = null;
+    this.evidenceLoading = false;
+    this.evidenceError = null;
+    this.evidenceLoadedRunId = detail.live_status?.deploy.steps?.length
+      ? detail.live_status.deploy.run_id ?? null
+      : null;
     this.audit = detail.audit ?? [];
     // Attribute the STORED requester (so an admin's cross-user view shows the real requester, and the
     // display-only SoD preview compares the steward against the right person).

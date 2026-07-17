@@ -644,8 +644,9 @@ def test_space_slug_pinned_and_derived(monkeypatch):
 
 def test_promotion_status_reads_via_injected_bot():
     class FakeGH:
-        def get_status(self, number, approved_revisions=None):
+        def get_status(self, number, approved_revisions=None, *, include_deployment_evidence=True):
             assert approved_revisions == {"content_revision": "b" * 64, "engine_revision": "a" * 40}
+            assert include_deployment_evidence is False
             return {"phase": "awaiting_approval", "number": number, "merged": True}
 
     out = app_logic.promotion_status(
