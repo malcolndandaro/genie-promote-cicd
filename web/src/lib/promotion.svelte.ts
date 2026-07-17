@@ -298,18 +298,15 @@ export class Promotion {
     try {
       const list = await getPromotions('mine');
       if (list.length === 0) return false;
-      // Resume ONLY a still-IN-FLIGHT promotion (reload mid-promotion picks up where it left off).
-      // Deliberately NO fallback to the most-recent TERMINAL one: pinning a finished/deployed
-      // promotion's pipeline at the bottom of "Meus espaços" on every load was a reported bug — a
-      // completed promotion is reachable by expanding its space + opening the attempt, not auto-shown.
-      const summary = list.find((p) => !p.terminal);
-      if (!summary) return false;
+      // `getPromotions` is newest-first. Always restore its first item: an older row whose cached
+      // terminal flag lagged GitHub must never outrank a newer promotion of the same Space.
+      const summary = list[0];
       const detail = await getPromotionDetail(summary.id);
       if (!detail.review || !detail.pr) return false;
       if (this.phase !== 'idle' || this.resource) return false; // a selection raced in — yield to it
       this._apply(summary, detail);
       this.phase = 'reviewed';
-      this.initiatedHere = true; // in-flight resume — surface its inline pipeline (non-terminal only)
+      this.initiatedHere = true; // surface the latest promotion as the page's initial context
       return true;
     } catch {
       return false; // store unavailable / nothing to recover — proceed with the normal flow

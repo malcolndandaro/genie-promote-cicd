@@ -140,24 +140,50 @@ test('each space card carries a dev env badge next to the kind badge', async ({ 
   await expect(card.getByText('dev', { exact: true })).toBeVisible();
 });
 
-test('a terminal (deployed) promotion is NOT auto-pinned as an inline pipeline on load', async ({ page }) => {
-  // The reported bug: the last promotion's full pipeline showed at the bottom of the list on load,
-  // even when browsing (nothing selected). recover() must only resume an IN-FLIGHT promotion.
-  const PR = { number: 7, url: 'https://gh/pr/7' };
-  const terminal = {
-    id: 'promo-done', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
-    requester_email: 'malcoln@databricks.com', pr_number: PR.number, pr_url: PR.url,
-    current_phase: 'deployed', terminal: true, created_at: '2026-07-10T10:00:00Z',
+test('initial load opens the latest promotion instead of an older non-terminal PR', async ({ page }) => {
+  const latest = {
+    id: 'promo-13', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
+    requester_email: 'malcoln@databricks.com', pr_number: 13, pr_url: 'https://gh/pr/13',
+    current_phase: 'deployed', terminal: true, created_at: '2026-07-16T10:00:00Z',
+  };
+  const stale = {
+    id: 'promo-2', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
+    requester_email: 'malcoln@databricks.com', pr_number: 2, pr_url: 'https://gh/pr/2',
+    current_phase: 'merged', terminal: false, created_at: '2026-07-10T10:00:00Z',
+  };
+  const review = {
+    findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
+    eval: { status: 'pass', summary: 'ok' }, allowlist_violations: [], timeline: [],
   };
   await page.route('**/api/spaces', oneSpace);
-  await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [terminal] } }));
-  await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [terminal] } }));
+  await page.route('**/api/promotions?scope=mine', (r) =>
+    r.fulfill({ json: { promotions: [latest, stale] } }));
+  await page.route('**/api/promotions/promo-13', (r) => r.fulfill({ json: {
+    promotion: latest, review, pr: { number: 13, url: 'https://gh/pr/13' },
+    live_status: null, audit: [],
+  } }));
+  await page.route('**/api/promotions/promo-2', (r) => r.fulfill({ json: {
+    promotion: stale, review, pr: { number: 2, url: 'https://gh/pr/2' },
+    live_status: null, audit: [],
+  } }));
+  await page.route('**/api/promotions/*/audit', (r) => r.fulfill({ json: { audit: [] } }));
+  await page.route('**/api/promote/13/status', (r) => r.fulfill({ json: {
+    pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+    deploy: { status: 'completed', conclusion: 'success', waiting_approval: false,
+      run_url: 'https://gh/run/13', run_id: 13 },
+    pr_url: 'https://gh/pr/13', phase: 'deployed', prod_space_id: 'prod-13',
+  } }));
+  await page.route('**/api/promote/2/status', (r) => r.fulfill({ json: {
+    pr_state: 'closed', merged: true, checks: 'success', review_decision: 'approved',
+    deploy: { status: 'none', conclusion: null, waiting_approval: false, run_url: null },
+    pr_url: 'https://gh/pr/2', phase: 'merged',
+  } }));
   await page.goto('/#/espacos');
 
-  // The space + its history summary render, but NO inline pipeline / PR banner is auto-shown.
-  await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
-  await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
-  await expect(page.getByText('Pipeline de promoção')).toHaveCount(0);
+  const banner = page.locator('.pr-banner');
+  await expect(banner).toContainText('#13');
+  await expect(banner).not.toContainText('#2');
+  await expect(page.getByText('Publicação concluída em produção')).toBeVisible();
 });
 
 test('a no-op promotion (already in prod) shows a "nada a promover" notice, no pipeline', async ({ page }) => {
