@@ -78,15 +78,12 @@ command:
 env:
   - name: APP_DOMAIN
     value: "recebiveis"
-  # The configured Steward (separation of duties), surfaced by /whoami so
-  # the SPA can enforce "the requester can never approve their own promotion" (SV4).
-  - name: APP_STEWARD
-    value: "pedro.perdomo@databricks.com"
-  # Config-driven Steward/Admin set (LB5): who may see ALL promotions (cross-user governance view).
-  # Comma-separated; NO hardcoded binding (ADR-0004) — a new customer sets their own. The Steward
-  # (APP_STEWARD) is implicitly included; this adds the platform operator. To grant the view to
-  # MULTIPLE stewards without making them full admins, also set APP_STEWARDS (comma-separated) — the
-  # server unions APP_ADMINS + APP_STEWARDS + APP_STEWARD.
+  # Config-driven Admin (Platform) set: who may reach the admin console (rules, prompt, KAs, roles,
+  # audit) + see ALL promotions (cross-user governance view). Comma-separated; NO hardcoded binding
+  # (ADR-0004) — a new customer sets their own. This is the ONLY authz role the app enforces: all
+  # separation-of-duties (who merges, who approves the deploy) is enforced by GitHub, not the app
+  # (R1 — "Steward" is retired as an app role; APP_STEWARD/APP_STEWARDS no longer read). This is the
+  # bootstrap fallback only — once any role is configured in the Lakebase store, the store wins.
   - name: APP_ADMINS
     value: "malcoln.dandaro@databricks.com"
   # S9b (repo split): the promotion PR target. Bot opens promote/<slug> PRs HERE, not in the app
