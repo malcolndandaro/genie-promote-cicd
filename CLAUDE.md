@@ -1,8 +1,9 @@
-# Claude Code instructions
+# Instruções para o Claude Code
 
-Read and follow [`AGENTS.md`](AGENTS.md) before working in this repository. It is the canonical
-repository instruction file for architecture, deployment safety, ownership, style, and verification.
+Leia e siga o [`AGENTS.md`](AGENTS.md) antes de trabalhar neste repositório. Ele é o arquivo canônico
+de instruções do repositório sobre arquitetura, segurança de deploy, dono da documentação, estilo e
+verificação.
 
-This repository is a portable accelerator. Repository-local instructions override any
-customer-specific operational handoff inherited from a parent checkout. Keep this file as a short
-pointer so `CLAUDE.md` and `AGENTS.md` do not drift.
+Este repositório é um acelerador portável. As instruções locais do repositório prevalecem sobre
+qualquer handoff operacional específico de cliente herdado de um checkout pai. Mantenha este arquivo
+como um ponteiro curto para que `CLAUDE.md` e `AGENTS.md` não divirjam.

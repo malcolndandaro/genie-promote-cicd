@@ -1,140 +1,161 @@
 # Genie Promote
 
-Genie Promote is a governed DEV-to-PROD delivery workflow for Databricks Genie Spaces.
+O Genie Promote é um fluxo governado de entrega DEV→PROD para Genie Spaces do Databricks.
 
-Business authors keep working in the native Genie interface in a development workspace. When a
-Space is ready, they use a Databricks App to review it and request promotion. The accelerator turns
-that request into a versioned content change, runs deterministic and AI-assisted checks, waits for a
-separate production approval, and deploys the Space with a dedicated service principal.
+O **Autor** continua trabalhando na interface nativa do Genie, em um workspace de desenvolvimento.
+Quando um Genie Space está pronto, ele usa um Databricks App para revisá-lo e **preparar a
+promoção**. O acelerador transforma esse pedido em uma mudança de conteúdo versionada, roda
+checagens determinísticas e assistidas por IA, aguarda uma aprovação de produção separada e implanta
+o Space com um service principal (SP) dedicado.
 
-This repository contains the reusable application and pipeline engine. Promoted Genie definitions
-and related artifacts live in a separate content repository, such as
-[`genie-spaces-content`](https://github.com/malcolndandaro/genie-spaces-content).
+Este repositório é um **acelerador portável e reutilizável**: contém a aplicação e o engine do
+pipeline (o "repositório do engine"). As definições de Genie promovidas e os artefatos relacionados
+vivem em um repositório de conteúdo separado (por exemplo, `genie-spaces-content`).
 
-> The committed `recebiveis` configuration is a working example, not a portable default. A new
-> installation must replace the sample domain, identities, repositories, Space IDs, and endpoints.
-> Follow [SETUP.md](SETUP.md); changing only `databricks.yml` is not sufficient.
+> A configuração `recebiveis` versionada é um exemplo funcional, não um padrão portável. Uma nova
+> instalação precisa substituir o domínio de exemplo, as identidades, os repositórios, os IDs de
+> Space e os endpoints. Siga o [SETUP.md](SETUP.md); mudar apenas o `databricks.yml` não é
+> suficiente.
 
-## What it provides
+## O que oferece
 
-- A PROD-hosted Databricks App with a FastAPI backend and Svelte frontend.
-- Native Genie authoring in DEV and governed deployment to PROD.
-- Deterministic environment, audience, and evaluation checks.
-- An LLM reviewer with a protected response contract and editable reviewer persona.
-- Optional Agent Bricks Knowledge Assistants for grounded, advisory findings.
-- Pull-request history, required checks, and a protected production Environment.
-- Durable Lakebase state for promotions, attempts, audit, roles, rules, prompts, and KAs.
-- A guarded PROD-to-DEV rehydrate flow.
+- Um Databricks App hospedado em PROD, com backend FastAPI e frontend Svelte.
+- Autoria nativa no Genie em DEV e deploy governado para PROD.
+- Checagens determinísticas de ambiente, público (audience) e avaliação (eval).
+- Revisão automática por LLM (revisor), com contrato de resposta protegido e persona editável.
+- Um Knowledge Assistant (KA) fixo — o handbook de CI/CD, global a todos os spaces — consultado pela
+  revisão como fonte consultiva adicional (nunca bloqueante).
+- Histórico de pull requests, checks obrigatórios e um Environment de produção protegido.
+- Estado durável no Lakebase para promoções, tentativas, auditoria, papéis, regras e prompts.
+- Um fluxo protegido de exportação Prod → Dev (rehydrate).
 
-## Architecture
+## Arquitetura
 
 ```mermaid
 flowchart LR
-  author([Business author]) --> dev[DEV Genie Space]
-  dev --> app[Genie Promote App<br/>PROD workspace]
-  app --> review[Rules + LLM reviewer<br/>+ optional KAs]
-  review --> pr[Content repository PR]
-  engine[Engine repository<br/>this repo] -. pinned pipeline logic .-> checks
-  pr --> checks[Render + policy + eval<br/>+ bundle validation]
-  checks --> approval{Steward approval}
-  approval --> deploy[CI service principal]
-  deploy --> prod[PROD Genie Space]
-  deploy --> audience[Genie CAN_RUN audience]
-  app <--> lakebase[(Lakebase<br/>state + audit)]
-  prod -. authorized rehydrate .-> app
-  app -. guarded write .-> dev
+  autor([Autor]) --> dev[Genie Space no DEV]
+  dev --> app[App Genie Promote<br/>workspace PROD]
+  app --> review[Regras + revisor LLM<br/>+ KA de CI/CD]
+  review --> pr[PR em rascunho<br/>no repo de conteúdo]
+  engine[Repo do engine<br/>este repo] -. lógica de pipeline fixada .-> checks
+  pr --> checks[Render + política + eval<br/>+ bundle validate]
+  checks --> ready{Responsável Técnico<br/>marca pronto + merge}
+  ready --> approval{Plataforma aprova<br/>o deploy}
+  approval --> deploy[SP de deploy]
+  deploy --> prod[Genie Space no PROD]
+  deploy --> audience[Público Genie CAN_RUN]
+  app <--> lakebase[(Lakebase<br/>estado + auditoria)]
+  prod -. exportação autorizada .-> app
+  app -. escrita protegida .-> dev
 ```
 
-The two repositories have intentionally different responsibilities:
+Os dois repositórios têm responsabilidades intencionalmente diferentes:
 
-| Location | Owns |
+| Local | Responsável por |
 |---|---|
-| **Engine repository** | App code, reviewer, checks, render/deploy logic, tests, and `databricks.yml`. |
-| **Content repository** | Serialized Spaces, titles, audiences, mappings, optional dashboards/setup data, `engine.lock`, and the promotion workflows. |
-| **DEV workspace** | Human-authored Spaces, benchmark questions, DEV data, and live evaluations. |
-| **PROD workspace** | The app, Lakebase, model endpoints, governed Spaces, and PROD data. |
+| **Repositório do engine** | Código do app, revisor, checks, lógica de render/deploy, testes e `databricks.yml`. |
+| **Repositório de conteúdo** | Spaces serializados, títulos, públicos (audiences), mapeamentos, dashboards/dados de setup opcionais, `engine.lock` e os workflows de promoção. |
+| **Workspace DEV** | Spaces autorados por pessoas, perguntas de benchmark, dados de DEV e avaliações ao vivo. |
+| **Workspace PROD** | O app, o Lakebase, endpoints de modelo, Spaces governados e dados de PROD. |
 
-Every content check and deployment resolves the exact engine commit recorded in `engine.lock`. An
-engine change therefore reaches production only after a reviewed lock update in the content
-repository when the protections in [SETUP.md](SETUP.md#12-configure-governance-controls) are
-enabled.
+Toda checagem de conteúdo e todo deploy resolvem o commit exato do engine registrado em
+`engine.lock`. Uma mudança no engine só chega à produção após uma atualização revisada do lock no
+repositório de conteúdo, quando as proteções descritas no
+[SETUP.md](SETUP.md#12-configurar-os-controles-de-governança--uma-vez-só) estiverem ativas.
 
-## Promotion flow
+## Fluxo de promoção
 
-1. An Author creates and tests a Genie Space in DEV.
-2. The app verifies the caller and their live access to that Space.
-3. The Author confirms the production title, table mapping, and required Genie audience.
-4. Deterministic rules, the reviewer model, optional KAs, and the Genie evaluation run.
-5. The GitHub App opens or updates a content PR.
-6. The content repository renders DEV references for PROD and runs the required checks.
-7. A human reviews the content change and a Steward releases the protected `prod` Environment.
-8. The CI identity deploys the exact content/engine revision pair and verifies the live ACL.
+1. O Autor cria e testa um Genie Space no DEV.
+2. O app verifica quem está chamando e o acesso ao vivo dessa pessoa ao Space.
+3. O Autor confirma o título de produção, o mapeamento de tabelas (de-para) e o público (audience)
+   Genie desejado — tudo opcional — e clica em **"Preparar promoção"**.
+4. Rodam as regras determinísticas, o revisor (LLM), o KA de CI/CD e a avaliação (eval) do Genie. A
+   revisão roda sempre do zero, a cada pedido — nunca é reaproveitada.
+5. O GitHub App (bot) abre ou atualiza um **PR em rascunho** no repositório de conteúdo. O rascunho
+   sempre é aberto — mesmo se a revisão encontrar um problema grave (BLOCKER), caso em que o PR
+   recebe a etiqueta `revisao-pendente` e os achados aparecem no topo do comentário. O bot nunca
+   marca o PR como pronto.
+6. Os checks do CI rodam no rascunho (o "test drive" do Autor): render das referências DEV→PROD,
+   testes, `bundle validate` e a checagem de público.
+7. O **Responsável Técnico** revisa a mudança no GitHub, marca o PR como pronto (*mark as ready*) e
+   faz o merge — esse é o ato de **promover**, sempre manual no GitHub. (Reenviar uma promoção cujo
+   PR já estava pronto o rebaixa de volta para rascunho automaticamente.)
+8. A **Plataforma** aprova o deploy no gate do Environment `prod` protegido.
+9. A identidade de CI implanta o par exato de revisões (conteúdo + engine) e verifica a ACL ao vivo.
 
-The pipeline reconciles Genie `CAN_RUN` audience permissions. It does **not** grant Unity Catalog
-data access; table grants remain owned by the customer's normal governance process.
+O pipeline reconcilia as permissões de público Genie `CAN_RUN`. Ele **não** concede acesso a dados no
+Unity Catalog; os grants de tabela permanecem sob o processo normal de governança do cliente.
 
-## Roles and trust boundaries
+## Papéis e fronteiras de confiança
 
-| Actor | Responsibility |
+| Ator | Responsabilidade |
 |---|---|
-| **Author** | Authors a DEV Space and requests promotion. |
-| **Steward** | Reviews evidence and approves production deployment. |
-| **Platform Admin** | Configures identities, roles, rules, endpoints, and operational access. |
-| **App service principal** | Runs the app, connects to Lakebase, queries the reviewer, and reads governed Spaces. |
-| **DEV transport SP** | Performs cross-workspace Genie calls after the app verifies the human caller's live ACL. |
-| **Validation service principal** | Runs PROD-facing PR checks without deployment/admin authority. |
-| **Deployment service principal** | Deploys behind the production gate, asserts app access, and reconciles Genie audience ACLs. |
-| **GitHub App** | Creates content branches/PRs and reads checks and deployments. It never approves them. |
+| **Autor** (qualquer usuário do app) | Autora um Space no DEV e prepara a promoção (abre o PR em rascunho). |
+| **Responsável Técnico** (permissão `Write` no GitHub) | Revisa o rascunho, marca como pronto e faz o merge — o ato de promover. |
+| **Plataforma** (required-reviewer do Environment `prod`) | Aprova o deploy de produção no gate do Environment. |
+| **Administrador da Plataforma** (papel `admin` no app) | Único papel guardado pelo app; libera apenas o console de administração. Não decide promoções nem deploys. |
+| **Service principal do app** | Roda o app, abre/rebaixa PRs em rascunho (nunca marca como pronto), conecta ao Lakebase, consulta o revisor e lê Spaces governados. |
+| **SP de transporte do DEV** | Faz as chamadas Genie entre workspaces, somente após o app verificar a autorização por usuário (fail-closed). |
+| **SP de validação** | Roda os checks de PR voltados a PROD, sem autoridade de deploy ou de admin. |
+| **SP de deploy** | Implanta atrás do gate de produção, assegura o acesso do app e reconcilia as ACLs de público Genie. |
+| **GitHub App (bot)** | Cria branches/PRs de conteúdo e lê checks e deployments. Nunca os aprova nem marca um PR como pronto. |
 
-The forwarded on-behalf-of token identifies the human caller. It cannot be used as a
-cross-workspace credential, so DEV operations use a transport service principal only after the app
-performs a fail-closed per-user authorization check. See the
-[authorization threat model](docs/security/assert-can-access-threat-model.md).
+A separação de funções (SoD) é imposta **inteiramente pelo GitHub**: a permissão `Write` define quem
+faz o merge (Responsável Técnico) e o required-reviewer do Environment define quem aprova o deploy
+(Plataforma). O app não decide nada disso — guarda apenas o bit `admin`.
 
-## Deployment assumptions
+O token *on-behalf-of* encaminhado identifica quem está chamando. Ele não pode ser usado como
+credencial entre workspaces, então as operações no DEV usam um service principal de transporte apenas
+depois de o app fazer uma verificação de autorização por usuário fail-closed. Veja o
+[modelo de ameaças de autorização](docs/security/assert-can-access-threat-model.md).
 
-Read these before treating the accelerator as production-ready:
+## Premissas de deploy
 
-- The supported topology is two Databricks workspaces and two GitHub repositories.
-- Databricks Apps user authorization must be enabled in PROD for the requested
-  `dashboards.genie` scope.
-- The current bundle uses the supported Lakebase `database_instances` compatibility path. New
-  resources created through it are Autoscaling projects, but the runtime still uses the Database
-  API. Do not attach an independently created Postgres-only project without migrating the runtime.
-- The current workflows execute repository code on self-hosted runners with workspace credentials.
-  Use private/trusted repositories or isolated ephemeral runners. Do not run arbitrary public-fork
-  PR code on a persistent privileged runner.
-- The sample uses the PROD workspace-admin deployment credential during PR validation. Production
-  adopters should split validation onto a separate least-privilege identity; otherwise every actor
-  who can run PR code is inside the PROD administrator trust boundary.
-- The content workflows currently derive shell inputs from content filenames. Until that boundary
-  is hardened, restrict content changes to trusted contributors.
-- The engine-only bundle is a one-time bootstrap shape. After PROD content is managed, every full
-  deploy must overlay the complete content repository; deploying an empty engine checkout can
-  reconcile managed Spaces as deletions.
-- No `LICENSE` file is included. Add an appropriate license before third-party redistribution.
+Leia isto antes de tratar o acelerador como pronto para produção:
 
-The canonical, command-level deployment runbook is [SETUP.md](SETUP.md).
+- A topologia suportada é de dois workspaces Databricks e dois repositórios GitHub.
+- A autorização de usuário do Databricks Apps precisa estar habilitada em PROD para o escopo
+  `dashboards.genie` solicitado.
+- O bundle atual usa o caminho de compatibilidade suportado do Lakebase (`database_instances`).
+  Novos recursos criados por ele são projetos Autoscaling, mas o runtime ainda usa a Database API.
+  Não anexe um projeto Postgres-only criado à parte sem migrar o runtime.
+- Os workflows atuais executam código do repositório em runners self-hosted com credenciais do
+  workspace. Use repositórios privados/confiáveis ou runners efêmeros isolados. Não rode código de PR
+  de forks públicos arbitrários em um runner privilegiado persistente.
+- O exemplo usa a credencial de deploy (workspace admin de PROD) durante a validação de PR.
+  Instalações de produção devem separar a validação em uma identidade de menor privilégio; caso
+  contrário, todo ator capaz de rodar código de PR estará dentro da fronteira de confiança de
+  administrador de PROD.
+- Os workflows de conteúdo hoje derivam entradas de shell a partir de nomes de arquivos de conteúdo.
+  Até esse limite ser endurecido, restrinja mudanças de conteúdo a contribuidores confiáveis.
+- O bundle só-engine é um formato de bootstrap único. Depois que o conteúdo de PROD passa a ser
+  gerenciado, todo deploy completo precisa sobrepor o repositório de conteúdo completo; implantar um
+  checkout de engine vazio pode reconciliar Spaces gerenciados como exclusões.
+- Não há arquivo `LICENSE`. Adicione uma licença apropriada antes de qualquer redistribuição a
+  terceiros.
 
-## Deployment at a glance
+O runbook canônico de deploy, no nível de comando, é o [SETUP.md](SETUP.md).
 
-1. Create an engine repository and a content repository.
-2. Choose a clean installation or intentionally retain the sample domain.
-3. Replace every deployment-specific value in both repositories.
-4. Prepare DEV/PROD catalogs, tables, warehouses, identities, and the reviewer endpoint.
-5. Configure GitHub variables, secrets, runners, and the `prod` Environment.
-6. Bootstrap the app and Lakebase once as the same CI identity used by later deployments.
-7. Configure the app SP, DEV transport SP, and GitHub App.
-8. Open one benchmarked DEV Space promotion, let both checks report once, enable branch protection
-   before merging, then complete the gated deployment and record the evidence.
+## Deploy num relance
 
-Do not start with a content push: the production deployment preflight expects the app to exist.
-The one-time bootstrap in [SETUP.md](SETUP.md#8-bootstrap-the-control-plane-once) resolves that
-dependency and keeps bundle state owned by the CI identity.
+1. Crie um repositório do engine e um repositório de conteúdo.
+2. Escolha uma instalação limpa ou retenha o domínio de exemplo de propósito.
+3. Substitua todo valor específico de instalação nos dois repositórios.
+4. Prepare catálogos, tabelas, warehouses, identidades e o endpoint do revisor em DEV/PROD.
+5. Configure as variáveis, secrets, runners e o Environment `prod` no GitHub.
+6. Faça o bootstrap do app e do Lakebase uma vez, com a mesma identidade de CI usada nos deploys
+   posteriores.
+7. Configure o SP do app, o SP de transporte do DEV e o GitHub App.
+8. Abra uma promoção de um Space DEV com benchmark, deixe os dois checks reportarem uma vez, habilite
+   a proteção de branch antes do merge e conclua o deploy com gate, registrando as evidências.
 
-## Local validation
+Não comece por um push de conteúdo: o preflight do deploy de produção espera que o app já exista. O
+bootstrap único no [SETUP.md](SETUP.md#8-fazer-o-bootstrap-do-plano-de-controle--uma-vez-só) resolve essa dependência e
+mantém o estado do bundle sob a identidade de CI.
 
-Local tests do not mutate Databricks or GitHub:
+## Validação local
+
+Os testes locais não alteram o Databricks nem o GitHub:
 
 ```bash
 git clone https://github.com/malcolndandaro/genie-promote-cicd.git
@@ -153,7 +174,7 @@ python3 -m pytest tests/ -q
 )
 ```
 
-For browser tests:
+Para testes de navegador:
 
 ```bash
 (
@@ -163,65 +184,69 @@ For browser tests:
 )
 ```
 
-The full readiness verifier also checks that the content repository pins the current engine HEAD:
+O verificador completo de prontidão também confere se o repositório de conteúdo fixa o HEAD atual do
+engine:
 
 ```bash
 python3 scripts/pilot_readiness.py \
-  --content-repo /path/to/genie-spaces-content \
+  --content-repo /caminho/para/genie-spaces-content \
   --offline-only
 ```
 
-A lock mismatch is an intentional `NO-GO`. Update `engine.lock` through a reviewed content PR; do
-not silently bypass the check.
+Uma divergência de lock é um `NO-GO` intencional. Atualize o `engine.lock` por um PR de conteúdo
+revisado; não contorne a checagem silenciosamente.
 
-## Required GitHub checks
+## Checks obrigatórios do GitHub
 
-Content `main` must require these exact job names:
+O `main` do repositório de conteúdo deve exigir estes nomes exatos de job:
 
 - `bundle validate (prod)`
 - `eval-run pass-rate (dev)`
 
-Before requiring them, remove the sample workflows' skip-on-missing-configuration conditions and
-Markdown path filters so the checks always report. The exact hardening sequence is in
-[SETUP.md](SETUP.md#content-branch-protection).
+Antes de exigi-los, remova dos workflows de exemplo as condições de "pular quando não configurado" e
+os filtros de path de Markdown, para que os checks sempre reportem. A sequência exata de hardening
+está no [SETUP.md](SETUP.md#branch-protection-do-conteúdo).
 
-For a production installation, also require at least one pull-request approval and protect the
-`prod` Environment with a Steward reviewer. GitHub's `prevent_self_review` prevents the workflow
-initiator from approving that deployment; it does not by itself prove that the business requester
-and Steward are different people. Keep that role assignment explicit and auditable.
+Em uma instalação de produção, exija também pelo menos uma aprovação de pull request e proteja o
+Environment `prod` com um revisor da **Plataforma**. O `prevent_self_review` do GitHub impede que
+quem iniciou o workflow aprove aquele deploy; por si só, ele não prova que o solicitante de negócio e
+a Plataforma são pessoas diferentes. Mantenha essa atribuição de papéis explícita e auditável.
 
-## Repository tour
+## Tour do repositório
 
-| Path | Purpose |
+| Caminho | Propósito |
 |---|---|
-| `app/` | Promotion, authorization, rehydrate, rules, roles, KAs, and Lakebase stores. |
-| `engine_api/` | FastAPI routes, OBO boundary, startup migrations, and reconciliation. |
-| `web/` | Svelte application. |
-| `genie_reviewer/` | Reviewer, policy, evaluation, audience, and GitHub App modules. |
-| `scripts/` | Build, render, provision, validate, deploy, and verification tools. |
-| `databricks.yml` | Databricks bundle for the PROD control plane and generated content resources. |
-| `AGENTS.md` / `CLAUDE.md` | Architecture, ownership, safety, and verification rules for contributors and coding agents. |
-| `docs/adr/` | Architectural decisions and trade-offs. |
-| `docs/security/` | Authorization threat model. |
-| `tests/` | Offline engine and API tests. |
+| `app/` | Promoção, autorização, rehydrate, regras, papéis, prompts e stores do Lakebase. |
+| `engine_api/` | Rotas FastAPI, fronteira OBO, migrações de startup e reconciliação. |
+| `web/` | Aplicação Svelte. |
+| `genie_reviewer/` | Revisor, política, avaliação, público (audience) e módulos do GitHub App. |
+| `scripts/` | Ferramentas de build, render, provisionamento, validação, deploy e verificação. |
+| `databricks.yml` | Bundle Databricks para o control plane de PROD e os recursos de conteúdo gerados. |
+| `AGENTS.md` / `CLAUDE.md` | Arquitetura, ownership, segurança e regras de verificação para contribuidores e agentes de código. |
+| `docs/adr/` | Decisões arquiteturais e trade-offs. |
+| `docs/security/` | Modelo de ameaças de autorização. |
+| `tests/` | Testes offline do engine e da API. |
 
-## Further reading
+## Leitura adicional
 
-- [Deployment and operations guide](SETUP.md)
-- [Pilot GO/NO-GO checklist](docs/PILOT-GO-NO-GO.md)
-- [ADR-0005: Lakebase state and audit](docs/adr/0005-lakebase-index-audit-over-github.md)
-- [ADR-0006: PROD control plane and cross-workspace reach](docs/adr/0006-app-in-prod-cross-workspace-reach.md)
-- [ADR-0007: safe, replayable production deployments](docs/adr/0007-safe-resumable-promotion-deploy.md)
-- [Authorization threat model](docs/security/assert-can-access-threat-model.md)
+- [Guia de deploy e operação](SETUP.md)
+- [Checklist de GO/NO-GO do piloto](docs/PILOT-GO-NO-GO.md)
+- [ADR-0005: estado e auditoria no Lakebase](docs/adr/0005-lakebase-index-audit-over-github.md)
+- [ADR-0006: control plane em PROD e alcance entre workspaces](docs/adr/0006-app-in-prod-cross-workspace-reach.md)
+- [ADR-0007: deploys de produção seguros e re-executáveis](docs/adr/0007-safe-resumable-promotion-deploy.md)
+- [ADR-0008: GitHub como módulo profundo com domínio neutro em relação ao provedor](docs/adr/0008-github-deep-module-with-provider-neutral-domain.md)
+- [ADR-0009: aposentadoria do modelo de acesso de demonstração (expand-switch-contract)](docs/adr/0009-retire-access-model-expand-switch-contract.md)
+- [Modelo de ameaças de autorização](docs/security/assert-can-access-threat-model.md)
 
-## Contributing
+## Contribuindo
 
-Keep changes in the repository that owns them:
+Mantenha cada mudança no repositório que a possui:
 
-- Application, reviewer, policy, setup, or deployment logic → engine repository.
-- Serialized Spaces, audiences, mappings, dashboards, and seed data → content repository.
+- Lógica de aplicação, revisor, política, setup ou deploy → repositório do engine.
+- Spaces serializados, públicos (audiences), mapeamentos, dashboards e dados de seed → repositório de
+  conteúdo.
 
-Before opening an engine PR:
+Antes de abrir um PR no engine:
 
 ```bash
 python3 -m pytest tests/ -q
