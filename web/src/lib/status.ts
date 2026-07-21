@@ -5,7 +5,7 @@ export const PHASE_LABEL: Record<PromotePhase, string> = {
   open: 'Aguardando merge',
   checks_running: 'Checagens em execução',
   checks_failed: 'Checagens falharam',
-  awaiting_approval: 'Aguardando aprovação do Steward',
+  awaiting_approval: 'Aguardando aprovação da Plataforma',
   deploying: 'Implantando…',
   deployed: 'Implantado em produção',
   deploy_failed: 'Falha no deploy',

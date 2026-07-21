@@ -8,7 +8,7 @@ describe('phaseChip', () => {
     expect(phaseChip('deploy_failed')).toEqual({ label: 'Falha no deploy', tone: 'destructive' });
     expect(phaseChip('checks_running')).toEqual({ label: 'Checagens em execução', tone: 'warning' });
     expect(phaseChip('awaiting_approval')).toEqual({
-      label: 'Aguardando aprovação do Steward',
+      label: 'Aguardando aprovação da Plataforma',
       tone: 'warning',
     });
     expect(phaseChip('deploying')).toEqual({ label: 'Implantando…', tone: 'accent' });

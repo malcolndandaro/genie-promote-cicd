@@ -17,7 +17,7 @@ export const PIPELINE_STEPS: { key: string; label: string }[] = [
   { key: 'eval', label: 'Eval-run' },
   { key: 'pr_review', label: 'Revisão do PR (aprovação de merge)' },
   { key: 'merge', label: 'Merge para main' },
-  { key: 'approval', label: 'Aprovação do Steward (deploy)' },
+  { key: 'approval', label: 'Aprovação da Plataforma (deploy)' },
   { key: 'deploy', label: 'Deploy em produção (service principal)' },
 ];
 
@@ -98,7 +98,7 @@ export function buildPromotionSteps(review: Review, live: PromoteStatus | null):
     ...verdict,
     { key: 'pr_review', label: 'Revisão do PR (aprovação de merge)', status: prReview },
     { key: 'merge', label: 'Merge para main', status: merge },
-    { key: 'approval', label: 'Aprovação do Steward (deploy)', status: approval },
+    { key: 'approval', label: 'Aprovação da Plataforma (deploy)', status: approval },
     { key: 'deploy', label: 'Deploy em produção (service principal)', status: deploy, detail: deployDetail },
   ];
 }

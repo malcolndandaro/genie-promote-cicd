@@ -77,9 +77,9 @@ export function decisionPresentation(review: Review, live: PromoteStatus | null)
   if (live?.phase === 'awaiting_approval' || live?.phase === 'merged') {
     return {
       state: 'waiting', category: 'Andamento', tone: 'running',
-      headline: 'A publicação aguarda a decisão do Steward',
+      headline: 'A publicação aguarda a decisão da Plataforma',
       productionTruth: 'Produção ainda não mudou; o gate permanece fechado.',
-      nextAction: 'Aguarde a revisão do Steward. Não envie outra solicitação.',
+      nextAction: 'Aguarde a aprovação da Plataforma. Não envie outra solicitação.',
     };
   }
   if (live?.phase === 'checks_running' || live?.phase === 'deploying' || attempt?.terminal_state === 'running') {

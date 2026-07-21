@@ -16,8 +16,8 @@
     },
     {
       icon: 'check-circle',
-      title: 'Steward',
-      desc: 'Revisão independente',
+      title: 'Revisão',
+      desc: 'Responsável Técnico revisa e promove no GitHub',
     },
     {
       icon: 'external',
