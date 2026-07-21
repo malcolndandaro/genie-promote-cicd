@@ -42,20 +42,17 @@
   // the exact target — running recover there would race it and could surface the WRONG promotion.
   if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  // S7 pilot IA: one author surface, one Steward queue and two Admin surfaces. Promotion detail
-  // stays a shareable deep link but never becomes a fifth navigation entry. Server-side gates are
-  // still authoritative; this merely prevents retired demo surfaces from being discoverable.
+  // R2: "Aguardando ação no GitHub" is now a universal read-only panel visible to every
+  // authenticated user — not gated on is_steward. It lives under "Meu trabalho" so any user can
+  // monitor the promotion queue. Admin surfaces remain gated on is_admin.
   const NAV_SECTIONS: NavSection[] = $derived([
     {
       title: 'Meu trabalho',
-      items: [{ id: 'espacos', label: 'Meus espaços', icon: 'grid' }],
+      items: [
+        { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
+        { id: 'revisao' as const, label: 'Aguardando ação no GitHub', icon: 'git-branch' as const },
+      ],
     },
-    ...(who?.is_steward
-      ? [{
-          title: 'Revisão de promoções',
-          items: [{ id: 'revisao' as const, label: 'Aguardando minha revisão', icon: 'git-branch' as const }],
-        }]
-      : []),
     ...(who?.is_admin
       ? [{
           title: 'Administração',
@@ -70,7 +67,7 @@
   const SECTION_TITLE: Record<RouteId, string> = {
     espacos: 'Meus espaços',
     promocoes: 'Detalhe da promoção',
-    revisao: 'Revisão de promoções',
+    revisao: 'Aguardando ação no GitHub',
     auditoria: 'Auditoria',
     configuracoes: 'Configurações',
   };

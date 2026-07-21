@@ -55,7 +55,7 @@ RETIRED_LITERALS = (
 )
 
 SCENARIO_TESTS = {
-    "content_blocker": "tests/test_app_logic.py::test_blocked_review_stops_before_change_request",
+    "content_blocker": "tests/test_app_logic.py::test_blocked_review_opens_draft_pr_and_applies_label",
     "missing_select_advisory": "tests/test_audience_check.py::test_missing_select_is_informational_terraform_guidance",
     "preflight_zero_mutation": "tests/test_deploy_attempt.py::test_preflight_failure_has_zero_mutation_and_operational_evidence",
     "partial_attempt": "tests/test_deploy_attempt.py::test_mid_deploy_failure_is_partial_and_records_completed_stages_and_targets",

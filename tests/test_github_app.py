@@ -8,21 +8,25 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "genie_reviewer"))
 from github_app import (  # noqa: E402
-    GitHubApp, GitHubError, _parse_deployment_attempt_annotations, _summarize_annotations,
+    GitHubApp, GitHubError, BLOCKER_LABEL,
+    _parse_deployment_attempt_annotations, _summarize_annotations,
 )
 
 
 class FakeGitHub:
-    """Minimal in-memory GitHub the transport talks to (refs, files, pulls, comments)."""
+    """Minimal in-memory GitHub the transport talks to (refs, files, pulls, comments, labels)."""
 
     def __init__(self):
         self.refs = {"main": "sha-main"}
         self.files: dict = {}      # (branch, path) -> {sha, content}
-        self.pulls: list = []      # {number, head, html_url}
+        self.pulls: list = []      # {number, head, html_url, draft, node_id}
         self.comments: dict = {}   # number -> [{id, body}]
+        self.labels: dict = {}     # number -> set[str]
         self._pr = 0
         self._cid = 0
         self.calls: list = []
+        # Whether the fake accepts a "make ready" call (it must NEVER receive one from the bot).
+        self.received_make_ready = False
 
     def transport(self, method, url, headers, body):
         path = url.split("api.github.com", 1)[-1]
@@ -72,6 +76,14 @@ class FakeGitHub:
                 del self.files[key]
                 return 200, {"commit": {}}
 
+        # /pulls/:n — single PR read (must precede the list path)
+        if "/pulls/" in path and path.split("/pulls/")[1].split("?")[0].isdigit() and method == "GET":
+            num = int(path.split("/pulls/")[1].split("?")[0])
+            for p in self.pulls:
+                if p["number"] == num:
+                    return 200, p
+            return 404, {}
+
         if path.split("?")[0].endswith("/pulls"):
             if method == "GET":
                 branch = path.split("head=")[1].split("&")[0].split(":")[1]
@@ -79,10 +91,30 @@ class FakeGitHub:
             if method == "POST":
                 self._pr += 1
                 pr = {"number": self._pr, "head": body["head"],
-                      "html_url": f"https://github.com/o/r/pull/{self._pr}"}
+                      "html_url": f"https://github.com/o/r/pull/{self._pr}",
+                      "draft": bool(body.get("draft", False)),
+                      "node_id": f"PR_node_{self._pr}"}
                 self.pulls.append(pr)
                 self.comments[self._pr] = []
+                self.labels[self._pr] = set()
                 return 201, pr
+
+        # Label endpoints (R2 — BLOCKER labeling)
+        if "/issues/" in path and "/labels/" in path:
+            num = int(path.split("/issues/")[1].split("/labels/")[0])
+            label = path.split("/labels/")[1].rstrip("/")
+            if method == "DELETE":
+                if label in self.labels.get(num, set()):
+                    self.labels[num].discard(label)
+                    return 200, []
+                return 404, {}
+
+        if "/issues/" in path and path.endswith("/labels"):
+            num = int(path.split("/issues/")[1].split("/labels")[0])
+            if method == "POST":
+                for lbl in (body or {}).get("labels", []):
+                    self.labels.setdefault(num, set()).add(lbl)
+                return 200, list(self.labels.get(num, set()))
 
         if "/issues/" in path and path.endswith("/comments"):
             num = int(path.split("/issues/")[1].split("/comments")[0])
@@ -105,16 +137,34 @@ class FakeGitHub:
 
         return 500, {"message": f"unhandled {method} {path}"}
 
+    def graphql_transport(self, query: str, variables: dict, headers: dict):
+        """Fake GraphQL transport: handles convertPullRequestToDraft; rejects markReadyForReview."""
+        if "markPullRequestReadyForReview" in query:
+            self.received_make_ready = True
+            return 422, {"errors": [{"message": "bot must not mark ready"}]}
+        if "convertPullRequestToDraft" in query:
+            nid = variables.get("id", "")
+            # Find the PR by node_id and set draft=True
+            for p in self.pulls:
+                if p.get("node_id") == nid:
+                    p["draft"] = True
+                    return 200, {"data": {"convertPullRequestToDraft": {"pullRequest": {"isDraft": True}}}}
+            return 422, {"errors": [{"message": f"node not found: {nid}"}]}
+        return 200, {"data": {}}
+
 
 def _app(fg):
-    return GitHubApp(owner="o", repo="r", transport=fg.transport, token_provider=lambda: "tok")
+    return GitHubApp(owner="o", repo="r", transport=fg.transport,
+                     graphql_transport=fg.graphql_transport, token_provider=lambda: "tok")
 
 
 def test_open_creates_branch_file_and_pr():
     fg = FakeGitHub()
     pr = _app(fg).open_or_update_promotion(branch="promote/x", path="src/genie/s.json",
                                            content="{}", title="t", body="b")
-    assert pr == {"number": 1, "html_url": "https://github.com/o/r/pull/1"}
+    assert pr["number"] == 1
+    assert pr["html_url"] == "https://github.com/o/r/pull/1"
+    assert pr.get("draft") is True  # R2: always opened as draft
     assert "promote/x" in fg.refs
     assert ("promote/x", "src/genie/s.json") in fg.files
     assert len(fg.pulls) == 1
@@ -1008,3 +1058,102 @@ def test_get_branch_protection_raises_on_other_failures():
                   token_provider=lambda: "tok")
     with pytest.raises(GitHubError):
         gh.get_branch_protection("main")
+
+
+# =============================================================================
+# R2 — Draft-first authoring tests
+# =============================================================================
+
+
+def test_new_pr_is_opened_as_draft():
+    """R2: the bot MUST open every promotion PR as a draft (Author's dry-run)."""
+    fg = FakeGitHub()
+    pr = _app(fg).open_or_update_promotion(
+        branch="promote/x", path="src/genie/s.json", content="{}", title="t", body="b")
+    assert pr["number"] == 1
+    assert len(fg.pulls) == 1
+    assert fg.pulls[0]["draft"] is True, "PR must be opened as draft"
+    # The POST body must include "draft": true
+    post_calls = [(m, p) for m, p in fg.calls if m == "POST" and p.endswith("/pulls")]
+    assert post_calls, "A POST /pulls call must have been made"
+
+
+def test_resubmit_on_ready_pr_converts_back_to_draft():
+    """R2: if the Technical Owner already marked the PR *ready*, a re-submission must convert it
+    back to draft via GraphQL.  The bot must NOT call markPullRequestReadyForReview."""
+    fg = FakeGitHub()
+    gh = _app(fg)
+    # First submission — opens as draft
+    pr1 = gh.open_or_update_promotion(
+        branch="promote/x", path="p", content="v1", title="t", body="b")
+    assert fg.pulls[0]["draft"] is True
+
+    # Simulate a human Technical Owner marking the PR ready (draft=False)
+    fg.pulls[0]["draft"] = False
+
+    # Re-submission: the bot must convert back to draft, not mark it ready
+    pr2 = gh.open_or_update_promotion(
+        branch="promote/x", path="p", content="v2", title="t", body="b")
+    assert pr2["number"] == pr1["number"], "must reuse the same PR"
+    assert fg.pulls[0]["draft"] is True, "re-submission must have converted back to draft"
+    assert not fg.received_make_ready, "bot must NEVER call markPullRequestReadyForReview"
+
+
+def test_resubmit_on_draft_pr_skips_convert_call():
+    """R2: if the PR is still a draft (Owner hasn't marked it ready yet), the bot must NOT call
+    convertPullRequestToDraft again (no-op path)."""
+    fg = FakeGitHub()
+    gh = _app(fg)
+    gh.open_or_update_promotion(branch="promote/x", path="p", content="v1", title="t", body="b")
+    assert fg.pulls[0]["draft"] is True
+    fg.calls.clear()
+    gh.open_or_update_promotion(branch="promote/x", path="p", content="v2", title="t", body="b")
+    # No GraphQL convert call should have happened
+    graphql_calls = [c for c in fg.calls if "graphql" in str(c).lower()]
+    assert not graphql_calls, "no GraphQL call when PR is already a draft"
+
+
+def test_apply_blocker_label_adds_the_label():
+    """R2: apply_blocker_label adds BLOCKER_LABEL to the PR."""
+    fg = FakeGitHub()
+    gh = _app(fg)
+    pr = gh.open_or_update_promotion(branch="b", path="p", content="x", title="t", body="b")
+    gh.apply_blocker_label(pr["number"])
+    assert BLOCKER_LABEL in fg.labels[pr["number"]]
+
+
+def test_clear_blocker_label_removes_the_label():
+    """R2: clear_blocker_label removes BLOCKER_LABEL (after a passing re-review)."""
+    fg = FakeGitHub()
+    gh = _app(fg)
+    pr = gh.open_or_update_promotion(branch="b", path="p", content="x", title="t", body="b")
+    gh.apply_blocker_label(pr["number"])
+    assert BLOCKER_LABEL in fg.labels[pr["number"]]
+    gh.clear_blocker_label(pr["number"])
+    assert BLOCKER_LABEL not in fg.labels[pr["number"]]
+
+
+def test_clear_blocker_label_is_noop_when_label_absent():
+    """R2: clear_blocker_label on a PR that never had the label must not raise (404-tolerant)."""
+    fg = FakeGitHub()
+    gh = _app(fg)
+    pr = gh.open_or_update_promotion(branch="b", path="p", content="x", title="t", body="b")
+    gh.clear_blocker_label(pr["number"])  # must not raise
+
+
+def test_draft_creation_sends_draft_true_in_body():
+    """R2: verify the POST /pulls body contains ``draft: True`` (acceptance criterion)."""
+    bodies = []
+
+    def capturing_transport(method, url, headers, body):
+        path = url.split("api.github.com")[-1]
+        if method == "POST" and path.endswith("/pulls"):
+            bodies.append(body)
+        return fg.transport(method, url, headers, body)
+
+    fg = FakeGitHub()
+    gh = GitHubApp(owner="o", repo="r", transport=capturing_transport,
+                   graphql_transport=fg.graphql_transport, token_provider=lambda: "tok")
+    gh.open_or_update_promotion(branch="promote/y", path="p", content="x", title="t", body="b")
+    assert len(bodies) == 1
+    assert bodies[0].get("draft") is True

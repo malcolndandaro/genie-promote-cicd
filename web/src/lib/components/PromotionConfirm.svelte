@@ -34,7 +34,7 @@
         <p class="confirm__step">Preparar promoção</p>
         <h3 class="confirm__title">{resource.title}</h3>
         <p class="confirm__sub muted text-sm">
-          Confirme como este Space será publicado. A edição continua no Dev e a aprovação passa pelo Steward.
+          Confirme como este Space será publicado. O app abre um rascunho com revisão automática — o Responsável Técnico revisa e promove no GitHub.
         </p>
       </header>
 

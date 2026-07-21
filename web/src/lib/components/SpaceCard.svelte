@@ -50,9 +50,9 @@
       onclick={() => onPromote(resource)}
       {disabled}
       loading={busy}
-      ariaLabel={busy ? undefined : `Solicitar promoção: ${resource.title}`}
+      ariaLabel={busy ? undefined : `Preparar promoção: ${resource.title}`}
     >
-      {busy ? 'Solicitando…' : 'Solicitar promoção →'}
+      {busy ? 'Preparando…' : 'Preparar promoção →'}
     </Button>
   </div>
 </article>
