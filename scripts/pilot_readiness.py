@@ -151,8 +151,8 @@ def check_schema_contract() -> list[str]:
     if sql.find("ADD COLUMN IF NOT EXISTS external_id") > sql.find("DROP COLUMN IF EXISTS pr_number"):
         errors.append("provider-neutral identity is not expanded before provider column contraction")
     role_sql = "\n".join(roles_store.MIGRATIONS)
-    if "CHECK (role IN ('steward', 'admin'))" not in role_sql:
-        errors.append("roles schema is not constrained to steward/admin")
+    if "CHECK (role IN ('admin'))" not in role_sql:
+        errors.append("roles schema is not constrained to admin-only (R1 single-role model)")
     if set(reset_demo_ledger.LEDGER_TABLES) & set(reset_demo_ledger.PRESERVED_CONFIG_TABLES):
         errors.append("demo reset overlaps preserved operational configuration")
     return errors

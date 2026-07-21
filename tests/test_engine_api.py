@@ -47,34 +47,36 @@ def test_health_no_auth():
     assert r.status_code == 200 and r.json() == {"status": "ok"}
 
 
-def test_whoami_reflects_forwarded_identity_and_steward(monkeypatch):
-    monkeypatch.setenv("APP_STEWARD", "steward@x")
+def test_whoami_reflects_forwarded_identity(monkeypatch):
+    # R1: steward/is_steward removed from whoami.
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_STEWARD", raising=False)
     monkeypatch.delenv("APP_DEV_HOST", raising=False)
     _fake_config(monkeypatch, "https://prod.example.com/")  # trailing slash -> whoami strips it
     r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
     assert r.status_code == 200
-    assert r.json() == {"email": "malcoln@x", "steward": "steward@x", "is_admin": False,
-                        "is_steward": False,
-                        "repo_url": "https://gh/acme/repo", "dev_host": None,
-                        "prod_host": "https://prod.example.com"}
+    body = r.json()
+    assert body["email"] == "malcoln@x"
+    assert body["is_admin"] is False
+    assert "steward" not in body
+    assert "is_steward" not in body
+    assert body["repo_url"] == "https://gh/acme/repo"
+    assert body["dev_host"] is None
+    assert body["prod_host"] == "https://prod.example.com"
 
 
-def test_whoami_steward_none_when_unset(monkeypatch):
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
+def test_whoami_has_no_steward_fields(monkeypatch):
+    # R1: is_steward and steward must not appear even if APP_STEWARD is set.
+    monkeypatch.setenv("APP_STEWARD", "steward@x")
     monkeypatch.delenv("APP_ADMINS", raising=False)
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_DEV_HOST", raising=False)
-    _fake_config(monkeypatch, "https://prod.example.com")
-    r = client.get("/whoami", headers={"x-forwarded-email": "malcoln@x"})
+    r = client.get("/whoami", headers={"x-forwarded-email": "m@x"})
     assert r.status_code == 200
-    assert r.json() == {"email": "malcoln@x", "steward": None, "is_admin": False,
-                        "is_steward": False,
-                        "repo_url": "https://gh/acme/repo", "dev_host": None,
-                        "prod_host": "https://prod.example.com"}
+    body = r.json()
+    assert "steward" not in body
+    assert "is_steward" not in body
 
 
 def test_whoami_prod_host_reflects_config(monkeypatch):
@@ -758,17 +760,23 @@ def test_api_prefix_health():
 
 
 def test_api_prefix_whoami(monkeypatch):
-    monkeypatch.setenv("APP_STEWARD", "steward@x")
+    # R1: steward/is_steward removed from whoami; only email, is_admin, repo_url, dev_host, prod_host.
     monkeypatch.setenv("APP_REPO_URL", "https://gh/acme/repo")
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_STEWARD", raising=False)
     monkeypatch.delenv("APP_DEV_HOST", raising=False)
     _fake_config(monkeypatch, "https://prod.example.com")
     r = client.get("/api/whoami", headers={"x-forwarded-email": "m@x"})
-    assert r.status_code == 200 and r.json() == {"email": "m@x", "steward": "steward@x",
-                                                 "is_admin": False, "is_steward": False,
-                                                 "repo_url": "https://gh/acme/repo",
-                                                 "dev_host": None, "prod_host": "https://prod.example.com"}
+    assert r.status_code == 200
+    body = r.json()
+    assert body["email"] == "m@x"
+    assert body["is_admin"] is False
+    assert body["repo_url"] == "https://gh/acme/repo"
+    assert body["dev_host"] is None
+    assert body["prod_host"] == "https://prod.example.com"
+    assert "steward" not in body
+    assert "is_steward" not in body
 
 
 def test_api_prefix_spaces_threads_token(monkeypatch):
@@ -1288,16 +1296,14 @@ def test_re_review_only_requested_carries_app_email_and_bumps_updated_at(monkeyp
 
 
 def test_whoami_reports_admin_from_config(monkeypatch):
-    # is_admin is computed from the VERIFIED identity behind the OBO token, never the display
-    # header alone — so a real client must present a token that verifies to the admin email.
+    # R1: is_admin is computed from the VERIFIED identity behind the OBO token, never the display
+    # header alone. APP_STEWARD is kept in env for backward compat but no longer grants is_admin.
     monkeypatch.setenv("APP_ADMINS", "admin@x, boss@x")
     monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.setenv("APP_STEWARD", "pedro@x")
-    _verify_as(monkeypatch, {"tok-admin": "ADMIN@x", "tok-steward": "pedro@x", "tok-rando": "rando@x"})
+    monkeypatch.delenv("APP_STEWARD", raising=False)
+    _verify_as(monkeypatch, {"tok-admin": "ADMIN@x", "tok-rando": "rando@x"})
     assert client.get("/whoami", headers={"x-forwarded-access-token": "tok-admin",
                                           "x-forwarded-email": "ADMIN@x"}).json()["is_admin"] is True
-    assert client.get("/whoami", headers={"x-forwarded-access-token": "tok-steward",
-                                          "x-forwarded-email": "pedro@x"}).json()["is_admin"] is True  # steward
     assert client.get("/whoami", headers={"x-forwarded-access-token": "tok-rando",
                                           "x-forwarded-email": "rando@x"}).json()["is_admin"] is False
 
@@ -1359,7 +1365,7 @@ def test_scope_all_role_gated(monkeypatch, store):
                                "x-forwarded-email": "admin@x"}).status_code == 400
 
 
-# --- S6 (app-ux-overhaul): scope=steward-queue — cross-user, phase-filtered, is_steward-gated ----
+# --- R1: scope=steward-queue — cross-user, phase-filtered, NO role gate ----------------------
 
 
 def _mk_promotion_with_phase(store, *, external_id, resource_id="s1", phase, requester="ana@x"):
@@ -1372,23 +1378,21 @@ def _mk_promotion_with_phase(store, *, external_id, resource_id="s1", phase, req
         external_url=f"https://gh/change/{external_id}", audience_spec=_AUDIENCE_SPEC_WIRE)
 
 
-def test_steward_queue_is_gated_on_is_steward_or_is_admin(monkeypatch, store):
+def test_steward_queue_is_ungated_in_r1(monkeypatch, store):
+    # R1: scope=steward-queue is cross-user with no role gate — any authenticated caller may read it.
     monkeypatch.delenv("APP_ADMINS", raising=False)
-    monkeypatch.setenv("APP_STEWARDS", "pedro@x")
-    _verify_as(monkeypatch, {"tok-steward": "pedro@x", "tok-rando": "rando@x"})
+    monkeypatch.delenv("APP_STEWARDS", raising=False)
+    monkeypatch.delenv("APP_STEWARD", raising=False)
+    _verify_as(monkeypatch, {"tok-rando": "rando@x"})
     _mk_promotion_with_phase(store, external_id=30, phase="open")
 
-    ok = client.get("/api/promotions?scope=steward-queue",
-                    headers={"x-forwarded-access-token": "tok-steward"})
-    assert ok.status_code == 200
-    assert client.get("/api/promotions?scope=steward-queue",
-                      headers={"x-forwarded-access-token": "tok-rando"}).status_code == 403
+    r = client.get("/api/promotions?scope=steward-queue",
+                   headers={"x-forwarded-access-token": "tok-rando"})
+    assert r.status_code == 200
 
 
-def test_steward_queue_filters_to_phases_needing_steward_attention(monkeypatch, store):
-    monkeypatch.setenv("APP_STEWARDS", "pedro@x")
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    _verify_as(monkeypatch, {"tok-steward": "pedro@x"})
+def test_steward_queue_filters_to_phases_needing_attention(monkeypatch, store):
+    _verify_as(monkeypatch, {"tok-rando": "rando@x"})
     _mk_promotion_with_phase(store, external_id=31, phase="open")
     _mk_promotion_with_phase(store, external_id=32, phase="checks_running")
     _mk_promotion_with_phase(store, external_id=33, phase="awaiting_approval")
@@ -1398,20 +1402,18 @@ def test_steward_queue_filters_to_phases_needing_steward_attention(monkeypatch, 
     _mk_promotion_with_phase(store, external_id=37, phase="closed")
 
     r = client.get("/api/promotions?scope=steward-queue",
-                   headers={"x-forwarded-access-token": "tok-steward"})
+                   headers={"x-forwarded-access-token": "tok-rando"})
     assert r.status_code == 200
     assert {p["external_id"] for p in r.json()["promotions"]} == {"31", "32", "33"}
 
 
-def test_steward_queue_is_cross_user_not_scoped_to_the_stewards_own_promotions(monkeypatch, store):
-    monkeypatch.setenv("APP_STEWARDS", "pedro@x")
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    _verify_as(monkeypatch, {"tok-steward": "pedro@x"})
+def test_steward_queue_is_cross_user(monkeypatch, store):
+    _verify_as(monkeypatch, {"tok-viewer": "viewer@x"})
     _mk_promotion_with_phase(store, external_id=38, phase="open", requester="ana@x")
     _mk_promotion_with_phase(store, external_id=39, phase="open", requester="bob@x")
 
     r = client.get("/api/promotions?scope=steward-queue",
-                   headers={"x-forwarded-access-token": "tok-steward"})
+                   headers={"x-forwarded-access-token": "tok-viewer"})
     assert {p["external_id"] for p in r.json()["promotions"]} == {"38", "39"}
 
 

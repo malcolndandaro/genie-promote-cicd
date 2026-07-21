@@ -3,13 +3,11 @@
  * Kept identical to the engine API so the Svelte client is a faithful port of the AppKit app.
  */
 
-/** Who the platform forwarded (OBO) + the configured Steward (SoD) + caller capabilities. */
+/** Who the platform forwarded (OBO) + caller capabilities. R1: single admin bit; steward/SoD
+ * is enforced by GitHub, not the app. */
 export interface Whoami {
   email: string | null;
-  steward: string | null;
   is_admin: boolean;
-  /** Whether the verified caller holds the Steward persona. */
-  is_steward: boolean;
   /** The source/CI repo the header's GitHub link points to (config-driven; the SPA falls back to a
    * default if absent). */
   repo_url?: string | null;
@@ -167,9 +165,9 @@ export interface RehydrateEventRow {
   created_at: string;
 }
 
-/** A configurable role — who is Steward/Admin, in-app (Lakebase-backed), plus
- * the email<->GitHub-username mapping used by drift detection. */
-export type RoleName = 'steward' | 'admin';
+/** A configurable role — R1: single `admin` role (Plataforma) only, Lakebase-backed.
+ * GitHub-username mapping kept for potential future use. */
+export type RoleName = 'admin';
 
 export interface RoleAssignment {
   id: string;
@@ -180,28 +178,24 @@ export interface RoleAssignment {
   updated_at: string;
 }
 
-/** F5: the roles the app currently sees + which env vars would apply as the bootstrap fallback if
+/** R1: the roles the app currently sees + which env vars would apply as the bootstrap fallback if
  * the store were empty (surfaced so an admin understands WHY a role is in effect). */
 export interface RolesList {
   roles: RoleAssignment[];
-  bootstrap_env: { admins: string[]; stewards: string[] };
+  bootstrap_env: { admins: string[] };
 }
 
-/** F5 Phase 1: one READ-ONLY divergence between the app's role config and GitHub's enforced gates.
- * `severity: 'unknown'` means the GitHub read itself failed/degraded — NEVER treated as "no drift". */
-export type DriftSeverity = 'warning' | 'unknown';
-
-export interface DriftFinding {
-  kind: string;
-  severity: DriftSeverity;
-  message: string;
-  detail: Record<string, unknown>;
-}
-
-export interface DriftReport {
-  has_drift: boolean;
-  has_unknown: boolean;
-  findings: DriftFinding[];
+/** R1: read-only GitHub mirror — who controls the promotion path.
+ * `write_collaborators` = people who can mark a draft ready and merge (Responsável Técnico pool).
+ * `environment_reviewers` = people who approve the prod deployment gate.
+ * Missing fields mean the GitHub read failed for that section; the UI shows a degradation notice. */
+export interface GitHubRoles {
+  write_collaborators?: string[];
+  write_collaborators_error?: string;
+  environment_reviewers?: string[];
+  environment_reviewers_error?: string;
+  /** Top-level error when the bot client itself could not be constructed. */
+  error?: string;
 }
 
 /** G2: admin-configurable reviewer rules. `RuleSeverity` mirrors genie_reviewer's SEVERITIES. */

@@ -19,20 +19,14 @@
   // Hash router — the URL is the single source of truth for the active screen.
   const router = new Router();
 
-  // OBO identity (drives the header identity/role + the review AI-trust badge + SoD). Display-only.
+  // OBO identity (drives the header identity/role + the review AI-trust badge). Display-only.
   let who = $state<Whoami | null>(null);
   getWhoami()
     .then((w) => {
       who = w;
       promotion.viewerEmail = w.email;
       promotion.requesterEmail = w.email;
-      promotion.steward = w.steward;
-      // Identity-derived role: the viewer IS the Steward when their OBO email matches the configured
-      // steward. The approval view follows this + whether the promotion is theirs; the real SoD is
-      // still GitHub's gate.
-      promotion.isSteward = !!(
-        w.email && w.steward && w.email.toLowerCase() === w.steward.toLowerCase()
-      );
+      // R1: steward/isSteward removed from whoami — all SoD is enforced by GitHub, not the app.
     })
     .catch(() => {});
 
@@ -42,20 +36,15 @@
   // the exact target — running recover there would race it and could surface the WRONG promotion.
   if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  // S7 pilot IA: one author surface, one Steward queue and two Admin surfaces. Promotion detail
-  // stays a shareable deep link but never becomes a fifth navigation entry. Server-side gates are
-  // still authoritative; this merely prevents retired demo surfaces from being discoverable.
+  // R1: two sections — "Meu trabalho" (all users) + "Administração" (admin only).
+  // RevisaoPromocoes is NOT in the sidebar (it's repurposed in R2 for the draft-PR handoff panel).
+  // Server-side gates are still authoritative; this merely prevents non-admin surfaces from
+  // showing in the nav.
   const NAV_SECTIONS: NavSection[] = $derived([
     {
       title: 'Meu trabalho',
       items: [{ id: 'espacos', label: 'Meus espaços', icon: 'grid' }],
     },
-    ...(who?.is_steward
-      ? [{
-          title: 'Revisão de promoções',
-          items: [{ id: 'revisao' as const, label: 'Aguardando minha revisão', icon: 'git-branch' as const }],
-        }]
-      : []),
     ...(who?.is_admin
       ? [{
           title: 'Administração',

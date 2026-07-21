@@ -1,16 +1,22 @@
-"""Unit tests for the F5 Phase 1 endpoints (engine_api/main.py): configurable roles (Lakebase-
-backed, store-over-env precedence) + READ-ONLY GitHub drift detection. FastAPI TestClient + fakes
-— no network, no live workspace, no live GitHub.
+"""Unit tests for the R1 role/GitHub-mirror endpoints (engine_api/main.py).
+
+R1 changes:
+  - Retire "steward" as an app role; only "admin" remains.
+  - `/whoami` no longer returns `is_steward` or `steward`.
+  - `scope=steward-queue` on `/promotions` is now cross-user and ungated (no role check).
+  - `/admin/drift` and `/promotions/{id}/drift` are removed; replaced by `/admin/github-roles`.
+  - `bootstrap_env` in `GET /admin/roles` now only has `admins`.
+
+FastAPI TestClient + fakes — no network, no live workspace, no live GitHub.
 
 Mirrors tests/test_admin_console_api.py's conventions exactly (`_verify_as`, the admin-gating
 parametrized checks, the InMemoryBackend store fixtures wired into `engine_api.app.state`).
 
-Verifies: (1) roles CRUD is admin-gated on the VERIFIED identity (never a spoofed header), (2)
-`whoami`/`_is_admin` read the STORE once it holds any rows, with env as the bootstrap fallback
-(store-over-env precedence + the fail-closed empty-store-empty-env case), (3) the drift endpoints
-call the injected GitHub reader and surface each divergence class, degrading to "unknown" (never
-"no drift") on a GitHub read failure, and (4) the promotion-review drift endpoint is visible to the
-promotion's owner (not just an admin), matching the existing per-promotion visibility boundary.
+Verifies:
+  1. Roles CRUD is admin-gated on the VERIFIED identity (never a spoofed header).
+  2. `whoami`/`_is_admin` reads the STORE once it holds any rows, with env as bootstrap fallback.
+  3. `scope=steward-queue` is ungated and cross-user (R1 change).
+  4. `GET /admin/github-roles` returns write collaborators + env reviewers with graceful degradation.
 """
 import os
 import sys
@@ -87,14 +93,14 @@ def test_list_roles_ignores_spoofed_display_header(monkeypatch, roles_store_fixt
 
 def test_assign_role_403_a_non_admin(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
-    r = client.post("/api/admin/roles", json={"email": "x@y", "role": "steward"},
+    r = client.post("/api/admin/roles", json={"email": "x@y", "role": "admin"},
                     headers=RANDO_HEADERS)
     assert r.status_code == 403
 
 
 def test_revoke_role_403_a_non_admin(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
-    r = client.post("/api/admin/roles/revoke", json={"email": "x@y", "role": "steward"},
+    r = client.post("/api/admin/roles/revoke", json={"email": "x@y", "role": "admin"},
                     headers=RANDO_HEADERS)
     assert r.status_code == 403
 
@@ -103,22 +109,22 @@ def test_admin_can_assign_list_and_revoke_a_role(monkeypatch, roles_store_fixtur
     _setup_admin(monkeypatch)
     # Seed the CALLER as a store-backed admin first — once the store holds ANY role row, it is
     # authoritative (env is ignored), so admin@x must have its OWN row to keep calling admin-gated
-    # endpoints through the rest of this test (this is the F5 precedence behavior under test
-    # elsewhere; here it's just test setup).
+    # endpoints through the rest of this test.
     roles_store_fixture.assign(email="admin@x", role="admin")
     r = client.post("/api/admin/roles",
-                    json={"email": "pedro@x", "role": "steward", "github_username": "pedro-gh"},
+                    json={"email": "pedro@x", "role": "admin", "github_username": "pedro-gh"},
                     headers=ADMIN_HEADERS)
     assert r.status_code == 200
     role = r.json()["role"]
-    assert role["email"] == "pedro@x" and role["role"] == "steward" and role["github_username"] == "pedro-gh"
+    assert role["email"] == "pedro@x" and role["role"] == "admin" and role["github_username"] == "pedro-gh"
 
     listed = client.get("/api/admin/roles", headers=ADMIN_HEADERS).json()
     emails = {row["email"] for row in listed["roles"]}
     assert emails == {"admin@x", "pedro@x"}
     assert "bootstrap_env" in listed  # so the UI can explain WHY a fallback role is in effect
+    assert "stewards" not in listed["bootstrap_env"]  # R1: stewards key removed
 
-    client.post("/api/admin/roles/revoke", json={"email": "pedro@x", "role": "steward"},
+    client.post("/api/admin/roles/revoke", json={"email": "pedro@x", "role": "admin"},
                headers=ADMIN_HEADERS)
     remaining = client.get("/api/admin/roles", headers=ADMIN_HEADERS).json()["roles"]
     assert [row["email"] for row in remaining] == ["admin@x"]
@@ -131,9 +137,17 @@ def test_assign_role_rejects_unknown_role(monkeypatch, roles_store_fixture):
     assert r.status_code == 400
 
 
+def test_assign_role_rejects_retired_steward_role(monkeypatch, roles_store_fixture):
+    # R1: "steward" is retired and must be rejected by the store.
+    _setup_admin(monkeypatch)
+    r = client.post("/api/admin/roles", json={"email": "x@y", "role": "steward"},
+                    headers=ADMIN_HEADERS)
+    assert r.status_code == 400
+
+
 def test_revoke_role_is_idempotent_when_absent(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
-    r = client.post("/api/admin/roles/revoke", json={"email": "ghost@x", "role": "steward"},
+    r = client.post("/api/admin/roles/revoke", json={"email": "ghost@x", "role": "admin"},
                     headers=ADMIN_HEADERS)
     assert r.status_code == 200
 
@@ -179,21 +193,15 @@ def test_is_admin_fail_closed_when_store_and_env_both_empty(monkeypatch, roles_s
     assert r.json()["is_admin"] is False  # never "everyone" — fail closed
 
 
-def test_whoami_steward_reads_store_when_configured(monkeypatch, roles_store_fixture):
+def test_whoami_has_no_steward_fields(monkeypatch, roles_store_fixture):
+    # R1: is_steward and steward are removed from whoami.
     monkeypatch.delenv("APP_STEWARD", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_ADMINS", raising=False)
-    roles_store_fixture.assign(email="new-steward@x", role="steward")
     r = client.get("/api/whoami")
-    assert r.json()["steward"] == "new-steward@x"
-
-
-def test_whoami_steward_falls_back_to_env_when_store_empty(monkeypatch, roles_store_fixture):
-    monkeypatch.setenv("APP_STEWARD", "legacy-steward@x")
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    r = client.get("/api/whoami")
-    assert r.json()["steward"] == "legacy-steward@x"
+    body = r.json()
+    assert "is_steward" not in body
+    assert "steward" not in body
 
 
 def test_role_gated_endpoints_still_work_when_roles_store_absent(monkeypatch):
@@ -208,195 +216,151 @@ def test_role_gated_endpoints_still_work_when_roles_store_absent(monkeypatch):
     assert r.json()["is_admin"] is True
 
 
-# --- whoami / is_steward: three-actor pilot capability model ------------------------------------
+# --- scope=steward-queue: R1 — ungated, cross-user, phase-filtered ----------------------------
 
 
-def test_is_steward_falls_back_to_env_when_store_empty(monkeypatch, roles_store_fixture):
-    monkeypatch.setenv("APP_STEWARDS", "steward@x")
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    _verify_as(monkeypatch, {"tok-steward": "steward@x"})
-    r = client.get("/api/whoami",
-                   headers={"x-forwarded-access-token": "tok-steward", "x-forwarded-email": "steward@x"})
-    assert r.json()["is_steward"] is True
+def _mk_promotion(store, *, external_id, phase):
+    return store.create_promotion(
+        resource_id="s1", resource_kind="genie_space", resource_title="Test",
+        requester_email="ana@x", branch="promote/x", current_phase=phase,
+        live_status={"phase": phase}, change_provider="github", external_id=str(external_id),
+        external_url=f"https://gh/{external_id}",
+        audience_spec={"principals": [{"principal": "users", "is_group": True}]})
 
 
-def test_is_steward_reads_the_store_once_configured(monkeypatch, roles_store_fixture):
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    _verify_as(monkeypatch, {"tok-new": "new-steward@x", "tok-old": "old-steward@x"})
-    roles_store_fixture.assign(email="new-steward@x", role="steward")
-
-    new = client.get("/api/whoami",
-                      headers={"x-forwarded-access-token": "tok-new", "x-forwarded-email": "new-steward@x"})
-    assert new.json()["is_steward"] is True
-    old = client.get("/api/whoami",
-                      headers={"x-forwarded-access-token": "tok-old", "x-forwarded-email": "old-steward@x"})
-    assert old.json()["is_steward"] is False  # env is not even set here — store is authoritative
-
-
-def test_is_steward_fails_closed_and_whoami_has_no_retired_role_flag(monkeypatch, roles_store_fixture):
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    monkeypatch.delenv("APP_ADMINS", raising=False)
-    _verify_as(monkeypatch, {"tok-a": "a@x"})
-    r = client.get("/api/whoami", headers={"x-forwarded-access-token": "tok-a", "x-forwarded-email": "a@x"})
-    assert r.json()["is_steward"] is False
-    assert ("is_" + "approver") not in r.json()
-
-
-def test_a_caller_can_hold_multiple_personas_at_once(monkeypatch, roles_store_fixture):
-    # An Admin can also be the Steward; both capabilities are reflected without a third role.
+def test_steward_queue_is_ungated_in_r1(monkeypatch, promo_store):
+    # R1: scope=steward-queue is accessible to ANY authenticated caller (no role check).
     monkeypatch.delenv("APP_ADMINS", raising=False)
     monkeypatch.delenv("APP_STEWARDS", raising=False)
     monkeypatch.delenv("APP_STEWARD", raising=False)
-    _verify_as(monkeypatch, {"tok-multi": "multi@x"})
-    roles_store_fixture.assign(email="multi@x", role="admin")
-    roles_store_fixture.assign(email="multi@x", role="steward")
-    r = client.get("/api/whoami",
-                   headers={"x-forwarded-access-token": "tok-multi", "x-forwarded-email": "multi@x"})
-    body = r.json()
-    assert body["is_admin"] is True
-    assert body["is_steward"] is True
+    _verify_as(monkeypatch, {"tok-rando": "rando@x"})
+    _mk_promotion(promo_store, external_id=30, phase="open")
+
+    r = client.get("/api/promotions?scope=steward-queue",
+                   headers={"x-forwarded-access-token": "tok-rando"})
+    assert r.status_code == 200
 
 
-# --- GitHub drift detection: read-only, graceful degradation ------------------------------------
+def test_steward_queue_filters_to_active_phases(monkeypatch, promo_store):
+    _verify_as(monkeypatch, {"tok-rando": "rando@x"})
+    _mk_promotion(promo_store, external_id=31, phase="open")
+    _mk_promotion(promo_store, external_id=32, phase="checks_running")
+    _mk_promotion(promo_store, external_id=33, phase="awaiting_approval")
+    _mk_promotion(promo_store, external_id=34, phase="checks_failed")
+    _mk_promotion(promo_store, external_id=35, phase="deploying")
+    _mk_promotion(promo_store, external_id=36, phase="deployed")
+
+    r = client.get("/api/promotions?scope=steward-queue",
+                   headers={"x-forwarded-access-token": "tok-rando"})
+    assert r.status_code == 200
+    assert {p["external_id"] for p in r.json()["promotions"]} == {"31", "32", "33"}
 
 
-class _FakeReader:
-    def __init__(self, *, env_reviewers=None, env_error=None, protection=None, protection_error=None):
-        self._env_reviewers, self._env_error = env_reviewers, env_error
-        self._protection, self._protection_error = protection, protection_error
+def test_steward_queue_is_cross_user(monkeypatch, promo_store):
+    _verify_as(monkeypatch, {"tok-viewer": "viewer@x"})
+    promo_store.create_promotion(
+        resource_id="s1", resource_kind="genie_space", resource_title="T",
+        requester_email="ana@x", branch="p/x", current_phase="open",
+        live_status=None, change_provider="github", external_id="38",
+        external_url="https://gh/38",
+        audience_spec={"principals": [{"principal": "users", "is_group": True}]})
+    promo_store.create_promotion(
+        resource_id="s2", resource_kind="genie_space", resource_title="T2",
+        requester_email="bob@x", branch="p/y", current_phase="open",
+        live_status=None, change_provider="github", external_id="39",
+        external_url="https://gh/39",
+        audience_spec={"principals": [{"principal": "users", "is_group": True}]})
 
-    def get_environment_reviewers(self, environment):
+    r = client.get("/api/promotions?scope=steward-queue",
+                   headers={"x-forwarded-access-token": "tok-viewer"})
+    # viewer@x is NOT the requester of either — but the queue is cross-user so they see both.
+    assert {p["external_id"] for p in r.json()["promotions"]} == {"38", "39"}
+
+
+# --- GET /admin/github-roles: read-only GitHub mirror (replaces drift endpoints) ---------------
+
+
+class _FakeBot:
+    def __init__(self, *, write_collab=None, write_collab_error=None,
+                 env_reviewers=None, env_error=None):
+        self._write_collab = write_collab
+        self._write_collab_error = write_collab_error
+        self._env_reviewers = env_reviewers
+        self._env_error = env_error
+
+    def list_write_collaborators(self) -> list[str]:
+        if self._write_collab_error:
+            raise self._write_collab_error
+        return self._write_collab or []
+
+    def get_environment_reviewers(self, environment: str) -> list[str]:
         if self._env_error:
             raise self._env_error
         return self._env_reviewers or []
 
-    def get_branch_protection(self, branch):
-        if self._protection_error:
-            raise self._protection_error
-        return self._protection
 
-
-_CLEAN_PROTECTION = {"required_pull_request_reviews": {"required_approving_review_count": 1}}
-
-
-def test_admin_drift_403_a_non_admin(monkeypatch, roles_store_fixture):
+def test_github_roles_403_a_non_admin(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
-    assert client.get("/api/admin/drift", headers=RANDO_HEADERS).status_code == 403
+    assert client.get("/api/admin/github-roles", headers=RANDO_HEADERS).status_code == 403
 
 
-def test_admin_drift_reports_no_drift_when_aligned(monkeypatch, roles_store_fixture):
+def test_github_roles_returns_collaborators_and_reviewers(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
-    roles_store_fixture.assign(email="admin@x", role="steward", github_username="admin-gh")
     monkeypatch.setattr(engine_api.app_logic, "github_app_factory",
-                        lambda *a, **k: _FakeReader(env_reviewers=["admin-gh"], protection=_CLEAN_PROTECTION))
-    r = client.get("/api/admin/drift", headers=ADMIN_HEADERS)
+                        lambda *a, **k: _FakeBot(
+                            write_collab=["alice", "bob"],
+                            env_reviewers=["charlie"]))
+    r = client.get("/api/admin/github-roles", headers=ADMIN_HEADERS)
     assert r.status_code == 200
     body = r.json()
-    assert body["has_drift"] is False and body["has_unknown"] is False and body["findings"] == []
+    assert body["write_collaborators"] == ["alice", "bob"]
+    assert body["environment_reviewers"] == ["charlie"]
+    assert "error" not in body
 
 
-def test_admin_drift_flags_unmapped_steward(monkeypatch, roles_store_fixture):
+def test_github_roles_degrades_gracefully_when_collaborators_fail(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
-    roles_store_fixture.assign(email="admin@x", role="steward")  # no github_username
     monkeypatch.setattr(engine_api.app_logic, "github_app_factory",
-                        lambda *a, **k: _FakeReader(env_reviewers=[], protection=_CLEAN_PROTECTION))
-    body = client.get("/api/admin/drift", headers=ADMIN_HEADERS).json()
-    assert body["has_drift"] is True
-    kinds = {f["kind"] for f in body["findings"]}
-    assert "steward_unmapped" in kinds
-
-
-def test_admin_drift_degrades_gracefully_on_github_error_never_no_drift(monkeypatch, roles_store_fixture):
-    _setup_admin(monkeypatch)
-    roles_store_fixture.assign(email="admin@x", role="steward", github_username="admin-gh")
-    monkeypatch.setattr(
-        engine_api.app_logic, "github_app_factory",
-        lambda *a, **k: _FakeReader(env_error=RuntimeError("403 missing scope"), protection=_CLEAN_PROTECTION))
-    r = client.get("/api/admin/drift", headers=ADMIN_HEADERS)
+                        lambda *a, **k: _FakeBot(
+                            write_collab_error=RuntimeError("403"),
+                            env_reviewers=["charlie"]))
+    r = client.get("/api/admin/github-roles", headers=ADMIN_HEADERS)
     assert r.status_code == 200
     body = r.json()
-    assert body["has_unknown"] is True
-    kinds = {f["kind"] for f in body["findings"]}
-    assert "unknown_environment" in kinds
-    assert "steward_not_env_reviewer" not in kinds  # never asserted — the read failed
+    assert "write_collaborators_error" in body
+    assert body["environment_reviewers"] == ["charlie"]
 
 
-def test_admin_drift_degrades_gracefully_when_bot_client_cannot_be_built(monkeypatch, roles_store_fixture):
+def test_github_roles_degrades_gracefully_when_env_reviewers_fail(monkeypatch, roles_store_fixture):
+    _setup_admin(monkeypatch)
+    monkeypatch.setattr(engine_api.app_logic, "github_app_factory",
+                        lambda *a, **k: _FakeBot(
+                            write_collab=["alice"],
+                            env_error=RuntimeError("scope missing")))
+    r = client.get("/api/admin/github-roles", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["write_collaborators"] == ["alice"]
+    assert "environment_reviewers_error" in body
+
+
+def test_github_roles_degrades_gracefully_when_bot_cannot_be_built(monkeypatch, roles_store_fixture):
     _setup_admin(monkeypatch)
 
     def boom(*a, **k):
         raise RuntimeError("secret scope unreachable")
 
     monkeypatch.setattr(engine_api.app_logic, "github_app_factory", boom)
-    r = client.get("/api/admin/drift", headers=ADMIN_HEADERS)
-    assert r.status_code == 200  # never crashes the caller
+    r = client.get("/api/admin/github-roles", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
     body = r.json()
-    assert body["has_unknown"] is True
+    assert "error" in body  # top-level error key when the bot can't even be built
 
 
-def test_admin_drift_never_raises_even_without_a_roles_store(monkeypatch):
-    # roles_store absent entirely (env-only deployment) — drift check must still run (using the env
-    # fallback for stewards/admins) rather than 500ing.
-    monkeypatch.setenv("APP_ADMINS", "admin@x")
-    monkeypatch.delenv("APP_STEWARDS", raising=False)
-    monkeypatch.delenv("APP_STEWARD", raising=False)
-    engine_api.app.state.roles_store = None
-    _verify_as(monkeypatch, {"tok-admin": "admin@x"})
-    monkeypatch.setattr(engine_api.app_logic, "github_app_factory",
-                        lambda *a, **k: _FakeReader(env_reviewers=[], protection=_CLEAN_PROTECTION))
+def test_github_roles_drift_endpoints_removed(monkeypatch, roles_store_fixture):
+    # R1: /admin/drift and /promotions/{id}/drift must no longer exist.
+    _setup_admin(monkeypatch)
     r = client.get("/api/admin/drift", headers=ADMIN_HEADERS)
-    assert r.status_code == 200
-
-
-# --- Contextual drift on the promotion-review screen (US-35) ------------------------------------
-
-
-def _promote(monkeypatch, *, space_id, number, requester_headers):
-    def fake(space_id_, *a, **k):
-        return {"review": {"gate": {"conclusion": "success", "summary": "ok"}, "findings": [],
-                           "eval": {"status": "pass", "summary": "n/a"}, "timeline": []},
-                "pr": {"number": number, "url": f"https://gh/pr/{number}"}}
-
-    monkeypatch.setattr(engine_api.app_logic, "request_promotion", fake)
-    r = client.post(
-        "/api/promote",
-        json={
-            "space_id": space_id,
-            "audience_spec": {"principals": [{"principal": "users", "is_group": True}]},
-        },
-        headers=requester_headers,
-    )
-    assert r.status_code == 200
-    return r.json()["promotion_id"]
-
-
-def test_promotion_drift_visible_to_the_owner_not_only_admin(monkeypatch, roles_store_fixture, promo_store):
-    _setup_admin(monkeypatch)
-    ana_headers = {"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}
-    _verify_as(monkeypatch, {"tok-admin": "admin@x", "tok-rando": "rando@x", "tok-ana": "ana@x"})
-    pid = _promote(monkeypatch, space_id="s1", number=1, requester_headers=ana_headers)
-    monkeypatch.setattr(engine_api.app_logic, "github_app_factory",
-                        lambda *a, **k: _FakeReader(env_reviewers=[], protection=_CLEAN_PROTECTION))
-
-    r = client.get(f"/api/promotions/{pid}/drift", headers=ana_headers)
-    assert r.status_code == 200
-
-
-def test_promotion_drift_403_for_an_unrelated_user(monkeypatch, roles_store_fixture, promo_store):
-    _setup_admin(monkeypatch)
-    ana_headers = {"x-forwarded-access-token": "tok-ana", "x-forwarded-email": "ana@x"}
-    _verify_as(monkeypatch, {"tok-admin": "admin@x", "tok-rando": "rando@x", "tok-ana": "ana@x"})
-    pid = _promote(monkeypatch, space_id="s1", number=1, requester_headers=ana_headers)
-
-    r = client.get(f"/api/promotions/{pid}/drift", headers=RANDO_HEADERS)
-    assert r.status_code == 403
-
-
-def test_promotion_drift_404_for_unknown_promotion(monkeypatch, roles_store_fixture, promo_store):
-    _setup_admin(monkeypatch)
-    r = client.get("/api/promotions/does-not-exist/drift", headers=ADMIN_HEADERS)
     assert r.status_code == 404
+    r2 = client.get("/api/promotions/any-id/drift", headers=ADMIN_HEADERS)
+    assert r2.status_code == 404

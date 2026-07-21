@@ -67,18 +67,13 @@ export class Promotion {
   /** The append-only, GitHub-attributed audit trail (LB4) — accrues as the poll reconciles. */
   audit = $state<AuditEvent[]>([]);
 
-  // --- separation of duties (SV4/GH4) ---
+  // --- identity context for the current promotion view ---
   /** The requester of the CURRENT promotion view (display-only): the signed-in viewer for a fresh
-   * request, or the stored requester when a promotion is opened from history (so a Steward's
+   * request, or the stored requester when a promotion is opened from history (so an admin's
    * cross-user view attributes the real requester, not themselves). */
   requesterEmail = $state<string | null>(null);
   /** The signed-in viewer's OBO email (from /api/whoami) — the baseline requester for a fresh flow. */
   viewerEmail = $state<string | null>(null);
-  /** The configured Steward (from /api/whoami.steward), shown in the UI. */
-  steward = $state<string | null>(null);
-  /** Whether the SIGNED-IN viewer IS the Steward (identity-derived from /api/whoami, not a toggle).
-   * Drives whether the approval view is shown — replaces the old manual Autor/Steward switch. */
-  isSteward = $state(false);
 
   /** The selected resource id (or '' for none) — convenient for binding a Select. */
   get selectedId(): string {
@@ -102,18 +97,15 @@ export class Promotion {
   }
 
   /**
-   * The approval view for the current promotion + the signed-in viewer. Identity-derived (no manual
-   * toggle): if the promotion is MINE I only ever wait for the Steward (even if I'm also a Steward —
-   * separation of duties); a Steward viewing SOMEONE ELSE'S promotion (opened from "Todas") gets the
-   * approval affordance.
+   * R1: SoD is GitHub's gate entirely. The app no longer tracks a Steward identity, so the
+   * approval state is always 'author' (no in-app approve affordance). The PR banner shows the
+   * deploy-gate URL when `awaiting_approval` — the Responsável Técnico acts on GitHub directly.
    *
-   * TRUST BOUNDARY: a DISPLAY-ONLY preview on proxy-forwarded identities — the real SoD is the GitHub
-   * Environment gate (required reviewer + prevent_self_review), which enforces it on GitHub identity.
+   * TRUST BOUNDARY: a DISPLAY-ONLY preview on proxy-forwarded identities — the real SoD is the
+   * GitHub Environment gate (required reviewer + prevent_self_review), enforced on GitHub identity.
    */
   get approval(): { state: ApprovalState; canApprove: boolean } {
-    if (this.isMine || !this.isSteward) return { state: 'author', canApprove: false };
-    if (this.hasBlocker) return { state: 'blocked', canApprove: false };
-    return { state: 'ready', canApprove: true };
+    return { state: 'author', canApprove: false };
   }
 
   /** Incremented on every `select()` call (same-space reselection included) — `MeusEspacos`
@@ -382,8 +374,7 @@ export class Promotion {
       ? detail.live_status.deploy.run_id ?? null
       : null;
     this.audit = detail.audit ?? [];
-    // Attribute the STORED requester (so an admin's cross-user view shows the real requester, and the
-    // display-only SoD preview compares the steward against the right person).
+    // Attribute the STORED requester (so an admin's cross-user view shows the real requester).
     this.requesterEmail = summary.requester_email ?? this.viewerEmail;
   }
 }
