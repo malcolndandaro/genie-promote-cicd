@@ -1,289 +1,1029 @@
-# CI/CD go-live runbook (S3, bootstrap order per ADR-0006)
+# Deployment and operations guide
 
-The `genie-promote-app` App + its Lakebase instance live in the **prod** workspace (a durable,
-prod-hosted control plane — `docs/adr/0006-app-in-prod-cross-workspace-reach.md`); the app reaches
-into **dev** only for the Genie-API operations that must run there, via a standing
-**dev-reader/writer service principal**. That split drives the bootstrap order below: the CI/CD SP +
-prod app/Lakebase come up FIRST (nothing governance-related works without them), the dev-reader/
-writer SP is a SEPARATE, later step that unlocks the promotion export + rehydrate paths.
+This is the canonical runbook for deploying Genie Promote into a new Databricks DEV/PROD workspace
+pair and a new GitHub owner.
 
-The pipeline code is complete and committed. The human steps below make it **live** —
-they need your GitHub account + workspace-admin on BOTH workspaces + this machine, so they're not
-done autonomously. All are scripted.
+The result is:
 
-## What's already done (autonomous)
-- Git repo initialised; bundle + workflows committed.
-- **CI-portable targets** — `databricks.yml` uses `host:` (not `profile:`), so the
-  same bundle resolves locally *and* on a runner with OAuth M2M.
-- `.github/workflows/deploy.yml` — on merge to `main`, deploy to **prod** behind a
-  GitHub Environment gate (`environment: prod`), as the CI/CD service principal,
-  with `DATABRICKS_BUNDLE_ENGINE=direct`.
-- `.github/workflows/pr-checks.yml` — `bundle validate -t prod` on every PR (the
-  deterministic suite is extended in S4).
-- `scripts/provision_ci.sh` — creates the SP, grants least-privilege, generates the
-  OAuth secret, sets repo vars/secret, and prints the gate + runner steps.
+- one PROD-hosted Databricks App and its Lakebase state store;
+- one DEV transport service principal for guarded cross-workspace Genie operations;
+- one least-privilege PROD validation service principal for PR checks;
+- one PROD workspace-admin deployment service principal available only behind the production gate;
+- one GitHub App for content pull requests and status reads;
+- one engine repository and one content repository;
+- protected content checks and a human-gated production deployment.
 
-## Go-live — prod control plane first (ADR-0006), ~15 min
-1. **Create the repo + push**
-   ```bash
-   cd genie-promote-cicd
-   gh repo create <owner>/genie-promote --private --source . --remote origin --push
-   ```
-2. **Provision the CI/CD identity + gate (prod)**
-   ```bash
-   GH_REPO=<owner>/genie-promote bash scripts/provision_ci.sh
-   ```
-   This grants the CI/CD SP the technical permissions needed to inspect production and deploy the
-   governed bundle. Audience reconciliation only changes Genie `CAN_RUN`; data access stays external.
-   Then add your **Steward** as the required reviewer on the `prod` Environment.
-3. **Set the DEV repo variables** — `deploy.yml` bakes these into the deployed app's `app.yaml`
-   (`APP_DEV_HOST`/`APP_DEV_WAREHOUSE_ID`) so the prod-hosted app knows which dev workspace to reach
-   into (ADR-0004: config-driven, never hardcoded):
-   ```bash
-   gh variable set DATABRICKS_DEV_HOST         --repo <owner>/genie-promote --body "https://your-dev-workspace.cloud.databricks.com"
-   gh variable set DATABRICKS_DEV_WAREHOUSE_ID --repo <owner>/genie-promote --body "<dev sql warehouse id>"
-   ```
-4. **Register the self-hosted runner** (the one piece that needs this machine —
-   both workspaces enforce IP access lists, so GitHub-hosted runners are rejected).
-   The exact commands are printed by `provision_ci.sh` step 6.
-5. **Push to `main`** (or merge a first PR) to deploy the app + Lakebase to prod — see *Verify*
-   below. History, configuration, audit and rehydrate require this durable store, so
-   this lands: the app must start successfully against a migrated, empty Lakebase first.
-6. **Bootstrap the dev-reader/writer SP** (`provision_dev_sp.sh`, below) — a SEPARATE, later step.
-   It unlocks the promotion export + rehydrate paths, not the app-in-prod milestone itself, so it's
-   fine to do this after the app is already live.
+The repository contains working sample values. It is not a one-command installer.
 
-## Why a self-hosted runner (the S3 blocker)
-`enableIpAccessLists=true` on both `databricks-dev` and `databricks-prod`. A
-GitHub-hosted runner's egress IP isn't allowlisted, so it can't reach the
-workspace API. Options: (a) self-hosted runner on an allowlisted host (this
-machine — what bimbo_demo used), or (b) add the runner's egress range to the IP
-ACL (needs the workspace's network policy owner). (a) is the demo default.
+## 1. Understand the supported topology
 
-## Local deploys: always render first
-The prod `genie_space` reads its `serialized_space` from `build/` (gitignored,
-generated). **Before any `databricks bundle deploy/validate -t <env>` run
-`scripts/render.sh <env>`** — it pre-renders `dev_`→`<env>_` and runs the allowlist,
-and `rm`s any stale build first. The workflows do this automatically; this note is
-for local operators (a raw `bundle deploy -t prod` with a stale/dev `build/` would
-ship the wrong env — S4 review M2).
+```text
+GitHub
+├── engine repository   (app + pipeline code)
+└── content repository  (Space definitions + workflows + engine.lock)
 
-**Prod also needs the front-door app assembled (ADR-0006/A1: `promote_app` now targets `prod`, not
-`dev`).** The single `genie-promote-app` deploys from `build/promote_app/` (gitignored, generated by
-`scripts/build_promote_app.sh`, which `npm run build`s the Svelte SPA in `web/` then stages the
-FastAPI engine + the built static). **Before any `bundle deploy/validate -t prod`, run `bash
-scripts/build_promote_app.sh`** (both `pr-checks.yml` and `deploy.yml` do this automatically). A raw
-`bundle deploy -t prod` on a fresh clone / after `git clean` fails with
-`stat build/promote_app: no such file or directory` until the assembly runs. `scripts/deploy_dev.sh`
-now only renders + deploys dev's `setup` job (no app there anymore).
+Databricks
+├── DEV workspace       (native authoring + live eval)
+└── PROD workspace      (app + Lakebase + governed Spaces)
+```
 
-## Verify (after go-live)
-Open a PR that touches a resource → `pr-checks` validates → merge → `deploy-prod`
-pauses on the prod gate → the Steward approves → SP runs `bundle deploy -t prod`.
+The app runs in PROD because its workflow and audit state must survive DEV resets. A dedicated DEV
+service principal transports Genie API calls, but the app verifies the signed-in human's live Space
+ACL before every DEV operation.
 
-Before the pilot rehearsal, run the automated offline floor and then the live-evidence decision:
+### Lakebase compatibility
+
+The bundle declares `database_instances` and the app uses a `database` resource. Databricks now
+creates an Autoscaling project behind that compatibility API, and existing DAB automation continues
+to work. Keep this bundle-created path for the current runtime.
+
+Do not create an unrelated Postgres-only project and attach it with an app `postgres` resource:
+the stores still call the Database API for credential generation. `postgres_projects` is the
+preferred future-native model, but adopting it requires a coordinated bundle and runtime migration.
+See the
+[Databricks upgrade guidance](https://docs.databricks.com/aws/en/oltp/upgrade-to-autoscaling).
+
+## 2. Security and support boundary
+
+Before deployment, agree to these constraints:
+
+1. **Trusted contribution boundary.** Current PR workflows run repository code on self-hosted
+   runners with Databricks credentials. Use private/trusted repositories or isolated ephemeral
+   runners. Do not run arbitrary public-fork code on a persistent privileged runner.
+   The sample also reuses the PROD deploy credential for PR validation, and that identity is a
+   workspace admin. For a production installation, use a separate least-privilege validation
+   identity for pull requests and reserve the admin deploy credential for the protected `prod`
+   Environment. If you retain the shared identity, every contributor whose PR can run is inside the
+   PROD administrator trust boundary.
+2. **Content filenames are trusted input.** Current workflow shell loops consume slugs derived from
+   filenames. Restrict content writes to trusted actors until slug validation and shell handoff are
+   hardened.
+3. **Dedicated runners.** Do not reuse a general workstation runner. Give engine and content jobs
+   distinct labels/directories, or use an organization runner group restricted to these repos.
+4. **Separate human roles.** Use different people for the business requester and Steward.
+   GitHub's `prevent_self_review` only blocks the workflow initiator; it does not map the business
+   requester recorded by the app to a GitHub login.
+5. **No automatic data grants.** The deployment reconciles Genie `CAN_RUN` only. Unity Catalog
+   table access remains external.
+6. **No software license is included.** Add one before distributing the accelerator outside the
+   intended organization.
+
+For a production installation, also pin third-party GitHub Actions to reviewed commit SHAs. The
+sample workflows currently include mutable tags.
+
+The provisioning helpers are bootstrap aids, not hardened secret-management tools. Their current
+implementations pass some one-time credentials through command arguments (`gh ... --body` and
+`databricks ... --string-value`), which can expose values to process inspection on a multi-user
+operator host. Before production use, change those calls to consume stdin or run the helpers only
+from an isolated administrator machine and rotate the resulting credentials afterward.
+
+## 3. Choose clean or sample installation
+
+Choose one path before changing files.
+
+### Clean installation — recommended
+
+- Remove the sample content, but keep a tracked `src/.gitkeep`. Both content workflows copy
+  `content/src/` before the first promotion, and Git does not preserve an empty directory.
+- Use your own `dev_<domain>` and `prod_<domain>` catalogs and existing tables.
+- Leave `APP_SPACE_SLUGS={}` and `APP_KA_SEED=[]` initially.
+- Create the first content files through a real promotion request from the app.
 
 ```bash
-python3 scripts/pilot_readiness.py --content-repo /path/to/genie-spaces-content --offline-only
-cp docs/pilot-live-evidence.example.json /safe/path/pilot-live-evidence.json
-python3 scripts/pilot_readiness.py --content-repo /path/to/genie-spaces-content \
-  --live-evidence /safe/path/pilot-live-evidence.json
+mkdir -p /path/to/genie-spaces-content/src
+touch /path/to/genie-spaces-content/src/.gitkeep
+git -C /path/to/genie-spaces-content add src/.gitkeep
 ```
 
-The second command is intentionally `NO-GO` while any provider or R1–R15 evidence is pending. It is
-read-only with respect to Databricks/GitHub and writes only a redacted local manifest under `build/`.
+### Sample installation
 
-## Quality gates that BLOCK the merge (branch protection)
+- Keep the committed `recebiveis` content intentionally.
+- Recreate every referenced table, group, Space, and endpoint in your workspaces.
+- Review the synthetic setup notebook before running it.
+- Remember that rendering creates a `setup` job definition; no workflow runs that job automatically.
 
-The promotion PR (in the content repo `genie-spaces-content`) is gated by two required-check jobs in
-`pr-checks.yml`, both scoped to the spaces the PR changed (`git diff` vs the PR base — so unrelated /
-legacy content never blocks a PR):
+Never deploy the sample content unchanged into an unrelated workspace.
 
-- **`bundle validate (prod)`** — runs as the prod CI SP: `bundle validate`, **AUDIENCE-01**
-  (`scripts/check_audience.py`), and **EVAL-01** the benchmark-COUNT floor (`scripts/check_eval.py`,
-  offline — the count is in the committed serialized_space; min via `EVAL_MIN_BENCHMARKS`, default 2).
-- **`eval-run pass-rate (dev)`** — runs as the **dev-reader SP** (the eval-run needs the live dev
-  space with benchmarks): `scripts/check_eval_run.py` re-runs the benchmarks and fails on a
-  below-threshold pass-rate (`EVAL_RUN_THRESHOLD`, default 0.8). Advisory/unavailable never blocks.
-  Requires `DATABRICKS_DEV_SP_CLIENT_ID` (var) + `DATABRICKS_DEV_SP_SECRET` (secret) on the content
-  repo — the same dev-reader SP creds from the `genie_promote` scope.
+## 4. Collect installation values
 
-Enable the enforcement with **branch protection** on the content repo's `main`:
+Record these values in a secure operator worksheet:
+
+| Value | Example |
+|---|---|
+| Engine repository | `acme/genie-promote-cicd` |
+| Content repository | `acme/genie-spaces-content` |
+| DEV / PROD CLI profiles | `acme-dev` / `acme-prod` |
+| DEV / PROD workspace URLs | `https://...cloud.databricks.com` |
+| DEV / PROD warehouse IDs | one Genie-compatible warehouse in each workspace |
+| Domain | `sales`, producing `dev_sales` and `prod_sales` |
+| Lakebase name | `genie-promote-sales` |
+| Reviewer endpoint | a chat endpoint available in PROD |
+| Author group | the group that receives app `CAN_USE` |
+| Steward | Databricks email and GitHub login |
+| Platform admins | Databricks emails |
+| Initial DEV Space IDs | existing Spaces the DEV SP must manage |
+
+Use a Pro or Serverless SQL warehouse supported by Genie. Record the schemas and tables each Space
+will reference and confirm that the intended audience already has its required data privileges.
+
+## 5. Prerequisites
+
+### Databricks features
+
+Both workspaces must have:
+
+- Unity Catalog and the required metastore/catalog bindings;
+- Genie;
+- a running or startable Pro/Serverless SQL warehouse;
+- the required users and groups.
+
+For group-based DEV Space authorization, use account-level groups assigned to both workspaces with
+the same membership. The authorization guard compares the verified PROD caller's group names with
+the DEV Space ACL; two workspace-local groups that merely share a display name are not the same
+security principal. If shared account groups are unavailable, grant and evaluate DEV access by
+individual user instead.
+
+PROD must also have:
+
+- Databricks Apps;
+- Databricks Apps user authorization enabled for the `dashboards.genie` scope;
+- Lakebase;
+- a chat-compatible Model Serving endpoint for the reviewer.
+
+The setup operator needs workspace/account administration for identity bootstrap, catalog
+permissions, secret scopes, app permissions, and the first control-plane deployment.
+
+### Operator machine
+
+Install:
+
+- Databricks CLI `1.4.0`, matching the workflows;
+- GitHub CLI;
+- Git, Bash, Python 3.12, Node.js/npm, `rsync`, `curl`, and OpenSSL;
+- network access to both workspace APIs, GitHub, PyPI, and npm.
+
+Check authentication without relying on an implicit profile:
+
+```bash
+databricks --version
+databricks auth profiles
+databricks current-user me -p <dev-profile>
+databricks current-user me -p <prod-profile>
+gh auth status
 ```
-gh api -X PUT repos/<owner>/genie-spaces-content/branches/main/protection --input - <<'JSON'
-{"required_status_checks":{"strict":true,"contexts":["bundle validate (prod)","eval-run pass-rate (dev)"]},
- "enforce_admins":true,"required_pull_request_reviews":null,"restrictions":null}
-JSON
+
+Select and use explicit profile names throughout this guide.
+
+### GitHub
+
+You need:
+
+- permission to create/configure both repositories;
+- branch protection and protected Environment features;
+- a GitHub login for the Steward and a distinct PR reviewer/merger if `Prevent self-review` applies
+  to the actor who triggers deployment;
+- distinct human identities for the business requester and Steward in the app;
+- a runner strategy that satisfies the trusted-contribution boundary.
+
+If the engine repository is private, the content repository's default `GITHUB_TOKEN` cannot check
+it out. Add a fine-grained credential with `Contents: read` on only the engine repository as the
+content-repository secret `ENGINE_REPO_READ_TOKEN`. Add it to all three locked-engine checkouts: the
+`validate` and `eval-run` jobs in `pr-checks.yml`, and the deployment job in `deploy.yml`:
+
+```yaml
+- name: Checkout app repo (locked pipeline logic)
+  uses: actions/checkout@v4
+  with:
+    repository: ${{ env.APP_REPO }}
+    ref: ${{ steps.engine.outputs.sha }}
+    path: app
+    token: ${{ secrets.ENGINE_REPO_READ_TOKEN }}
 ```
-(No required PR review — separation of duties is the Steward's prod Environment gate at deploy.)
 
-## Knowledge Assistants (Assistente de Conhecimento) — optional advisory sources
+The sample workflows do not include this token. If you do not want a cross-repository credential,
+the as-is alternative is to make the engine repository readable to the content workflows.
 
-To let the reviewer consult Agent Bricks Knowledge Assistants as ADDITIVE advisory findings: create
-each KA (`databricks knowledge-assistants create-knowledge-assistant` + `create-knowledge-source`
-from a UC Volume of `.md`/PDF; sync; wait for state ACTIVE — see the `databricks-agent-bricks` skill),
-grant the **app SP `CAN_QUERY`** on each KA serving endpoint, and register them via **`APP_KA_SEED`**
-(a JSON array in the app.yaml, seeded at startup as the app SP — no browser). NOTE: KA endpoints are
-the **Responses API** (`task agent/v1/responses`) — queried via `{"input":[...]}` at `/invocations`,
-NOT `serving_endpoints.query(messages=)`.
+## 6. Create and configure both repositories
 
-## GitHub App (bot) for the in-app PR integration (GH1)
+Create organization-owned copies of:
 
-The app opens promotion PRs + posts review comments as a **GitHub App (bot)** — never a human PAT
-or the Databricks SP. These credentials are workspace-agnostic (an App ID/installation ID/private
-key have nothing to do with dev vs. prod), but they must land in a secret scope the app's SP can
-read *in the workspace the app actually runs in* — **prod**, since ADR-0006 (they used to be
-provisioned in dev, back when the app was dev-hosted; that no longer applies). To provision
-(one-time, HITL):
+- this engine repository;
+- the companion content repository.
 
-1. **github.com/settings/apps → New GitHub App.** Name it (e.g. `genie-promote-bot`); disable the
-   webhook; repository permissions: **Contents: RW, Pull requests: RW, Issues: RW, Deployments: RO,
-   Actions: RO** (Metadata RO is automatic). Install scope: only this account.
-2. **Generate a private key** (downloads a `.pem`) and **Install** the App on your repo.
-3. Capture the **App ID** (app page) and **Installation ID** (`GET /app/installations` as the App,
-   or the install URL).
-4. **Store the three values** in a Databricks secret scope the app's SP can read — in **prod**.
-   Easiest: run the helper, which mints an App JWT, auto-discovers the installation id for your
-   repo, writes all three keys, and grants the app SP READ:
-   ```
-   scripts/provision_github_app_secrets.sh <APP_ID> <path/to/key.pem> <prod-profile> <owner/repo>
-   ```
-   Or do it by hand:
-   ```
-   databricks secrets create-scope genie_promote -p <prod-profile>
-   databricks secrets put-secret  genie_promote github_app_id          --string-value <APP_ID>          -p <prod-profile>
-   databricks secrets put-secret  genie_promote github_installation_id --string-value <INSTALLATION_ID> -p <prod-profile>
-   databricks secrets put-secret  genie_promote github_app_private_key --string-value "$(cat key.pem)"  -p <prod-profile>
-   databricks secrets put-acl     genie_promote <app-sp-client-id> READ -p <prod-profile>
-   ```
-   The app SP is `databricks apps get genie-promote-app -p <prod-profile> -o json | .service_principal_client_id`.
-5. **Verify** the bot can authenticate: mint an App JWT (RS256, iss=App ID) → `GET /app` →
-   `POST /app/installations/<id>/access_tokens` → `GET /repos/.../<repo>` returns 200.
+Private repositories are the safest default for the current runner model.
 
-The app reads these at runtime (GH2 wires the read path: app.yaml `valueFrom` / runtime SDK). Never
-commit the `.pem`; if it ever transits an insecure channel, regenerate it in the App's settings.
+### Pin the engine revision
 
-## Lakebase (durable promotion state / audit / cache) — provisioning + config (LB1, ADR-0005/0006)
+In the content repository:
 
-The app persists promotions, review snapshots, Deployment Attempts, roles, rule overrides, prompt
-templates, KA configuration, rehydrate events, and an
-append-only audit trail in **Lakebase (Databricks Postgres)** — a durable index + audit log + status
-cache over GitHub-as-truth (ADR-0005). It is provisioned **all-DABs, config-driven** (ADR-0004) and
-lives with the app in the **prod target** (ADR-0006 — prod is the durable control plane; dev is wiped
-on a ~7-day cycle and cannot hold governance state).
+1. Set `APP_REPO` in both `.github/workflows/pr-checks.yml` and
+   `.github/workflows/deploy.yml`.
+2. Put a full engine commit SHA from protected `main` or a trusted immutable release in
+   `engine.lock`.
+3. Commit the workflow and lock changes together.
 
-**What deploys it:** the prod target in `databricks.yml` declares a `database_instances` resource
-(`promote_db`) and binds it to `promote_app` via the app's `database` resource. `bundle deploy -t
-prod` (after `bash scripts/build_promote_app.sh` — see *Local deploys* above) provisions both (see
-the ordering note below). The `/database/` API provisions an **autoscaling-backed** instance (CU_1
-floor, scale-to-zero) — not a fixed bill.
+```bash
+git -C /path/to/genie-promote-cicd rev-parse HEAD
+git -C /path/to/genie-spaces-content rev-parse HEAD
+```
 
-**Config knobs** (`databricks.yml` `variables:`, override with `--var` or per-target) — a new
-customer changes only these and redeploys:
+`engine.lock` must contain exactly 40 lowercase hexadecimal characters. The readiness verifier
+expects it to equal the engine checkout being tested. The workflows validate the shape, not the
+provenance, so verify reachability before accepting a lock bump:
 
-| Variable | Default | What |
+```bash
+ENGINE_SHA="$(tr -d '[:space:]' < /path/to/genie-spaces-content/engine.lock)"
+git -C /path/to/genie-promote-cicd fetch origin main
+git -C /path/to/genie-promote-cicd merge-base --is-ancestor "$ENGINE_SHA" origin/main
+```
+
+The final command must exit `0`. Protect engine `main` so this check implies that the locked code
+passed the engine repository's review and checks.
+
+### Replace all sample configuration
+
+Changing only `databricks.yml` is not enough. Review every row:
+
+| Repository/file | Required changes |
+|---|---|
+| Engine `databricks.yml` | `domain`, DEV host/warehouse, PROD warehouse, Lakebase name/database, and documented direct-access allowlist. The allowlist variable is not enforcement. |
+| Engine `scripts/render.sh` | `DOMAIN` default and any retained sample dashboard/setup filenames and display names. |
+| Engine `scripts/build_promote_app.sh` | `APP_DOMAIN`, Steward/Admin emails, content repo, engine URL, reviewer endpoint, slug map, and KA seed. |
+| Engine `scripts/provision_ci.sh` | PROD profile/host, SP name, PROD catalog, warehouse, and repository. |
+| Engine `scripts/provision_dev_sp.sh` | Prefer explicit `DEV_PROFILE`, `DEV_CATALOG`, warehouse, SP name, scope, and Space IDs. |
+| Content workflows | `APP_REPO`, `APP_SPACE_SLUGS`, runner labels, and any domain-specific settings. |
+| Content `engine.lock` | Full reviewed engine commit SHA. |
+| Content `src/` | Remove the sample for a clean install, or replace every artifact intentionally. |
+
+Add explicit entries to the generated `app.yaml` block in
+`scripts/build_promote_app.sh`:
+
+```yaml
+  - name: APP_LLM_ENDPOINT
+    value: "<prod-reviewer-endpoint>"
+  - name: APP_REPO_URL
+    value: "https://github.com/<owner>/genie-promote-cicd"
+```
+
+For the first deployment:
+
+```yaml
+  - name: APP_SPACE_SLUGS
+    value: '{}'
+  - name: APP_KA_SEED
+    value: '[]'
+```
+
+Also set `APP_GH_REPO` to the content repository and remove every sample email, endpoint, Space ID,
+and repository name from the generated app manifest.
+
+Use one canonical `APP_SPACE_SLUGS` JSON value in both `build_promote_app.sh` and the content
+`eval-run` job. An empty clean install uses reversible `s_<space-id>` slugs and needs no pins. If you
+choose a friendly pinned slug, the two maps must remain byte-identical; otherwise the live eval job
+cannot recover the DEV Space ID and the current script degrades to a green advisory.
+
+Use targeted searches as a review aid, not as an automatic deletion rule:
+
+```bash
+rg -n "malcoln|pedro|cerc|recebiveis|genie-spaces-content|01f[0-9a-f]+|ka-[a-z0-9-]+-endpoint" \
+  databricks.yml scripts app engine_api .github
+```
+
+Test and fixture matches may remain. Deployment manifests, workflows, and provisioning defaults
+must be intentional.
+
+### Harden workflows before configuring credentials
+
+Commit these changes while the new repositories have no active Databricks credentials. The first
+push may show a failed or unroutable deploy job, but it cannot mutate a workspace:
+
+- remove job-level configuration `if` conditions from the engine `validate`, both content PR jobs,
+  and content `deploy-prod`; missing configuration must fail instead of skip;
+- add a fail-closed first step to every credentialed job. Check host, client ID, secret, and the
+  job's warehouse. `deploy-prod` must also check both `BUNDLE_DEV_*` values before mutation;
+- remove `paths-ignore` for Markdown/docs from workflows whose check names will be required. The
+  deployment workflow may retain its docs-only filter because it is not a required PR check;
+- change the engine/content PROD validation references to the `DATABRICKS_VALIDATION_*` names
+  provisioned in step 7; keep `DATABRICKS_PROD_*` only in `deploy-prod`;
+- make unresolved eval slugs fail before `check_eval_run.py` runs. Do not accept its current
+  unresolved-slug advisory as proof that the required live evaluation executed.
+
+A minimal configuration step can map the job-specific warehouse to `REQUIRED_WAREHOUSE_ID`:
+
+```yaml
+- name: Verify required configuration
+  shell: bash
+  run: |
+    required=(DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET REQUIRED_WAREHOUSE_ID)
+    for name in "${required[@]}"; do
+      [ -n "${!name:-}" ] || { echo "::error::$name is not configured"; exit 1; }
+    done
+```
+
+Set `REQUIRED_WAREHOUSE_ID` from the validation, DEV, or PROD variable appropriate to that job. In
+`deploy-prod`, include `BUNDLE_DEV_HOST` and `BUNDLE_DEV_WAREHOUSE_ID` in `required`.
+
+In the content `eval-run` job, add this after the changed-slug and engine-checkout steps:
+
+```yaml
+- name: Require resolvable DEV Space IDs
+  working-directory: app
+  run: |
+    for slug in ${{ steps.changed.outputs.slugs }}; do
+      python3 - "$slug" <<'PY'
+    import json
+    import os
+    import sys
+
+    slug = sys.argv[1]
+    pins = json.loads(os.environ.get("APP_SPACE_SLUGS") or "{}")
+    resolved = next((space_id for space_id, pinned in pins.items() if pinned == slug), None)
+    resolved = resolved or (slug[2:] if slug.startswith("s_") and len(slug) > 2 else None)
+    if not resolved:
+        raise SystemExit(f"EVAL-RUN cannot resolve DEV Space ID for slug {slug!r}")
+    PY
+    done
+```
+
+## 7. Prepare Databricks and CI
+
+### Create the data foundation
+
+Create or select:
+
+- `dev_<domain>` and `prod_<domain>` catalogs;
+- all referenced schemas/tables;
+- one Genie-compatible warehouse per workspace;
+- the intended audience's table privileges.
+
+Verify physical access with the identities that will use the data. The promotion pipeline does not
+seed or grant production data unless you deliberately retain and run the sample setup job.
+
+### Provision the PROD deployment service principal
+
+`scripts/provision_ci.sh` creates the deployment identity, its baseline grants, an OAuth credential,
+and the GitHub Environment reviewer. It is sample-biased and must be edited before use:
+
+- set the PROD profile/host, SP name, catalog, and warehouse;
+- create the content repository's `prod` Environment first;
+- change its GitHub writes to store `DATABRICKS_PROD_*` as `prod` **Environment** variables/secrets,
+  not repository-level values, and pipe the secret to `gh secret set` through stdin;
+- run it only for the content repository in the split-identity production model;
+- remember that it creates a new OAuth secret on every invocation.
+
+```bash
+gh api -X PUT repos/<owner>/genie-spaces-content/environments/prod
+
+# The edited helper's GitHub-write block should have this shape:
+gh variable set DATABRICKS_PROD_HOST --repo "$GH_REPO" --env prod --body "$PROD_HOST"
+gh variable set DATABRICKS_PROD_SP_CLIENT_ID --repo "$GH_REPO" --env prod --body "$SP_APP_ID"
+printf '%s' "$SECRET" |
+  gh secret set DATABRICKS_PROD_SP_SECRET --repo "$GH_REPO" --env prod
+gh variable set DATABRICKS_PROD_WAREHOUSE_ID --repo "$GH_REPO" --env prod \
+  --body "$PROD_WAREHOUSE_ID"
+```
+
+After editing the helper:
+
+```bash
+PROD_WAREHOUSE_ID=<prod-warehouse-id> \
+STEWARD_GH=<steward-github-login> \
+GH_REPO=<owner>/genie-spaces-content \
+  bash scripts/provision_ci.sh
+```
+
+Record the deployment SP application ID and numeric SCIM ID printed by the script. Do not publish
+its admin credential to the engine repository or the content repository scope.
+
+The current deployer needs workspace-admin membership for the App/Lakebase binding. Add the CI SP
+to PROD `admins` explicitly:
+
+```bash
+ADMIN_GROUP_ID="$(databricks groups list -p <prod-profile> \
+  --filter 'displayName eq "admins"' -o json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); xs=d if isinstance(d,list) else d.get("Resources",d.get("resources",[])); print(xs[0]["id"])')"
+
+databricks groups patch "$ADMIN_GROUP_ID" -p <prod-profile> --json \
+  '{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"add","path":"members","value":[{"value":"<ci-sp-numeric-id>"}]}]}'
+```
+
+Revalidate the deployment SP's Unity Catalog privileges against its real duties. It no longer
+grants data access to declared audiences. Retain `CREATE_SCHEMA` only if this identity will run the
+sample seed, and remove legacy `MANAGE` when no deployment action requires it.
+
+### Provision a separate PR validation service principal
+
+Create a non-admin PROD service principal for engine/content PR validation. It needs workspace
+access, `CAN_USE` on the validation warehouse, and enough read access to resolve the PROD tables,
+effective grants, users, and groups used by `check_audience.py`; it must not join `admins` or mutate
+the app/Lakebase resources.
+
+```bash
+VALIDATION_SP_JSON="$(databricks service-principals create \
+  --display-name genie-promote-validation-sp -p <prod-profile> -o json)"
+VALIDATION_SP_APP_ID="$(printf '%s' "$VALIDATION_SP_JSON" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["applicationId"])')"
+VALIDATION_SP_NUM_ID="$(printf '%s' "$VALIDATION_SP_JSON" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+unset VALIDATION_SP_JSON
+
+databricks service-principals patch "$VALIDATION_SP_NUM_ID" -p <prod-profile> --json \
+  '{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"add","path":"entitlements","value":[{"value":"workspace-access"}]}]}'
+
+databricks warehouses update-permissions <prod-warehouse-id> -p <prod-profile> --json \
+  "{\"access_control_list\":[{\"service_principal_name\":\"$VALIDATION_SP_APP_ID\",\"permission_level\":\"CAN_USE\"}]}"
+databricks grants update catalog prod_<domain> -p <prod-profile> --json \
+  "{\"changes\":[{\"principal\":\"$VALIDATION_SP_APP_ID\",\"add\":[\"USE_CATALOG\"]}]}"
+```
+
+Grant `USE_SCHEMA`/`SELECT` only where your audience preflight needs to inspect effective access.
+Authenticate once as this SP and prove that `users list`, `groups list`, `tables get`, and
+`grants get` work for representative objects. If the workspace cannot expose those reads without
+admin, the current audience check cannot provide a truly least-privilege split there; keep the
+trusted-contributor boundary and treat that as a production gap rather than silently promoting the
+validation identity to admin.
+
+Mint one validation credential and write it to both repositories:
+
+```bash
+VALIDATION_CRED_JSON="$(databricks service-principal-secrets-proxy create \
+  "$VALIDATION_SP_NUM_ID" -p <prod-profile> -o json)"
+VALIDATION_SP_SECRET="$(printf '%s' "$VALIDATION_CRED_JSON" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])')"
+unset VALIDATION_CRED_JSON
+
+for REPO in <owner>/genie-promote-cicd <owner>/genie-spaces-content; do
+  gh variable set DATABRICKS_VALIDATION_HOST --repo "$REPO" --body '<prod-workspace-url>'
+  gh variable set DATABRICKS_VALIDATION_SP_CLIENT_ID --repo "$REPO" \
+    --body "$VALIDATION_SP_APP_ID"
+  gh variable set DATABRICKS_VALIDATION_WAREHOUSE_ID --repo "$REPO" \
+    --body '<prod-warehouse-id>'
+  printf '%s' "$VALIDATION_SP_SECRET" |
+    gh secret set DATABRICKS_VALIDATION_SP_SECRET --repo "$REPO"
+done
+unset VALIDATION_SP_SECRET VALIDATION_SP_APP_ID VALIDATION_SP_NUM_ID REPO
+```
+
+In engine `ci.yml` and the content `pr-checks.yml` `validate` job, replace PROD credential
+references with `DATABRICKS_VALIDATION_*`. Keep the public job name `bundle validate (prod)` and
+continue validating the `prod` bundle target. The content `eval-run` job keeps its DEV identity;
+`deploy.yml` keeps `DATABRICKS_PROD_*`, which now resolve only after the `prod` Environment gate.
+
+### Configure repository credentials
+
+Expected GitHub configuration:
+
+| Scope | Variables | Secrets |
 |---|---|---|
-| `lakebase_instance` | `genie-promote` | Lakebase instance name (isolation is per-workspace) |
-| `lakebase_database` | `databricks_postgres` | Postgres database the app uses |
-| `lakebase_capacity` | `CU_1` | instance SKU (autoscaling floor) |
+| Engine repository | `DATABRICKS_VALIDATION_HOST`, `DATABRICKS_VALIDATION_SP_CLIENT_ID`, `DATABRICKS_VALIDATION_WAREHOUSE_ID` | `DATABRICKS_VALIDATION_SP_SECRET` |
+| Content repository | all three validation variables, `DATABRICKS_DEV_HOST`, `DATABRICKS_DEV_WAREHOUSE_ID`, `DATABRICKS_DEV_SP_CLIENT_ID` | `DATABRICKS_VALIDATION_SP_SECRET`, `DATABRICKS_DEV_SP_SECRET`, and `ENGINE_REPO_READ_TOKEN` when the engine is private |
+| Content `prod` Environment | `DATABRICKS_PROD_HOST`, `DATABRICKS_PROD_SP_CLIENT_ID`, `DATABRICKS_PROD_WAREHOUSE_ID` | `DATABRICKS_PROD_SP_SECRET` |
 
-The app's schema is config-driven too, via an app env var (defaults work for every deployment):
+Only the content repository has the protected `prod` Environment. Confirm no
+`DATABRICKS_PROD_SP_SECRET` remains at repository scope.
 
-| App env | Default | What |
-|---|---|---|
-| `APP_LAKEBASE_SCHEMA` | `genie_promote` | Postgres schema the store owns (NOT `public` — see below) |
+Set the non-secret DEV values explicitly:
 
-### Pre-pilot demo-ledger reset
+```bash
+gh variable set DATABRICKS_DEV_HOST --repo <owner>/genie-spaces-content \
+  --body '<dev-workspace-url>'
+gh variable set DATABRICKS_DEV_WAREHOUSE_ID --repo <owner>/genie-spaces-content \
+  --body '<dev-warehouse-id>'
+```
 
-The pilot does not need to retain demo execution history. Preview the reset first, then execute it
-with the explicit confirmation phrase:
+`DATABRICKS_DEV_SP_CLIENT_ID` and `DATABRICKS_DEV_SP_SECRET` are populated after the DEV transport
+identity is provisioned in step 10.
+
+Do not enable branch protection yet; first make the checks report successfully once.
+
+### Register runners
+
+Runner dependencies are Git, Bash, Python 3.12, Node/npm, `rsync`, and outbound access to
+GitHub/Databricks/PyPI/npm.
+
+For repository-scoped runners, use different installation directories and labels, for example:
+
+```text
+~/actions-runner-genie-engine   labels: self-hosted,genie-promote-engine
+~/actions-runner-genie-content  labels: self-hosted,genie-promote-content
+```
+
+Update `runs-on` in the engine and content workflows to match those labels. An organization runner
+group restricted to both repositories is an alternative.
+
+```yaml
+# Engine workflow jobs
+runs-on: [self-hosted, genie-promote-engine]
+
+# Content workflow jobs
+runs-on: [self-hosted, genie-promote-content]
+```
+
+Verify that each runner completes a harmless checkout-only job before giving it workspace
+credentials. Keep the runner isolated from unrelated workloads.
+
+## 8. Bootstrap the control plane once
+
+Do this **before** the first content deployment. `scripts/deploy_attempt.py` deliberately verifies
+that the app and its service principal already exist during preflight.
+
+Run the bootstrap as the same CI service principal used by the workflows. The bundle currently uses
+identity-scoped state; bootstrapping as a human and later deploying as the CI SP can create a second
+state root and resource conflicts.
+
+Create a short-lived bootstrap secret for the CI SP with the PROD admin profile:
+
+```bash
+BOOTSTRAP_JSON="$(databricks service-principal-secrets-proxy create \
+  <ci-sp-numeric-id> -p <prod-profile> -o json)"
+BOOTSTRAP_SECRET_ID="$(printf '%s' "$BOOTSTRAP_JSON" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+
+cleanup_bootstrap() {
+  unset DATABRICKS_CLIENT_SECRET DATABRICKS_CLIENT_ID DATABRICKS_AUTH_TYPE DATABRICKS_HOST
+  unset DATABRICKS_BUNDLE_ENGINE
+  if [ -n "${BOOTSTRAP_SECRET_ID:-}" ]; then
+    if ! databricks service-principal-secrets-proxy delete \
+      <ci-sp-numeric-id> "$BOOTSTRAP_SECRET_ID" -p <prod-profile>; then
+      echo "ERROR: temporary CI credential still exists: $BOOTSTRAP_SECRET_ID" >&2
+      return 1
+    fi
+    unset BOOTSTRAP_SECRET_ID
+  fi
+}
+trap cleanup_bootstrap EXIT
+
+export DATABRICKS_HOST="<prod-workspace-url>"
+export DATABRICKS_AUTH_TYPE="oauth-m2m"
+export DATABRICKS_CLIENT_ID="<ci-sp-application-id>"
+export DATABRICKS_BUNDLE_ENGINE="direct"
+export DATABRICKS_CLIENT_SECRET="$(printf '%s' "$BOOTSTRAP_JSON" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])')"
+unset BOOTSTRAP_JSON
+```
+
+From the configured engine repository:
+
+```bash
+DOMAIN=<domain> bash scripts/render.sh prod
+
+BUNDLE_DEV_HOST=<dev-workspace-url> \
+BUNDLE_DEV_WAREHOUSE_ID=<dev-warehouse-id> \
+DATABRICKS_BUNDLE_WAREHOUSE_ID=<prod-warehouse-id> \
+  bash scripts/build_promote_app.sh
+
+databricks bundle validate --strict -t prod \
+  --var "domain=<domain>" \
+  --var "warehouse_id=<prod-warehouse-id>" \
+  --var "dev_host=<dev-workspace-url>" \
+  --var "dev_warehouse_id=<dev-warehouse-id>" \
+  --var "lakebase_instance=<lakebase-name>"
+
+databricks apps deploy -t prod --auto-approve \
+  --var "domain=<domain>" \
+  --var "warehouse_id=<prod-warehouse-id>" \
+  --var "dev_host=<dev-workspace-url>" \
+  --var "dev_warehouse_id=<dev-warehouse-id>" \
+  --var "lakebase_instance=<lakebase-name>"
+```
+
+`databricks apps deploy` is the CLI's Databricks Apps project wrapper: it uses this bundle's root and
+identity-scoped state, then starts the app. Steady-state content deployments call `bundle deploy`
+through `deploy_attempt.py` against the same root/state. If project deployment is unavailable in a
+future CLI, the equivalent bootstrap is `bundle deploy` followed by `bundle run promote_app` under
+the same CI identity.
+
+This standalone engine-only deployment is safe **only before the first content deployment**. After
+the bundle manages any PROD Space, dashboard, or setup resource, never run a full deploy from an
+engine-only checkout: its empty `src/` can be interpreted as an empty desired set and remove managed
+content. Every later full deployment must overlay the complete current content repository exactly as
+`deploy.yml` does.
+
+Remove the temporary secret even if you retain the longer-lived GitHub Actions credential:
+
+```bash
+cleanup_bootstrap
+trap - EXIT
+```
+
+Verify:
+
+```bash
+databricks apps get genie-promote-app -p <prod-profile> -o json
+databricks database get-database-instance <lakebase-name> -p <prod-profile> -o json
+```
+
+Expected results:
+
+- app state `RUNNING` and a non-empty URL;
+- Lakebase state `AVAILABLE`;
+- startup logs show successful migrations in the dedicated `genie_promote` schema.
+
+OAuth is required for `databricks apps logs`. A PAT profile can check app status but may not stream
+logs.
+
+## 9. Grant the app service principal its runtime access
+
+Resolve the app SP:
+
+```bash
+APP_SP="$(databricks apps get genie-promote-app -p <prod-profile> -o json |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["service_principal_client_id"])')"
+```
+
+Grant:
+
+- `CAN_USE` on the PROD warehouse;
+- `USE_CATALOG` on `prod_<domain>`;
+- `USE_SCHEMA` on each schema the app must browse;
+- `CAN_QUERY` on the reviewer endpoint;
+- `CAN_QUERY` on optional KA endpoints;
+- `READ` on the PROD secret scope after it is created.
+
+Examples:
+
+```bash
+databricks warehouses update-permissions <prod-warehouse-id> -p <prod-profile> --json \
+  "{\"access_control_list\":[{\"service_principal_name\":\"$APP_SP\",\"permission_level\":\"CAN_USE\"}]}"
+
+databricks grants update catalog prod_<domain> -p <prod-profile> --json \
+  "{\"changes\":[{\"principal\":\"$APP_SP\",\"add\":[\"USE_CATALOG\"]}]}"
+
+databricks grants update schema prod_<domain>.<schema> -p <prod-profile> --json \
+  "{\"changes\":[{\"principal\":\"$APP_SP\",\"add\":[\"USE_SCHEMA\"]}]}"
+
+databricks serving-endpoints update-permissions <reviewer-endpoint> -p <prod-profile> --json \
+  "{\"access_control_list\":[{\"service_principal_name\":\"$APP_SP\",\"permission_level\":\"CAN_QUERY\"}]}"
+```
+
+Grant every intended human persona access to the app. In-app roles remain authoritative for
+Steward/Admin capabilities, but Authors, Stewards, and Platform Admins all need workspace-level
+`CAN_USE` before they can open it:
+
+```bash
+databricks apps update-permissions genie-promote-app -p <prod-profile> --json \
+  '{"access_control_list":[
+    {"group_name":"<authors-group>","permission_level":"CAN_USE"},
+    {"group_name":"<stewards-group>","permission_level":"CAN_USE"},
+    {"group_name":"<platform-admins-group>","permission_level":"CAN_USE"}
+  ]}'
+```
+
+The governed deployment later asserts app-SP `CAN_MANAGE` on every deployed PROD Space.
+
+### Restrict direct Lakebase access
+
+`lakebase_direct_access_admins` records the intended allowlist but is not consumed by the bundle or
+any script. Changing it does **not** alter Lakebase permissions.
+
+After bootstrap, use the Lakebase UI and Postgres SQL to audit both permission layers:
+
+1. In the Lakebase project **Settings → Project permissions**, retain only the platform access the
+   app and named operators require. Workspace admins retain default project `CAN_MANAGE`.
+2. Resolve/create the OAuth Postgres roles for the app SP and each named break-glass admin.
+3. With `GRANT`/`REVOKE`, restrict database, schema, table, and sequence access to those roles. The
+   app role needs create/read/write access to its `genie_promote` schema; human roles should receive
+   only the approved break-glass level.
+4. Verify a listed identity can connect and an unlisted non-admin identity cannot read the schema.
+   Record that evidence with the installation.
+
+Project ACLs and Postgres database grants are separate and do not synchronize automatically. Follow
+the current Databricks guides for
+[project permissions](https://docs.databricks.com/aws/en/oltp/projects/manage-project-permissions)
+and [database permissions](https://docs.databricks.com/aws/en/oltp/projects/manage-roles-permissions).
+
+## 10. Provision cross-workspace DEV access
+
+Re-resolve the app SP in the current shell; the credential-copy commands below grant it scope
+access and must not rely on a variable left over from step 9:
+
+```bash
+APP_SP="$(databricks apps get genie-promote-app -p <prod-profile> -o json |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["service_principal_client_id"])')"
+[ -n "$APP_SP" ] || { echo "ERROR: app service principal not found"; exit 1; }
+```
+
+Create the DEV secret scope before running the helper:
+
+```bash
+databricks secrets create-scope genie_promote -p <dev-profile>
+```
+
+Then:
+
+```bash
+DEV_PROFILE=<dev-profile> \
+DEV_CATALOG=dev_<domain> \
+DEV_WAREHOUSE_ID=<dev-warehouse-id> \
+DEV_SPACE_IDS=<comma-separated-existing-space-ids> \
+  bash scripts/provision_dev_sp.sh
+```
+
+The helper creates/reuses the DEV transport SP, grants workspace/warehouse/catalog access, applies
+`CAN_MANAGE` to the listed existing Spaces, and records its OAuth credential in the DEV scope.
+
+### Replicate the credential
+
+The same client ID/secret must exist in:
+
+1. DEV `genie_promote`, for helper bookkeeping;
+2. PROD `genie_promote`, for the running app;
+3. the content repository variables/secrets, for live DEV evaluation.
+
+The current helper does not create the PROD copy. An admin CLI may be able to read the DEV secrets:
+
+```bash
+CLIENT_ID="$(databricks secrets get-secret genie_promote dev_sp_client_id \
+  -p <dev-profile> -o json |
+  python3 -c 'import base64,json,sys; print(base64.b64decode(json.load(sys.stdin)["value"]).decode())')"
+CLIENT_SECRET="$(databricks secrets get-secret genie_promote dev_sp_client_secret \
+  -p <dev-profile> -o json |
+  python3 -c 'import base64,json,sys; print(base64.b64decode(json.load(sys.stdin)["value"]).decode())')"
+
+databricks secrets create-scope genie_promote -p <prod-profile> 2>/dev/null || true
+printf '%s' "$CLIENT_ID" |
+  databricks secrets put-secret genie_promote dev_sp_client_id -p <prod-profile>
+printf '%s' "$CLIENT_SECRET" |
+  databricks secrets put-secret genie_promote dev_sp_client_secret -p <prod-profile>
+databricks secrets put-acl genie_promote "$APP_SP" READ -p <prod-profile>
+
+gh variable set DATABRICKS_DEV_SP_CLIENT_ID --repo <owner>/genie-spaces-content \
+  --body "$CLIENT_ID"
+printf '%s' "$CLIENT_SECRET" |
+  gh secret set DATABRICKS_DEV_SP_SECRET --repo <owner>/genie-spaces-content
+
+unset CLIENT_ID CLIENT_SECRET
+```
+
+`get-secret` is an undocumented DBUtils-oriented API and can return `BAD_REQUEST` outside a
+notebook. If it does, do not copy secrets through logs or files. Mint a replacement credential and
+write it to every destination while the one-time value is still in memory:
+
+```bash
+DEV_SP_NAME=<chosen-dev-sp-name>
+read -r DEV_CLIENT_ID DEV_SP_NUM_ID < <(
+  databricks service-principals list -p <dev-profile> -o json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); xs=d if isinstance(d,list) else d.get("Resources",d.get("resources",[])); s=next(x for x in xs if x.get("displayName")==sys.argv[1]); print(s["applicationId"],s["id"])' "$DEV_SP_NAME"
+)
+
+DEV_CRED_JSON="$(databricks service-principal-secrets-proxy create \
+  "$DEV_SP_NUM_ID" -p <dev-profile> -o json)"
+DEV_SECRET_ID="$(printf '%s' "$DEV_CRED_JSON" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+DEV_CLIENT_SECRET="$(printf '%s' "$DEV_CRED_JSON" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])')"
+unset DEV_CRED_JSON
+
+# DEV bookkeeping used by provision_dev_sp.sh
+printf '%s' "$DEV_CLIENT_ID" |
+  databricks secrets put-secret genie_promote dev_sp_client_id -p <dev-profile>
+printf '%s' "$DEV_CLIENT_SECRET" |
+  databricks secrets put-secret genie_promote dev_sp_client_secret -p <dev-profile>
+printf '%s' "$DEV_SECRET_ID" |
+  databricks secrets put-secret genie_promote dev_sp_secret_id -p <dev-profile>
+
+# PROD runtime
+databricks secrets create-scope genie_promote -p <prod-profile> 2>/dev/null || true
+printf '%s' "$DEV_CLIENT_ID" |
+  databricks secrets put-secret genie_promote dev_sp_client_id -p <prod-profile>
+printf '%s' "$DEV_CLIENT_SECRET" |
+  databricks secrets put-secret genie_promote dev_sp_client_secret -p <prod-profile>
+databricks secrets put-acl genie_promote "$APP_SP" READ -p <prod-profile>
+
+# Content workflow
+gh variable set DATABRICKS_DEV_SP_CLIENT_ID --repo <owner>/genie-spaces-content \
+  --body "$DEV_CLIENT_ID"
+printf '%s' "$DEV_CLIENT_SECRET" |
+  gh secret set DATABRICKS_DEV_SP_SECRET --repo <owner>/genie-spaces-content
+
+unset DEV_CLIENT_ID DEV_CLIENT_SECRET DEV_SECRET_ID DEV_SP_NUM_ID DEV_SP_NAME
+```
+
+Automate this single-write flow before broad rollout.
+
+Re-run `provision_dev_sp.sh` after a DEV workspace reset and whenever an existing DEV Space is
+added to the managed set.
+
+## 11. Configure the GitHub App
+
+Create a GitHub App installed only on the content repository.
+
+Repository permissions:
+
+| Permission | Access |
+|---|---|
+| Contents | Read and write |
+| Pull requests | Read and write |
+| Issues | Read and write |
+| Checks | Read |
+| Actions | Read |
+| Administration | Read |
+| Metadata | Read (automatic) |
+
+Disable webhooks unless you explicitly implement them. Generate a private key, restrict its local
+file permissions, and install the App on the content repository.
+
+After the control plane exists:
+
+```bash
+chmod 600 /path/to/github-app.pem
+scripts/provision_github_app_secrets.sh \
+  <github-app-id> \
+  /path/to/github-app.pem \
+  <prod-profile> \
+  <owner>/genie-spaces-content
+```
+
+The helper discovers the installation ID, writes the three PROD scope keys, and attempts to grant
+the app SP `READ`. Treat any `WARN` as a failure: the helper currently suppresses some ACL/token
+verification errors. It currently passes the PEM through a command argument; on a shared host,
+update its `put-secret` calls to read from stdin before use.
+
+Verify that the GitHub App can:
+
+- read the repository;
+- create a branch and PR;
+- post an issue/PR comment;
+- read check runs and annotations;
+- read workflow runs and approvals;
+- read the `prod` Environment and `main` branch protection.
+
+Delete or archive the PEM securely after storing and verifying it. Rotate it immediately after any
+suspected exposure.
+
+## 12. Configure governance controls
+
+### Protected production Environment
+
+On the content repository:
+
+- confirm Environment `prod` exists and holds the deployment-only variables/secret from step 7;
+- add the Steward as required reviewer;
+- enable `Prevent self-review`;
+- prevent untrusted bypass.
+
+Map the same Steward's Databricks email to their GitHub login in the app's role configuration.
+Sign in as the bootstrap Admin, open **Administração → Configurações → Papéis
+configurados**, choose `Steward`, enter the exact GitHub username, and save. Confirm the assignment
+appears and that **Divergência com o GitHub** reports no Steward/Environment mismatch.
+
+### Content branch protection
+
+GitHub cannot require a check context until it has reported at least once. Commit the workflow
+hardening in step 6 before adding credentials, then continue step 13 through the first successful PR
+checks without merging. Return here and require:
+
+- `bundle validate (prod)`;
+- `eval-run pass-rate (dev)`;
+- strict, up-to-date checks;
+- enforcement for administrators;
+- at least one approving PR review;
+- no unreviewed bypass actors.
+
+Protect engine `main` as well. At minimum require its `bundle validate (prod)` check and review
+engine changes before bumping `engine.lock`. Apply the same always-reporting rule to its required
+check.
+
+## 13. Run the first end-to-end promotion
+
+Prepare one DEV Space:
+
+- it references only `dev_<domain>` tables;
+- the Author can access it;
+- the DEV transport SP has `CAN_MANAGE`;
+- any group-based ACL uses an account-level group consistently assigned in DEV and PROD, or the
+  Author is granted directly by user;
+- it has at least two benchmark questions;
+- the intended audience already has its data privileges.
+
+Then:
+
+1. Open the PROD app as an Author.
+2. Confirm the Space appears.
+3. Run a review and verify the configured reviewer endpoint responds.
+4. Request promotion.
+5. Verify the content PR contains `serialized_space`, `.title`, `.audience.json`, and any mapping.
+6. Verify both required checks pass against the locked engine SHA.
+7. Return to step 12 and enable branch protection with both now-visible check contexts.
+8. Obtain the required PR approval and have the authorized reviewer/merger merge the PR.
+9. Have a different GitHub actor, assigned as Steward, approve the `prod` Environment. With
+   `Prevent self-review`, the actor who triggered the deployment cannot also approve it.
+10. Verify the deployment completes all stages: preflight, bundle deploy, Space resolution,
+   app `CAN_MANAGE`, audience reconciliation, and live readback.
+11. Verify the app shows the completed audit timeline and the PROD Space has the expected content
+    and `CAN_RUN` audience.
+
+The installation is ready only when this succeeds without a human Databricks token in CI.
+
+## 14. Optional features
+
+### Knowledge Assistants
+
+Create and activate the Agent Bricks KAs, grant the app SP `CAN_QUERY` on each serving endpoint,
+then add a customer-specific `APP_KA_SEED`. KA findings are advisory and never block promotion.
+
+KA endpoints use the Responses API shape at `/invocations`, not Chat Completions.
+
+### Sample data
+
+The sample content's `src/setup/seed_recebiveis.py` becomes a bundle `setup` job only after the
+content is overlaid and rendered. Deployment does not run it. Review it, deploy it intentionally to
+the correct target, and invoke `bundle run setup` only in a disposable/demo installation.
+
+### Reset demo history
+
+Preview first:
 
 ```bash
 python3 scripts/reset_demo_ledger.py --profile <prod-profile>
+```
+
+Execute only in the intended demo installation:
+
+```bash
 python3 scripts/reset_demo_ledger.py --profile <prod-profile> \
   --execute --confirm DELETE-DEMO-LEDGER
 ```
 
-This deletes Promotions, Review Snapshots, Audit Trail rows, Deployment Attempts and Rehydrate
-Events. It preserves roles, rules and rule audit, reviewer prompt and Knowledge Assistant registry.
-The operation is idempotent and the normal startup migrations can bootstrap the schema from empty.
+This preserves roles, rules, reviewer prompt, and KA configuration.
 
-**How the app connects — no static password (US-11).** The app `database` binding grants the app SP
-`CAN_CONNECT_AND_CREATE` and makes the platform inject `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER`
-(the SP client id) / `PGSSLMODE`. The app mints a **short-lived OAuth credential** at connect time
-(`WorkspaceClient().database.generate_database_credential(instance_names=[…])`) and uses it as the
-Postgres password (`sslmode=require`). Nothing static is stored or committed.
+## 15. Day-2 operations
 
-**Scheduled reconciler (LB6) — audit completeness when no one is viewing.** A config-driven in-app
-periodic task (`APP_RECONCILE_INTERVAL_SEC`, default 300s; 0/unset disables) sweeps all NON-terminal
-promotions and runs the SAME `reconcile` (LB4) over each — so an overnight merge/deploy is recorded
-even if no browser was open. **Why an app task, not a DABs job:** it reuses the app's live store +
-bot factory + the injected PG*/secret env with zero connection re-plumbing (a separate job wouldn't
-get the app's `database` binding injection and would have to re-resolve the Lakebase connection); the
-Databricks Apps container runs continuously (not scale-to-zero), so a periodic task is reliable.
-Idempotent (reuses the same reconcile + the `uq_audit_milestone` dedup), so a multi-replica deploy is
-safe — but each replica runs its own sweep, so the GitHub API call rate scales with the replica count
-(the 300s default comfortably accommodates 2–3 replicas; raise it if you scale out further or have
-many non-terminal promotions — the reconciler logs a warning past ~20). To switch to a DABs job
-instead, add a `resources/*.job.yml` Python task that calls `reconcile.reconcile_all(store,
-github_app_factory)` after building the store from the SP-OAuth path.
+### Upgrade the engine
 
-**Connectivity smoke** (`SELECT 1` via OAuth, no password):
-```bash
-python scripts/verify_lakebase.py --profile <prod-profile>          # local operator (your identity)
-# on the deployed app the same logic runs as the SP off the injected PG* env
-```
+1. Merge and validate the engine change.
+2. Verify the commit is reachable from protected engine `main` or a trusted immutable release.
+3. Copy its full commit SHA into content `engine.lock`.
+4. Open a content PR containing only the reviewed lock bump.
+5. Run both content checks against that SHA.
+6. Merge and approve deployment through the normal gate.
 
-**First-deploy ordering / SP schema ownership (a real Lakebase gotcha).** DABs provisions the
-instance (waits for `AVAILABLE`) before binding the app (the binding references the instance via
-`${resources…}`). The app SP has `CAN_CONNECT_AND_CREATE` — it can create NEW objects (incl. its own
-schema) but **cannot create in the pre-existing `public` schema** (`permission denied for schema
-public`). So the store (LB2) creates + uses a **dedicated schema the SP owns** (`APP_LAKEBASE_SCHEMA`,
-default `genie_promote`), pinned via the connection's `search_path` — never `public`. The app's
-idempotent startup migrations create the schema + tables as the SP on first boot.
+Never point workflows at a floating engine branch for production.
 
-Consequence: **deploy the app before running any store code locally.** If you run the local store
-verify with the default schema first, *your* identity creates + owns `genie_promote` and the SP is
-then locked out. `scripts/verify_lakebase_store.py` defaults to a throwaway schema
-(`lb_verify_local`, dropped after) for exactly this reason — pass `--schema genie_promote` only after
-the deployed app owns it (and only if your identity has access).
+### Recover after a DEV reset
 
-## Dev-reader/writer SP — bootstrap + secret replication (A2, ADR-0006)
+1. Recreate/bind the DEV catalog, warehouse, users/groups, and Spaces. Record any new workspace URL,
+   warehouse ID, and Space IDs.
+2. If the host or warehouse changed, update `DATABRICKS_DEV_HOST` and
+   `DATABRICKS_DEV_WAREHOUSE_ID` in the content repository.
+3. Trigger a governed **content-repository** deployment so the workflow overlays the complete
+   current `src/` before rebuilding the app. If no engine/content artifact changed, update a tracked
+   non-documentation marker such as `.deploy-trigger` in a reviewed PR; its merge runs `deploy.yml`
+   with the new variables and the protected `prod` Environment. This refreshes baked
+   `APP_DEV_HOST`/`APP_DEV_WAREHOUSE_ID`; changing GitHub variables alone does not.
+4. Re-run `provision_dev_sp.sh` with the current Space IDs and replicate a newly minted secret only
+   if the helper reports rotation.
+5. If custom pinned Space IDs changed, update the canonical `APP_SPACE_SLUGS` in both the app build
+   and content eval workflow, then redeploy the app through the reviewed engine/lock process.
+6. Prove the app reports the new DEV host/warehouse and re-run the live DEV eval check before
+   accepting promotions.
 
-The prod-hosted app has no forwarded dev token (OBO cannot span workspaces), so every dev-side Genie
-call — list/export at promotion time, rehydrate — runs as a **standing dev-reader/writer service
-principal**, scoped to the Genie APIs plus the minimum UC/warehouse reach an export needs (never
-`SELECT`, never other catalogs). This is a **separate bootstrap step from Go-live above** — it
-unlocks the promotion export + rehydrate paths, not the app-in-prod milestone itself, and it's safe
-to do any time after the app is live.
+### Rotate credentials
 
-1. **Provision (and re-run after every dev workspace wipe — this is a self-heal, not one-time)**:
-   ```bash
-   DEV_WAREHOUSE_ID=<dev sql warehouse id> \
-   DEV_SPACE_IDS=<comma-separated existing dev Genie space ids, if any> \
-     bash scripts/provision_dev_sp.sh   # DEV_PROFILE defaults to your dev CLI profile — override it
-   ```
-   This creates (or reuses) the SP in **dev**, re-asserts workspace access + warehouse `CAN_USE` +
-   per-Space Genie `CAN_MANAGE` + the `dev_<domain>` catalog binding/grants, and mints an OAuth
-   secret **only if the currently-stored one is no longer valid** — never on every routine re-run.
-2. **Replicate the SP's credentials into PROD (a manual step — not automated).** The script above
-   writes `dev_sp_client_id`/`dev_sp_client_secret` into a secret scope in the **dev** workspace (its
-   own bookkeeping, so it can re-validate the stored secret's freshness on the next self-heal run).
-   But the app reads those SAME keys **at runtime as its own (prod) identity** — Databricks secret
-   scopes are per-workspace, so a scope of the same name in dev is a different object than one in
-   prod. Copy the two values into a secret scope of the same name (the `dev_sp_secret_scope` bundle
-   variable, default `genie_promote`) **in prod**, and grant the app SP READ on it — mirroring exactly
-   how the GitHub bot's credentials already work (above):
-   ```bash
-   CLIENT_ID=$(databricks secrets get-secret genie_promote dev_sp_client_id -p <dev-profile> -o json | python3 -c "import json,sys,base64;print(base64.b64decode(json.load(sys.stdin)['value']).decode())")
-   CLIENT_SECRET=$(databricks secrets get-secret genie_promote dev_sp_client_secret -p <dev-profile> -o json | python3 -c "import json,sys,base64;print(base64.b64decode(json.load(sys.stdin)['value']).decode())")
-   databricks secrets create-scope genie_promote -p <prod-profile>   # no-op if it already exists (GitHub bot creds may already live here)
-   databricks secrets put-secret genie_promote dev_sp_client_id     --string-value "$CLIENT_ID"     -p <prod-profile>
-   databricks secrets put-secret genie_promote dev_sp_client_secret --string-value "$CLIENT_SECRET" -p <prod-profile>
-   databricks secrets put-acl    genie_promote <app-sp-client-id> READ -p <prod-profile>
-   ```
-   Re-run this replication step whenever `provision_dev_sp.sh` actually mints a fresh secret (it
-   prints whether it did) — a routine self-heal re-run that reuses the existing secret needs no
-   re-replication. No app redeploy is needed either way: the app reads the scope live, at call time.
-3. **Verify**: request a promotion in the app for a dev Space — a `DevEnvironmentNotBootstrapped`
-   error (actionable, distinct from a plain access-denied) means step 1 or 2 above is still missing.
+- PROD deployment SP: create a new secret, update the content `prod` Environment secret, prove one
+  gated deployment, then delete the old secret.
+- PROD validation SP: create a new secret, update both repository-level validation secrets, prove
+  both PR workflows, then delete the old secret.
+- DEV transport SP: write the same new credential to DEV bookkeeping, PROD runtime, and content
+  GitHub in one controlled operation.
+- GitHub App: generate/install the new PEM, update the PROD scope, verify token minting, then revoke
+  the old key.
+
+### App recreation
+
+Recreating the Databricks App rotates its service principal. Re-resolve `APP_SP` and reapply:
+
+- PROD secret-scope `READ`;
+- warehouse `CAN_USE`;
+- catalog/schema privileges;
+- reviewer/KA `CAN_QUERY`;
+- `CAN_MANAGE` on existing governed Spaces;
+- human persona/group `CAN_USE` on the recreated app.
+
+Do not recreate or redeploy it from a standalone engine checkout after content is managed. Use a
+normal gated content deployment. If the app is already missing and preflight cannot start, perform
+the step-8 bootstrap authentication but first check out the exact `engine.lock` revision, overlay the
+complete content repository `src/`, render it, and inspect the desired resource set before running
+`apps deploy`. An engine-only recovery is destructive.
+
+## 16. Troubleshooting
+
+| Symptom | Likely cause / action |
+|---|---|
+| Content deployment fails before mutation with missing app | The one-time CI-SP control-plane bootstrap was skipped. |
+| Content workflow is skipped | The sample job-level `if` or path filters were not removed. Harden the required jobs as described in step 12. |
+| Cross-repo checkout fails | `APP_REPO` is wrong, `engine.lock` is unavailable, or a private engine checkout token is missing. |
+| Lock/readiness mismatch | Update `engine.lock` through a reviewed content PR. |
+| App deploy fails at Lakebase binding | Confirm the deploying CI SP is a PROD workspace admin. |
+| App is deployed but stopped | Use `databricks apps deploy` or `bundle run promote_app`. |
+| App deploy reports user-token passthrough disabled | Enable Databricks Apps user authorization for `dashboards.genie`. |
+| Review fails at Model Serving | Set `APP_LLM_ENDPOINT`, verify endpoint availability, and grant app-SP `CAN_QUERY`. |
+| DEV Space is missing | Re-run DEV bootstrap with its ID; verify Author and transport-SP Space ACLs. |
+| `DevEnvironmentNotBootstrapped` | DEV credentials are missing/stale in the PROD scope or DEV grants were lost. |
+| GitHub drift is unknown | Add `Checks: read` and `Administration: read` to the GitHub App and reinstall/approve changes. |
+| Required check never appears | Confirm the required workflow has no matching `paths-ignore`, all jobs fail rather than skip on missing config, and the labeled runner is online. |
+| Lakebase schema permission denied | A human likely created the app schema first. Preserve data, then restore ownership; do not drop it casually. |
+| Runner job hangs/fails installing | Verify Node/npm, Python, PyPI/npm egress, disk, and unique runner routing. |
+
+For final pilot acceptance, complete [docs/PILOT-GO-NO-GO.md](docs/PILOT-GO-NO-GO.md) and store a
+redacted evidence manifest outside the repository.
