@@ -17,7 +17,6 @@ import type {
   Principal,
   RulesList,
   RuleSeverity,
-  KaEndpoint,
   PromptTemplateConfig,
   PromptTemplateCustom,
   CheckDetail,
@@ -485,53 +484,6 @@ export function upsertRule(opts: {
  * no-op if there was nothing to reset. */
 export function resetRule(ruleId: string): Promise<{ ok: boolean }> {
   return postJSON('/api/admin/rules/reset', { rule_id: ruleId });
-}
-
-// --- S7a (app-ux-overhaul): admin registry of Knowledge Assistant endpoints ----------------------
-
-/** The live list of serving endpoints — the never-type-an-ID picker source for KA registration
- * (RS1: a KA endpoint IS a serving endpoint). */
-export async function getServingEndpoints(): Promise<{ name: string }[]> {
-  const data = await getJSON<{ endpoints: { name: string }[] }>('/api/admin/serving-endpoints');
-  return data.endpoints ?? [];
-}
-
-export async function getKaEndpoints(): Promise<KaEndpoint[]> {
-  const data = await getJSON<{ endpoints: KaEndpoint[] }>('/api/admin/ka-endpoints');
-  return data.endpoints ?? [];
-}
-
-export function createKaEndpoint(opts: {
-  name: string;
-  servingEndpointName: string;
-  isGlobal: boolean;
-  scopeSpaceIds: string[];
-  enabled?: boolean;
-}): Promise<{ endpoint: KaEndpoint }> {
-  return postJSON('/api/admin/ka-endpoints', {
-    name: opts.name,
-    serving_endpoint_name: opts.servingEndpointName,
-    is_global: opts.isGlobal,
-    scope_space_ids: opts.scopeSpaceIds,
-    enabled: opts.enabled ?? true,
-  });
-}
-
-/** Partial update — only the fields passed here change. */
-export function updateKaEndpoint(
-  id: string,
-  fields: { enabled?: boolean; isGlobal?: boolean; scopeSpaceIds?: string[] }
-): Promise<{ endpoint: KaEndpoint }> {
-  return postJSON(`/api/admin/ka-endpoints/${id}`, {
-    enabled: fields.enabled,
-    is_global: fields.isGlobal,
-    scope_space_ids: fields.scopeSpaceIds,
-  });
-}
-
-/** Idempotent — a no-op if already gone. */
-export function deleteKaEndpoint(id: string): Promise<{ ok: boolean }> {
-  return postJSON(`/api/admin/ka-endpoints/${id}/delete`, {});
 }
 
 // --- S8 (app-ux-overhaul): admin-editable reviewer prompt template (persona/policy only) ---------

@@ -109,15 +109,13 @@ env:
   # A new customer sets their own map (or leaves it empty -> id-derived slugs).
   - name: APP_SPACE_SLUGS
     value: '{"01f16e8322661161a83f7d1f2a1bec14": "receivables"}'
-  # Config-driven KA seed (ADR-0004): register these Knowledge Assistant endpoints on a FRESH store
-  # at startup (as the app SP — no browser/OBO needed), so the reviewer consults them as ADDITIVE
-  # advisory sources. Idempotent + additive: admin edits in the "Assistente de Conhecimento" screen
-  # are never clobbered, and an already-registered endpoint (by serving_endpoint_name) is skipped. A
-  # new customer sets their OWN endpoints here (or "[]"). `cicd` is global (every space); `recebiveis`
-  # is scoped to the domain's prod Genie Spaces. Endpoint names come from `databricks
-  # knowledge-assistants` (ka-<id>-endpoint); handbook sources live in the governance UC Volume.
-  - name: APP_KA_SEED
-    value: '[{"name":"Handbook CI/CD (geral)","serving_endpoint_name":"ka-c8e6cac1-endpoint","is_global":true},{"name":"Handbook Recebíveis (domínio)","serving_endpoint_name":"ka-ba26d96f-endpoint","scope_space_ids":["01f1806177611e3aaa7868eafd1bf164","01f18061775d1a1eaa1c424a58fc2ab4","01f18061775f1819ae2f93c13d7ee5f6"]}]'
+  # The ONE fixed Knowledge Assistant every review consults — the CI/CD handbook, global to every
+  # Space (the configurable per-Space KA registry was removed as a simplification). Config-driven
+  # (ADR-0004): the serving-endpoint name differs per workspace/fork. Set to "" to disable the KA
+  # advisory entirely. Endpoint name comes from `databricks knowledge-assistants` (ka-<id>-endpoint);
+  # handbook sources live in the governance UC Volume.
+  - name: APP_CICD_KA_ENDPOINT
+    value: "ka-c8e6cac1-endpoint"
   # Cross-workspace client factory (ADR-0006/A1): the app now runs in PROD and reaches into DEV for
   # the Genie-API ops that must run there. APP_DEV_HOST is the dev workspace URL (config-driven, ADR-
   # 0004 — never hardcoded in code); it and APP_DEV_SP_SECRET_SCOPE are resolved ABOVE from the

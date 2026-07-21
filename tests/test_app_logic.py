@@ -63,17 +63,18 @@ def test_list_spaces_handles_empty():
     assert app_logic.list_spaces("p", client=fake) == []
 
 
-def test_list_serving_endpoints_maps_sdk_objects():
-    # S7a: w.serving_endpoints.list() returns an Iterator[ServingEndpoint] DIRECTLY (confirmed
-    # against the real SDK) — not a response object with an .endpoints attribute.
-    fake = NS(serving_endpoints=NS(list=lambda: [NS(name="databricks-claude-opus-4-8"), NS(name="ka-handbook")]))
-    assert app_logic.list_serving_endpoints("p", client=fake) == [
-        {"name": "databricks-claude-opus-4-8"}, {"name": "ka-handbook"}]
+def test_cicd_ka_endpoints_returns_the_fixed_handbook(monkeypatch):
+    # The per-space KA registry was removed; cicd_ka_endpoints() is the ONE fixed KA the reviewer
+    # consults, global to every space, config-driven via APP_CICD_KA_ENDPOINT.
+    monkeypatch.setattr(app_logic, "CICD_KA_ENDPOINT", "ka-handbook")
+    monkeypatch.setattr(app_logic, "CICD_KA_NAME", "Handbook CI/CD")
+    assert app_logic.cicd_ka_endpoints() == [
+        {"name": "Handbook CI/CD", "serving_endpoint_name": "ka-handbook"}]
 
 
-def test_list_serving_endpoints_skips_unnamed_entries():
-    fake = NS(serving_endpoints=NS(list=lambda: [NS(name=None), NS(name="ka-x")]))
-    assert app_logic.list_serving_endpoints("p", client=fake) == [{"name": "ka-x"}]
+def test_cicd_ka_endpoints_empty_when_unset(monkeypatch):
+    monkeypatch.setattr(app_logic, "CICD_KA_ENDPOINT", "")
+    assert app_logic.cicd_ka_endpoints() == []
 
 
 def test_query_ka_endpoint_uses_the_responses_api_and_concatenates_text():

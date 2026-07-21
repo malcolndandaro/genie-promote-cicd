@@ -235,21 +235,6 @@ export interface RulesList {
   hardcoded: EffectiveRule[];
 }
 
-/** S7a (app-ux-overhaul, D5/GR1): a registered Knowledge Assistant endpoint — additive advisory
- * source for the reviewer, never a replacement for the rules above. Either `is_global` (applies
- * to every space, always) or scoped to specific `scope_space_ids` — never both, never neither. */
-export interface KaEndpoint {
-  id: string;
-  name: string;
-  serving_endpoint_name: string;
-  is_global: boolean;
-  scope_space_ids: string[];
-  enabled: boolean;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
 /** S8 (app-ux-overhaul): the admin-saved reviewer prompt override — the PERSONA/POLICY text that
  * REPLACES `review_core.DEFAULT_PERSONA`. Only the persona is editable; the PROTECTED_CORE
  * (prompt-injection defense + JSON output schema) is always appended server-side and is NOT here. */

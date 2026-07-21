@@ -352,37 +352,13 @@ def test_review_without_audience_spec_is_rejected(monkeypatch):
     assert r.status_code == 422
 
 
-# --- S7b: /review and /promote thread this space's in-scope, enabled KA endpoints through ------
+# --- /review and /promote feed the reviewer the fixed CI/CD-handbook KA (global to every space) ---
 
 
-def test_review_threads_scoped_ka_endpoints_into_the_engine(monkeypatch):
-    from ka_endpoints_store import InMemoryBackend as KaInMemoryBackend
-    from ka_endpoints_store import KaEndpointsStore
-
-    ka_store = KaEndpointsStore(KaInMemoryBackend())
-    ka_store.create(name="In scope", serving_endpoint_name="ka-a", scope_space_ids=["01f16e83"],
-                    actor_email="admin@x")
-    ka_store.create(name="Out of scope", serving_endpoint_name="ka-b", scope_space_ids=["other-space"],
-                    actor_email="admin@x")
-    engine_api.app.state.ka_endpoints_store = ka_store
-    try:
-        captured = {}
-
-        def fake_review_space(space_id, *a, ka_endpoints=None, **k):
-            captured["ka_endpoints"] = ka_endpoints
-            return dict(_FAKE_REVIEW)
-
-        monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
-        r = client.post("/review", json=_body("01f16e83"),
-                        headers={"x-forwarded-access-token": "tok-r"})
-        assert r.status_code == 200
-        assert [e["name"] for e in captured["ka_endpoints"]] == ["In scope"]
-    finally:
-        engine_api.app.state.ka_endpoints_store = None
-
-
-def test_review_passes_none_ka_endpoints_when_store_absent(monkeypatch):
-    # No ka_endpoints_store fixture at all — must still work exactly as before S7.
+def test_review_threads_fixed_cicd_ka_into_the_engine(monkeypatch):
+    # The per-space KA registry was removed; every review consults the ONE fixed CI/CD KA.
+    monkeypatch.setattr(engine_api.app_logic, "CICD_KA_ENDPOINT", "ka-cicd")
+    monkeypatch.setattr(engine_api.app_logic, "CICD_KA_NAME", "Handbook CI/CD")
     captured = {}
 
     def fake_review_space(space_id, *a, ka_endpoints=None, **k):
@@ -393,7 +369,24 @@ def test_review_passes_none_ka_endpoints_when_store_absent(monkeypatch):
     r = client.post("/review", json=_body("01f16e83"),
                     headers={"x-forwarded-access-token": "tok-r"})
     assert r.status_code == 200
-    assert captured["ka_endpoints"] is None
+    assert captured["ka_endpoints"] == [
+        {"name": "Handbook CI/CD", "serving_endpoint_name": "ka-cicd"}]
+
+
+def test_review_passes_empty_ka_when_cicd_endpoint_unset(monkeypatch):
+    # APP_CICD_KA_ENDPOINT blank -> the KA advisory is skipped entirely (empty list).
+    monkeypatch.setattr(engine_api.app_logic, "CICD_KA_ENDPOINT", "")
+    captured = {}
+
+    def fake_review_space(space_id, *a, ka_endpoints=None, **k):
+        captured["ka_endpoints"] = ka_endpoints
+        return dict(_FAKE_REVIEW)
+
+    monkeypatch.setattr(engine_api.app_logic, "review_space", fake_review_space)
+    r = client.post("/review", json=_body("01f16e83"),
+                    headers={"x-forwarded-access-token": "tok-r"})
+    assert r.status_code == 200
+    assert captured["ka_endpoints"] == []
 
 
 def test_review_requires_space_id():

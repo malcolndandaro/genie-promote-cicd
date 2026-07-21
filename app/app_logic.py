@@ -47,6 +47,15 @@ from promotion_comment import PROMOTION_COMMENT_MARKER, render_promotion_comment
 LLM = os.environ.get("APP_LLM_ENDPOINT", "databricks-claude-opus-4-8")
 DOMAIN = os.environ.get("APP_DOMAIN", "recebiveis")
 
+# The ONE fixed Knowledge Assistant every review consults — the CI/CD handbook, global to every
+# Space (no per-Space KA registry anymore; the configurable multi-KA feature was removed as a
+# simplification). Config-driven (ADR-0004): the serving-endpoint name differs per workspace/fork,
+# so it's an env var with the current prod default; set APP_CICD_KA_ENDPOINT to "" to disable the
+# KA advisory entirely. Consumed by `cicd_ka_endpoints()` below, fed to the reviewer as its
+# `ka_endpoints` list — the advisory mechanism (`_ka_advisory_findings`) is unchanged.
+CICD_KA_ENDPOINT = os.environ.get("APP_CICD_KA_ENDPOINT", "ka-c8e6cac1-endpoint")
+CICD_KA_NAME = os.environ.get("APP_CICD_KA_NAME", "Handbook CI/CD")
+
 # GitHub PR integration (GH2). The committed source the promotion PR edits is the DEV-shaped
 # serialized_space; CI (scripts/render.sh) rebinds dev_->prod_ at validate/deploy — so the PR
 # touches src/, never build/. The bot's creds live in a Databricks secret scope the app SP reads.
@@ -254,21 +263,6 @@ def list_prod_spaces(profile: str | None = None, *, client: WorkspaceClient | No
     return [{"space_id": s.space_id, "title": s.title or "(sem título)"} for s in (resp.spaces or [])]
 
 
-def list_serving_endpoints(profile: str | None = None, *, client: WorkspaceClient | None = None) -> list[dict]:
-    """S7a (app-ux-overhaul): every model-serving endpoint in the workspace (name only) — the
-    live list the KA-endpoint registration admin UI picks from (RS1: never type an endpoint
-    name/id, matching this app's established never-type-an-ID picker convention). A Knowledge
-    Assistant endpoint IS a serving endpoint (RS1), so no separate KA-specific listing API is
-    needed — the admin just picks the right one by name from this same list.
-
-    Admin-only (gated at the API layer on `_is_admin`), same prod-local, no-caching pattern as
-    `list_prod_spaces` — called fresh on every invocation so the picker always reflects what's
-    actually deployable right now."""
-    w = client or _client(profile)
-    resp = w.serving_endpoints.list()
-    return [{"name": e.name} for e in (resp or []) if e.name]
-
-
 def list_principals(query: str = "", *, profile: str | None = None, client: WorkspaceClient | None = None,
                     user_token: str | None = None, kind: str = "all", limit: int = 25) -> list[dict]:
     """Users + groups of the workspace directory — the source for Audience and role pickers. Free
@@ -450,6 +444,16 @@ def _ka_question(ctx: dict) -> str:
     )
 
 
+def cicd_ka_endpoints() -> list[dict]:
+    """The fixed KA list every review consults: just the CI/CD handbook, global to every Space.
+    Returns the same dict shape the reviewer already expects (`name` + `serving_endpoint_name`),
+    so `_ka_advisory_findings` is unchanged. Empty when `APP_CICD_KA_ENDPOINT` is unset/blank (the
+    KA advisory is then simply skipped, same as the old "no endpoints registered" path)."""
+    if not CICD_KA_ENDPOINT:
+        return []
+    return [{"name": CICD_KA_NAME, "serving_endpoint_name": CICD_KA_ENDPOINT}]
+
+
 def _ka_advisory_findings(ka_endpoints: list[dict] | None, ctx: dict, profile: str,
                           client: WorkspaceClient | None = None) -> list[dict]:
     """S7b: one advisory finding per in-scope, enabled KA endpoint (D5 — additive only, NEVER a
@@ -585,12 +589,12 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     defaults in that case, so a caller with no store behaves EXACTLY as before this rule ever
     existed.
 
-    ``ka_endpoints`` (S7b, optional) is this space's IN-SCOPE, ENABLED Knowledge Assistant
-    endpoints — `app/ka_endpoints_store.py`'s `KaEndpointsStore.list_enabled_for_space_dicts
-    (space_id)`, or `None`/empty when none are registered/in-scope. Each produces ONE additive
-    advisory finding (never a BLOCKER, D5) via `_ka_advisory_findings`; a query failure degrades
-    to a quiet notice finding rather than breaking the review (GR1) — this never affects the
-    gate the way `deterministic` findings do.
+    ``ka_endpoints`` (optional) is the fixed Knowledge Assistant list to consult — today just the
+    CI/CD handbook, global to every Space, produced by `cicd_ka_endpoints()` (the configurable
+    per-Space KA registry was removed as a simplification). `None`/empty skips the KA advisory.
+    Each endpoint produces ONE additive advisory finding (never a BLOCKER, D5) via
+    `_ka_advisory_findings`; a query failure degrades to a quiet notice finding rather than
+    breaking the review (GR1) — this never affects the gate the way `deterministic` findings do.
 
     ``persona_template`` (S8, optional) is the admin-saved custom system-prompt persona/policy
     text (`app/prompt_template_store.py`'s `PromptTemplateStore.get().template_text`), or `None`

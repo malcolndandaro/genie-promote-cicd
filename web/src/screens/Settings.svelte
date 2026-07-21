@@ -11,7 +11,6 @@
   import Badge from '../lib/components/Badge.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import Picker from '../lib/components/Picker.svelte';
-  import KaEndpointSettings from '../lib/components/KaEndpointSettings.svelte';
   import {
     getRoles,
     assignRole,
@@ -813,8 +812,6 @@
       <p class="error" role="alert">{errorText(err)}</p>
     {/await}
   </Card>
-
-  <KaEndpointSettings />
 </div>
 
 <style>
