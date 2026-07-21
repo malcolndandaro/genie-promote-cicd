@@ -95,7 +95,7 @@
       {#if promotion.pr}
         <div class="pr-banner" role="status">
           <span class="pr-banner__dot" aria-hidden="true"></span>
-          <span>PR de promoção aberto: <strong>#{promotion.pr.number}</strong></span>
+          <span>Rascunho pronto: <strong>#{promotion.pr.number}</strong></span>
           {#if promotion.waitingForLiveStatus}
             <Badge tone="neutral">Atualizando status…</Badge>
           {:else if promotion.liveStatus}
@@ -117,6 +117,11 @@
             </a>
           {/if}
         </div>
+        {#if !promotion.liveStatus || (promotion.liveStatus.phase !== 'deployed' && promotion.liveStatus.phase !== 'merged' && promotion.liveStatus.phase !== 'deploying' && promotion.liveStatus.phase !== 'awaiting_approval')}
+          <p class="handoff-hint" role="note">
+            Rascunho pronto — o Responsável Técnico revisa e promove no GitHub.
+          </p>
+        {/if}
       {/if}
       {#if promotion.waitingForLiveStatus}
         <div class="status-sync" role="status" aria-label="Atualizando status no GitHub">
@@ -259,6 +264,14 @@
   }
   .pr-banner__approve:hover {
     background: var(--accent-hover);
+  }
+  .handoff-hint {
+    margin: calc(var(--space-3) * -1) 0 var(--space-5);
+    padding: var(--space-2) var(--space-4);
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    background: color-mix(in srgb, var(--accent-soft) 70%, transparent);
+    color: var(--muted-foreground);
+    font-size: 0.8rem;
   }
   .running-heading {
     display: flex;

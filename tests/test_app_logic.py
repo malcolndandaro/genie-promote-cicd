@@ -556,6 +556,7 @@ class _FakeGitHubApp:
     def __init__(self):
         self.promo = None
         self.comment = None
+        self.blocker_label_applied: bool | None = None  # True=applied, False=cleared, None=untouched
 
     def open_or_update_promotion(self, **kw):
         self.promo = kw
@@ -567,6 +568,12 @@ class _FakeGitHubApp:
     def post_review_comment(self, number, marker, body):
         self.comment = {"number": number, "marker": marker, "body": body}
         return {"id": 1, "seq": 1}
+
+    def apply_blocker_label(self, number):
+        self.blocker_label_applied = True
+
+    def clear_blocker_label(self, number):
+        self.blocker_label_applied = False
 
 
 _FULL_REVIEW = {
@@ -610,7 +617,10 @@ def test_request_promotion_reviews_opens_pr_and_comments(monkeypatch):
     assert ("a" * 40) in gh.comment["body"]
 
 
-def test_blocked_review_stops_before_change_request(monkeypatch):
+def test_blocked_review_opens_draft_pr_and_applies_label(monkeypatch):
+    """R2: a BLOCKER finding must no longer stop before GitHub — the draft PR is always opened,
+    the blocker label is applied, and ``blocked: True`` is returned so the UI can badge the space.
+    The review is still posted as a PR comment."""
     blocked = dict(_FULL_REVIEW)
     blocked["findings"] = [{"rule_id": "ENV-01", "severity": "BLOCKER", "message": "fora"}]
     blocked["gate"] = {"conclusion": "failure", "blocker_count": 1, "summary": "bloqueada"}
@@ -622,9 +632,50 @@ def test_blocked_review_stops_before_change_request(monkeypatch):
         resource_title="Recebíveis", audience_spec_=_audience(), github=gh,
     )
 
-    assert out["blocked"] is True and out["pr"] is None
+    # Draft PR is opened (not blocked before GitHub) — the change_request + comment must be present
+    assert out["blocked"] is True
+    assert out["pr"] == {"number": 7, "url": "https://github.com/o/r/pull/7"}, (
+        "draft PR must be opened even with a BLOCKER finding")
     assert out["review"]["gate"]["conclusion"] == "failure"
-    assert gh.promo is None and gh.comment is None
+    assert gh.promo is not None, "open_or_update_promotion must have been called"
+    assert gh.comment is not None, "review comment must have been posted"
+    assert gh.blocker_label_applied is True, "BLOCKER label must be applied"
+
+
+def test_passing_review_clears_blocker_label(monkeypatch):
+    """R2: a passing re-review must clear the BLOCKER label (``blocked: False``)."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_FULL_REVIEW))
+    gh = _FakeGitHubApp()
+
+    out = app_logic.request_promotion(
+        "sp1", user_token="tok", requester_email="malcoln@x",
+        resource_title="Recebíveis", audience_spec_=_audience(), github=gh,
+    )
+
+    assert out["blocked"] is False
+    assert out["pr"] == {"number": 7, "url": "https://github.com/o/r/pull/7"}
+    assert gh.blocker_label_applied is False, "label must be cleared on a passing review"
+
+
+def test_blocked_no_change_returns_both_flags(monkeypatch):
+    """R2: when the space is already in prod byte-identical (no_change) AND blocked, both flags
+    must be independently reflected — no PR + blocked True is a valid combination (the review
+    ran but there's nothing to commit; the user fixes the BLOCKER before re-trying)."""
+    blocked_review = dict(_FULL_REVIEW)
+    blocked_review["gate"] = {"conclusion": "failure", "blocker_count": 1, "summary": "bloqueada"}
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: blocked_review)
+
+    class _NoChangeGH(_FakeGitHubApp):
+        def open_or_update_promotion(self, **kw):
+            self.promo = kw
+            return {"no_change": True}  # byte-identical → no PR
+
+    gh = _NoChangeGH()
+    out = app_logic.request_promotion(
+        "sp1", user_token="tok", requester_email="x@x", audience_spec_=_audience(), github=gh)
+    assert out["no_change"] is True
+    assert out["pr"] is None
+    assert out["blocked"] is True
 
 
 def test_two_spaces_get_distinct_branches_and_paths():

@@ -1,9 +1,12 @@
 <script lang="ts">
-  // S6 (app-ux-overhaul, D2): the Steward's own monitoring dashboard — a read-only, cross-space
-  // view of promotions currently awaiting THEIR attention (PR review/merge, or the prod deploy
-  // gate), each linking straight out to GitHub. No new in-app approval action — the Steward's
-  // real approval stays on GitHub (ADR-0002's separation-of-duties design; "reflect, never
-  // assert", same principle CONTEXT.md already applies to Promotion Phase).
+  // R2 (roles-github-native): repurposed from the old Steward-gated monitoring dashboard into a
+  // UNIVERSAL read-only panel — "Aguardando ação no GitHub". Visible to every authenticated user
+  // (no persona gate), cross-user, read-only list of promotions currently awaiting merge or the
+  // prod deploy gate, each linking straight to GitHub.
+  //
+  // "Reflect, never assert" stays: the panel shows GitHub state, never decides whether something
+  // should be approved. The Technical Owner's actual approval/merge remains on GitHub; the Platform
+  // team approves the deploy gate there too. This panel is just a convenience mirror.
   import Card from '../lib/components/Card.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { getPromotions, isAuthError } from '../lib/api';
@@ -23,8 +26,8 @@
 
 <div class="stack">
   <Card
-    title="Aguardando minha revisão"
-    subtitle="Promoções, em todos os espaços, aguardando revisão do PR ou o gate de deploy em produção. A aprovação em si acontece no GitHub."
+    title="Aguardando ação no GitHub"
+    subtitle="Promoções, em todos os espaços, aguardando merge pelo Responsável Técnico ou aprovação do gate de deploy pela Plataforma. A ação em si acontece no GitHub."
   >
     {#snippet actions()}
       <button type="button" class="refresh" onclick={reload}>Atualizar</button>
@@ -34,7 +37,7 @@
       <Skeleton height="3rem" width="80%" />
     {:then promotions}
       {#if promotions.length === 0}
-        <p class="muted text-sm">Nenhuma promoção aguardando revisão no momento.</p>
+        <p class="muted text-sm">Nenhuma promoção aguardando ação no momento.</p>
       {:else}
         <ul class="row-list">
           {#each promotions as p (p.id)}

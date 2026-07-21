@@ -8,7 +8,7 @@ eval gate) into the operations the UI needs:
       -> agent review (EVAL-01 deterministic) -> eval gate -> findings
       + gate + timeline
   GO-LIVE (not yet wired — need the S3 GitHub repo): request_promotion() opens the PR
-  and the Steward approval releases the gate; create_space() calls genie create-space.
+  and the Technical Owner promotes (marks ready + merges); create_space() calls genie create-space.
 
 Uses the Databricks SDK (WorkspaceClient). Locally a CLI profile selects the
 workspace; on the deployed Databricks App ``profile`` is None and the app's service
@@ -517,7 +517,7 @@ def build_timeline(checks_ok: bool, gate: dict, eval_res: dict, approved: bool, 
         {"key": "review", "label": "Revisão do agente (Genie Reviewer)", "status": st(not review_fail, fail=review_fail)},
         {"key": "eval", "label": f"Eval-run ({eval_res.get('status', 'n/a')})",
          "status": "fail" if eval_res.get("status") == "block" else "pass"},
-        {"key": "approval", "label": "Aprovação do Steward", "status": st(approved, running=not approved)},
+        {"key": "approval", "label": "Revisão do Responsável Técnico (GitHub)", "status": st(approved, running=not approved)},
         {"key": "deploy", "label": "Deploy em produção (service principal)", "status": st(deployed)},
     ]
 
@@ -749,9 +749,16 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     widens its OWN allowlist for the caller's chosen catalogs — promotion never does, since CI (not
     this app) is what applies the mapping and must keep enforcing the strict target allowlist.
 
-    Returns {review (UI fields), pr:{number,url}|None}. A content BLOCKER stops before GitHub: the
-    author fixes the named item in Dev and re-reviews, so no Change Request exists for knowingly
-    invalid content. Passing review continues through the immutable PR + CI + Steward gates.
+    Returns {review (UI fields), pr:{number,url}|None, blocked:bool}.
+    Draft-first (R2): a BLOCKER finding no longer stops before GitHub. The draft PR is ALWAYS
+    opened (so pr-checks run as a dry-run); a blocked gate applies the ``revisao-pendente`` label
+    and surfaces BLOCKER findings at the top of the PR comment. A passing re-review clears the
+    label. ``blocked`` is orthogonal to ``no_change``; the UI badges the space as "revisão
+    pendente" when True. The Technical Owner sees both the label and the findings before marking
+    the PR ready — the bot must NEVER mark it ready itself.
+    Preserved invariants:
+      - no-op guard (byte-identical → no PR);
+      - TOCTOU-safe single export (content committed == content reviewed).
     """
     if audience_spec_ is None:
         raise ValueError("AudienceSpec is required")
@@ -760,13 +767,7 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                         ka_endpoints=ka_endpoints, persona_template=persona_template)
     full.setdefault("audience_spec", audience_spec_.to_dict())
     review = {k: full[k] for k in REVIEW_FIELDS}
-
-    # Decision-first pilot flow: content findings are resolved before a Change Request exists.
-    # This is still entirely pre-production (review/export reads only); no branch, PR, comment,
-    # Lakebase Promotion or deploy Attempt is created for a blocked review.
-    if (review.get("gate") or {}).get("conclusion") == "failure":
-        return {"review": review, "pr": None, "branch": None, "no_change": False,
-                "blocked": True}
+    blocked = (review.get("gate") or {}).get("conclusion") == "failure"
 
     # Commit exactly the DEV-shaped export that was just reviewed (no second OBO export; closes the
     # TOCTOU window where the committed artifact could differ from the reviewed one).
@@ -810,24 +811,37 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     ) + "\n"
     pr = gh.open_or_update_promotion(
         branch=branch, path=path, content=content, extra_files=extra, remove_files=remove,
-        title=f"Promover Genie Space para produção ({safe_id})",
-        body=(f"Promoção solicitada por **{who}** via o app (bot abriu o PR em seu nome). "
-              f"Espaço `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo; `pr-checks` "
-              f"é o gate automático e o Steward libera o deploy de produção (segregação de funções)."),
+        title=f"Rascunho de promoção — Genie Space ({safe_id})",
+        body=(f"Promoção preparada por **{who}** via o app (bot abriu o rascunho em seu nome).\n\n"
+              f"Este PR foi aberto como **rascunho** — o `pr-checks` roda normalmente para validar "
+              f"o conteúdo, mas o merge está bloqueado até o **Responsável Técnico** marcar o PR "
+              f"como pronto (*mark as ready*) manualmente no GitHub. A **Plataforma** aprova o "
+              f"deploy de produção pelo gate de Environment.\n\n"
+              f"Espaço `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo."),
     )
     # No-op promotion: the space is already in prod byte-identical (nothing to promote). No PR was
     # opened — surface it so the app tells the user instead of showing an empty pipeline. The review
     # still ran (it's informative), so we return it; there's just no PR to track.
     if pr.get("no_change"):
         return {"review": review, "pr": None, "branch": branch, "no_change": True,
-                "revisions": revisions.to_dict()}
+                "blocked": blocked, "revisions": revisions.to_dict()}
+    # R2: apply/clear the BLOCKER label so the Technical Owner sees at a glance whether the
+    # review found blockers. A failing gate → label applied; a passing re-review → cleared.
+    # Best-effort: a label API hiccup must never break the PR itself.
+    try:
+        if blocked:
+            gh.apply_blocker_label(pr["number"])
+        else:
+            gh.clear_blocker_label(pr["number"])
+    except Exception:  # noqa: BLE001 — label ops are informational; never break the PR flow
+        pass
     gh.post_review_comment(pr["number"], PROMOTION_COMMENT_MARKER,
                            render_promotion_comment(review, requester_email,
                                                     resource_title=prod_title,
                                                     table_mapping=table_mapping,
                                                     revisions=revisions.to_dict()))
     return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch,
-            "no_change": False, "change_request": {
+            "no_change": False, "blocked": blocked, "change_request": {
                 "provider": "github", "external_id": str(pr["number"]),
                 "external_url": pr["html_url"], **revisions.to_dict(),
             }}

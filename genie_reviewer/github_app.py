@@ -15,6 +15,14 @@ in PR/comment CONTENT — the bot never impersonates anyone.
 Testability: the HTTP transport and the token provider are injectable, so the open/update/upsert
 logic is unit-tested against a fake GitHub (no network, no real key) — mirrors the engine's
 injectable-client pattern.
+
+Draft-first authoring (R2): new PRs are always opened as *draft* so the Author's prepare-step
+runs the full check suite without enabling a human merge.  The SP may demote a ready PR back to
+draft on re-submission (safe: ``convertPullRequestToDraft`` via GraphQL) but MUST NEVER call
+``markPullRequestReadyForReview`` — that action is exclusively reserved for the Technical Owner
+on GitHub.  A BLOCKER review applies a ``revisao-pendente`` label; a passing re-review clears it.
+Both label operations use thin REST helpers.  The GraphQL endpoint reuses the same token/headers
+as the existing REST transport; it is a sibling that posts to the GraphQL API URL.
 """
 from __future__ import annotations
 
@@ -36,7 +44,15 @@ from change_request import (
 )
 
 _API = "https://api.github.com"
+_GRAPHQL = "https://api.github.com/graphql"
+# Label applied to a draft PR whose review gate returned `failure` (a BLOCKER finding stands).
+# Cleared on the next passing re-review.  Kept short and URL-safe so the label can be created via
+# the GitHub UI without encoding concerns.
+BLOCKER_LABEL = "revisao-pendente"
 Transport = Callable[[str, str, dict, dict | None], "tuple[int, dict | None]"]
+# A GraphQL transport posts JSON bodies with a `query` key to _GRAPHQL.  The signature matches
+# the REST Transport to allow the same fake to handle both in tests.
+GraphQLTransport = Callable[[str, dict, dict], "tuple[int, dict | None]"]
 
 
 class GitHubError(RuntimeError):
@@ -185,15 +201,29 @@ class GitHubApp:
         installation_id: str | None = None,
         private_key: str | None = None,
         transport: Transport | None = None,
+        graphql_transport: "GraphQLTransport | None" = None,
         token_provider: Callable[[], str] | None = None,
         now: Callable[[], float] | None = None,
     ):
         self.owner, self.repo, self.base = owner, repo, base
         self._app_id, self._installation_id, self._private_key = app_id, installation_id, private_key
         self._transport = transport or _urllib_transport
+        self._graphql_transport = graphql_transport or self._default_graphql_transport
         self._token_provider = token_provider or self._mint_installation_token
         self._now = now or time.time
         self._cached: tuple[str, float] | None = None
+
+    def _default_graphql_transport(self, query: str, variables: dict, headers: dict):
+        """Default GraphQL transport — posts to the GitHub GraphQL endpoint via urllib."""
+        body = json.dumps({"query": query, "variables": variables}).encode()
+        req = urllib.request.Request(_GRAPHQL, data=body, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                txt = r.read().decode()
+                return r.status, (json.loads(txt) if txt else None)
+        except urllib.error.HTTPError as e:
+            txt = e.read().decode()
+            return e.code, (json.loads(txt) if txt else None)
 
     # --- auth ---------------------------------------------------------------
     def _mint_installation_token(self) -> str:
@@ -269,7 +299,15 @@ class GitHubApp:
             self._put_file(branch, p, c, f"promote: update {p}")
         for p in (remove_files or []):
             self._delete_file_if_exists(branch, p, f"promote: clear {p}")
-        return pr if pr is not None else self._create_pr(branch, title, body)
+        if pr is not None:
+            # R2: if the Technical Owner already marked this PR *ready* (a human action on GitHub),
+            # convert it back to *draft* so the Author's re-submission is a full dry-run again.
+            # `convertPullRequestToDraft` is the safe demote direction; the SP must NEVER call
+            # `markPullRequestReadyForReview` (promote = Technical Owner only).
+            if not pr.get("draft", True):
+                self._convert_to_draft(pr["number"], node_id=pr.get("node_id"))
+            return {"number": pr["number"], "html_url": pr["html_url"]}
+        return self._create_pr(branch, title, body)
 
     def _matches_base(self, path: str, content: str, extra_files: dict | None,
                       remove_files: "list[str] | None") -> bool:
@@ -358,13 +396,80 @@ class GitHubApp:
         _, prs = self._api("GET", self._repo_path(f"/pulls?head={self.owner}:{branch}&state=open"),
                            "list pulls")
         if prs:
-            return {"number": prs[0]["number"], "html_url": prs[0]["html_url"]}
+            pr = prs[0]
+            return {
+                "number": pr["number"],
+                "html_url": pr["html_url"],
+                "draft": bool(pr.get("draft", False)),
+                "node_id": pr.get("node_id"),
+            }
         return None
 
     def _create_pr(self, branch: str, title: str, body: str) -> dict:
+        """Open a new PR as a *draft* (R2 — Author prepares; Technical Owner marks ready on GitHub).
+        Draft creation is supported via REST (`"draft": true`) and keeps pr-checks firing natively
+        (the content workflow has no `draft == false` filter on its `pull_request` trigger)."""
         _, pr = self._api("POST", self._repo_path("/pulls"), "create pull",
-                          {"title": title, "head": branch, "base": self.base, "body": body})
-        return {"number": pr["number"], "html_url": pr["html_url"]}
+                          {"title": title, "head": branch, "base": self.base,
+                           "body": body, "draft": True})
+        return {
+            "number": pr["number"],
+            "html_url": pr["html_url"],
+            "draft": True,
+            "node_id": pr.get("node_id"),
+        }
+
+    # --- GraphQL helpers (R2: draft toggling is GraphQL-only) -------------------
+
+    def _graphql(self, query: str, variables: dict) -> dict:
+        """Run one GraphQL mutation.  Raises GitHubError on a non-200 HTTP response or when
+        GitHub returns top-level `errors`.  The bot MUST NEVER call
+        `markPullRequestReadyForReview` here — that is the Technical Owner's exclusive action."""
+        status, data = self._graphql_transport(query, variables, self._headers(self._token()))
+        if status not in (200, 201) or not data:
+            raise GitHubError(status, "graphql mutation", data)
+        if data.get("errors"):
+            raise GitHubError(status, f"graphql errors: {data['errors']}", data)
+        return data.get("data") or {}
+
+    def _get_pr_node_id(self, number: int) -> str:
+        """Fetch the GraphQL node_id for an existing PR (needed by `convertPullRequestToDraft`)."""
+        _, pr = self._api("GET", self._repo_path(f"/pulls/{number}"), "get pull (node_id)")
+        node_id = (pr or {}).get("node_id")
+        if not node_id:
+            raise GitHubError(0, "pr node_id missing", pr)
+        return node_id
+
+    def _convert_to_draft(self, number: int, node_id: str | None = None) -> None:
+        """Demote a *ready* PR back to *draft* via the GraphQL `convertPullRequestToDraft`
+        mutation.  This is a SAFE operation (demote) — the bot must never call the inverse
+        `markPullRequestReadyForReview` (promote = Technical Owner only, done manually on GitHub).
+        If `node_id` is not already known it is fetched via a GET /pulls/{n} REST call."""
+        nid = node_id or self._get_pr_node_id(number)
+        mutation = """
+mutation ConvertToDraft($id: ID!) {
+  convertPullRequestToDraft(input: {pullRequestId: $id}) {
+    pullRequest { isDraft }
+  }
+}
+"""
+        self._graphql(mutation.strip(), {"id": nid})
+
+    # --- label helpers (R2: BLOCKER labeling on draft PRs) ---------------------
+
+    def apply_blocker_label(self, number: int) -> None:
+        """Add the `revisao-pendente` label to a draft PR with BLOCKER findings.  Idempotent:
+        GitHub deduplicates labels, so re-applying is safe."""
+        self._api("POST", self._repo_path(f"/issues/{number}/labels"), "apply blocker label",
+                  {"labels": [BLOCKER_LABEL]}, ok=(200, 201))
+
+    def clear_blocker_label(self, number: int) -> None:
+        """Remove the `revisao-pendente` label from a draft PR when a later re-review passes.
+        Tolerant: a 404 (label not present) is a silent no-op."""
+        path = self._repo_path(f"/issues/{number}/labels/{BLOCKER_LABEL}")
+        status, data = self._transport("DELETE", f"{_API}{path}", self._headers(self._token()), None)
+        if status not in (200, 404):
+            raise GitHubError(status, "clear blocker label", data)
 
     # --- live status (GH3): reflect, never assert ---------------------------
     def get_status(self, number: int, approved_revisions: dict | RevisionPair | None = None,

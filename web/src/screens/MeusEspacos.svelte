@@ -29,8 +29,8 @@
   let resourcesP = $state(getResources());
 
   // History is best-effort — a fetch failure here must never block the primary "start a
-  // promotion" flow (the space grid still needs to render). Admins/Stewards may load ALL
-  // promotions (LB5's existing scope toggle, carried over from "Minhas promoções").
+  // promotion" flow (the space grid still needs to render). Admins may load ALL promotions
+  // (LB5's existing scope toggle, carried over from "Minhas promoções").
   let scope = $state<'mine' | 'all'>('mine');
   function loadPromotions(s: 'mine' | 'all'): Promise<PromotionSummary[]> {
     return getPromotions(s).catch(() => []);
@@ -173,8 +173,8 @@
   <header class="process-head">
     <div class="process-head__intro">
       <p class="process-head__eyebrow">Fluxo governado · Dev → Prod</p>
-      <h1>Promover Genie Space</h1>
-      <p>Escolha o Space; o app conduz o restante com revisão, aprovação e rastreabilidade.</p>
+      <h1>Preparar promoção</h1>
+      <p>Escolha o Space; o app prepara um rascunho com revisão automática. O Responsável Técnico revisa e promove no GitHub.</p>
     </div>
     <FlowSteps />
   </header>
@@ -208,7 +208,7 @@
       {#if who?.is_admin}
         <div class="toolbar__scope" role="group" aria-label="Escopo do histórico">
           <Button variant={scope === 'mine' ? 'primary' : 'outline'} onclick={() => setScope('mine')}>Minhas</Button>
-          <Button variant={scope === 'all' ? 'primary' : 'outline'} onclick={() => setScope('all')}>Todas (Steward/Admin)</Button>
+          <Button variant={scope === 'all' ? 'primary' : 'outline'} onclick={() => setScope('all')}>Todas</Button>
         </div>
       {/if}
     </div>

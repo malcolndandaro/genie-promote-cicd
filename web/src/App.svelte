@@ -36,14 +36,18 @@
   // the exact target — running recover there would race it and could surface the WRONG promotion.
   if (router.route.id === 'espacos') promotion.recover().catch(() => {});
 
-  // R1: two sections — "Meu trabalho" (all users) + "Administração" (admin only).
-  // RevisaoPromocoes is NOT in the sidebar (it's repurposed in R2 for the draft-PR handoff panel).
-  // Server-side gates are still authoritative; this merely prevents non-admin surfaces from
-  // showing in the nav.
+  // Two sections — "Meu trabalho" (all users) + "Administração" (admin only). All SoD is enforced
+  // by GitHub, not the app (R1). "Aguardando ação no GitHub" (RevisaoPromocoes) is a universal
+  // read-only panel under "Meu trabalho" — not persona-gated — so any user can monitor the
+  // promotion queue and link out to GitHub (R2). Admin surfaces remain gated on is_admin;
+  // server-side gates are still authoritative, this merely controls nav visibility.
   const NAV_SECTIONS: NavSection[] = $derived([
     {
       title: 'Meu trabalho',
-      items: [{ id: 'espacos', label: 'Meus espaços', icon: 'grid' }],
+      items: [
+        { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
+        { id: 'revisao' as const, label: 'Aguardando ação no GitHub', icon: 'git-branch' as const },
+      ],
     },
     ...(who?.is_admin
       ? [{
@@ -59,7 +63,7 @@
   const SECTION_TITLE: Record<RouteId, string> = {
     espacos: 'Meus espaços',
     promocoes: 'Detalhe da promoção',
-    revisao: 'Revisão de promoções',
+    revisao: 'Aguardando ação no GitHub',
     auditoria: 'Auditoria',
     configuracoes: 'Configurações',
   };
