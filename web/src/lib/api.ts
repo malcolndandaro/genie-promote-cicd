@@ -13,7 +13,7 @@ import type {
   RehydrateEventRow,
   RoleName,
   RolesList,
-  DriftReport,
+  GitHubRoles,
   Principal,
   RulesList,
   RuleSeverity,
@@ -443,16 +443,11 @@ export function revokeRole(email: string, role: RoleName): Promise<{ ok: boolean
   return postJSON('/api/admin/roles/revoke', { email, role });
 }
 
-/** US-34: drift between the app's role config and GitHub's enforced gates (prod Environment
- * required-reviewers + branch protection), for the Settings screen. READ-ONLY (Phase 1). */
-export function getAdminDrift(): Promise<DriftReport> {
-  return getJSON('/api/admin/drift');
-}
-
-/** US-35: the SAME drift check, contextual to one promotion — surfaced on the review screen for
- * the assigned Steward (visible to the promotion's owner or an admin, same as the promotion itself). */
-export function getPromotionDrift(promotionId: string): Promise<DriftReport> {
-  return getJSON(`/api/promotions/${promotionId}/drift`);
+/** R1: read-only mirror of GitHub's enforcement gates — who has Write (can merge PRs) and who
+ * is a prod Environment required-reviewer (approves deployments). Graceful degradation: if either
+ * GitHub read fails, the corresponding field is absent (never empty-list = no one). */
+export function getGitHubRoles(): Promise<GitHubRoles> {
+  return getJSON('/api/admin/github-roles');
 }
 
 // --- G2: admin-configurable reviewer rules (server-gated to admins) -----------------------------

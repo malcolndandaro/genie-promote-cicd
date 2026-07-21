@@ -1,25 +1,22 @@
 <script lang="ts">
-  // Settings: configurable Steward/Admin roles (Lakebase-backed, no redeploy)
-  // + the email<->GitHub-username mapping, plus the READ-ONLY GitHub drift panel (US-32..34). Every
-  // call here hits a server endpoint gated on the A2-hardened VERIFIED identity — this screen is
-  // only ever RENDERED for who?.is_admin (App.svelte), but the real gate is server-side.
-  //
-  // Phase 2 (writing GitHub's branch-protection / Environment reviewers to CLOSE drift) is
-  // explicitly NOT built here — see genie_reviewer/github_drift.py. This screen only ever shows
-  // what's configured + what GitHub enforces; it never offers a "fix it" button that would write
-  // to GitHub.
+  // Settings: R1 — two sections:
+  //   1. "Quem controla a promoção" — read-only GitHub mirror (write collaborators + prod
+  //      Environment reviewers). The source of truth is GitHub; the app only mirrors it.
+  //   2. "Administradores da Plataforma" — editable admin bit (single role), Lakebase-backed.
+  // Plus the existing Regras, Prompt do revisor, and KA endpoint configuration.
+  // Every call here hits a server endpoint gated on the A2-hardened VERIFIED identity — this
+  // screen is only ever RENDERED for who?.is_admin (App.svelte), but the real gate is server-side.
   import Card from '../lib/components/Card.svelte';
   import Button from '../lib/components/Button.svelte';
   import Badge from '../lib/components/Badge.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
-  import DriftPanel from '../lib/components/DriftPanel.svelte';
   import Picker from '../lib/components/Picker.svelte';
   import KaEndpointSettings from '../lib/components/KaEndpointSettings.svelte';
   import {
     getRoles,
     assignRole,
     revokeRole,
-    getAdminDrift,
+    getGitHubRoles,
     getPrincipals,
     getRules,
     upsertRule,
@@ -34,13 +31,13 @@
   import type { EffectiveRule, RoleName, RuleOverride, RuleSeverity } from '../lib/types';
 
   let rolesP = $state(getRoles());
-  let driftP = $state(getAdminDrift());
+  let githubRolesP = $state(getGitHubRoles());
   let rulesP = $state(getRules());
   let promptTemplateP = $state(getPromptTemplate());
 
   function refresh(): void {
     rolesP = getRoles();
-    driftP = getAdminDrift();
+    githubRolesP = getGitHubRoles();
     rulesP = getRules();
     promptTemplateP = getPromptTemplate();
   }
@@ -54,9 +51,10 @@
     return `Erro: ${err instanceof Error ? err.message : String(err)}`;
   }
 
+  // R1: single admin role. The label shown in the UI uses "Plataforma" (the domain term) but the
+  // stored role is just "admin" (generic, ADR-0004).
   const ROLE_LABEL: Record<RoleName, string> = {
-    steward: 'Steward',
-    admin: 'Admin',
+    admin: 'Plataforma',
   };
 
   // --- assign form -------------------------------------------------------------
@@ -75,7 +73,8 @@
   }
 
   let person = $state<UserOption | null>(null);
-  let role = $state<RoleName>('steward');
+  // R1: only the admin role exists; the picker is hidden (no choice to make).
+  const role: RoleName = 'admin';
   let githubUsername = $state('');
   let submitting = $state(false);
   let submitError = $state<string | null>(null);
@@ -349,9 +348,75 @@
 </script>
 
 <div class="stack">
+  <!-- Section 1: Read-only GitHub mirror — who controls the promotion path -->
   <Card
-    title="Papéis configurados"
-    subtitle="Quem é Steward ou Admin no app — mudanças aqui têm efeito imediato, sem redeploy."
+    title="Quem controla a promoção"
+    subtitle="Fonte de verdade: GitHub. O app exibe aqui somente leitura — nunca escreve esses gates."
+  >
+    {#snippet actions()}
+      <button type="button" class="refresh" onclick={refresh}>Atualizar</button>
+    {/snippet}
+
+    {#await githubRolesP}
+      <Skeleton height="3rem" />
+      <Skeleton height="3rem" width="80%" />
+    {:then data}
+      {#if data.error}
+        <p class="muted text-sm github-error">
+          Não foi possível conectar ao GitHub — verifique a instalação do bot.
+        </p>
+      {:else}
+        <div class="github-mirror">
+          <div class="github-section">
+            <h4 class="github-section__title">Responsável Técnico (Write no GitHub)</h4>
+            <p class="muted text-xs github-section__desc">
+              Podem marcar um PR como "pronto para revisão" e fazer merge (promote).
+            </p>
+            {#if data.write_collaborators_error}
+              <p class="muted text-xs github-error">Não foi possível ler do GitHub.</p>
+            {:else if data.write_collaborators && data.write_collaborators.length > 0}
+              <ul class="github-list">
+                {#each data.write_collaborators as login (login)}
+                  <li class="github-list__item">
+                    <span class="github-list__login">@{login}</span>
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <p class="muted text-xs">Nenhum colaborador com permissão de escrita encontrado.</p>
+            {/if}
+          </div>
+
+          <div class="github-section">
+            <h4 class="github-section__title">Aprovadores do deploy (Environment prod)</h4>
+            <p class="muted text-xs github-section__desc">
+              Precisam aprovar o gate de deploy para o ambiente de produção.
+            </p>
+            {#if data.environment_reviewers_error}
+              <p class="muted text-xs github-error">Não foi possível ler do GitHub.</p>
+            {:else if data.environment_reviewers && data.environment_reviewers.length > 0}
+              <ul class="github-list">
+                {#each data.environment_reviewers as login (login)}
+                  <li class="github-list__item">
+                    <span class="github-list__login">@{login}</span>
+                  </li>
+                {/each}
+              </ul>
+            {:else}
+              <p class="muted text-xs">Nenhum revisor obrigatório configurado no Environment prod.</p>
+            {/if}
+          </div>
+        </div>
+      {/if}
+    {:catch err}
+      <p class="error" role="alert">{errorText(err)}</p>
+    {/await}
+  </Card>
+
+  <!-- Section 2: Editable Admins (single role — Plataforma) -->
+  <Card
+    title="Administradores da Plataforma"
+    subtitle="Quem tem acesso ao console de administração — mudanças têm efeito imediato, sem redeploy."
   >
     {#snippet actions()}
       <button type="button" class="refresh" onclick={refresh}>Atualizar</button>
@@ -361,21 +426,10 @@
       <div class="assign-form__picker">
         <Picker label="Pessoa" placeholder="Buscar usuário…" search={searchUsers} bind:value={person} />
       </div>
-      <label class="field">
-        <span class="field__label">Papel</span>
-        <select class="field__input" bind:value={role}>
-          <option value="steward">Steward</option>
-          <option value="admin">Admin</option>
-        </select>
-      </label>
-      <label class="field">
-        <span class="field__label">Usuário do GitHub (opcional)</span>
-        <input class="field__input" bind:value={githubUsername} placeholder="ex.: PSPedro176" />
-      </label>
-      <Button type="submit" loading={submitting} disabled={!person}>Salvar papel</Button>
+      <Button type="submit" loading={submitting} disabled={!person}>Adicionar Admin</Button>
     </form>
     {#if submitError}
-      <p class="error" role="alert">Não foi possível salvar o papel: {submitError}</p>
+      <p class="error" role="alert">Não foi possível salvar: {submitError}</p>
     {/if}
 
     {#await rolesP}
@@ -383,9 +437,8 @@
     {:then data}
       {#if data.roles.length === 0}
         <p class="muted text-sm">
-          Nenhum papel configurado ainda — usando as variáveis de ambiente como padrão inicial
-          (Admins: {data.bootstrap_env.admins.join(', ') || '—'}; Stewards:
-          {data.bootstrap_env.stewards.join(', ') || '—'}).
+          Nenhum admin configurado ainda — usando as variáveis de ambiente como padrão inicial
+          (APP_ADMINS: {data.bootstrap_env.admins.join(', ') || '—'}).
         </p>
       {:else}
         <ul class="row-list">
@@ -393,9 +446,6 @@
             <li class="row">
               <div class="row__main">
                 <strong>{r.email}</strong>
-                <span class="muted text-xs">
-                  {r.github_username ? `GitHub: @${r.github_username}` : 'sem mapeamento do GitHub'}
-                </span>
               </div>
               <div class="row__meta">
                 <Badge tone="accent">{ROLE_LABEL[r.role]}</Badge>
@@ -412,20 +462,6 @@
           {/each}
         </ul>
       {/if}
-    {:catch err}
-      <p class="error" role="alert">{errorText(err)}</p>
-    {/await}
-  </Card>
-
-  <Card
-    title="Divergência com o GitHub"
-    subtitle="Comparação SOMENTE LEITURA entre os papéis do app e os gates que o GitHub realmente aplica (Environment de produção + proteção do branch). O GitHub continua sendo a fonte de verdade — o app nunca escreve esses gates."
-  >
-    {#await driftP}
-      <Skeleton height="3rem" />
-      <Skeleton height="3rem" width="80%" />
-    {:then report}
-      <DriftPanel {report} />
     {:catch err}
       <p class="error" role="alert">{errorText(err)}</p>
     {/await}
@@ -958,5 +994,48 @@
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.85rem;
     line-height: 1.5;
+  }
+  .github-mirror {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+  .github-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .github-section__title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin: 0;
+  }
+  .github-section__desc {
+    margin: 0;
+  }
+  .github-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .github-list__item {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.85rem;
+    background: var(--surface-inset);
+  }
+  .github-list__login {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.82rem;
+  }
+  .github-error {
+    color: var(--muted-foreground);
+    font-style: italic;
   }
 </style>

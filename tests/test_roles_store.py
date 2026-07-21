@@ -1,4 +1,4 @@
-"""Offline contract tests for roles_store — InMemoryBackend, NO live Lakebase.
+"""Offline contract tests for roles_store — InMemoryBackend, NO live Lakebase. R1: single admin role.
 
 Asserts the store's external contract —
 upsert-by-(email,role), idempotent revoke, the email<->GitHub-username mapping, and — the
@@ -21,10 +21,10 @@ def store():
 
 
 def test_assign_persists_and_is_idempotent_upsert(store):
-    a = store.assign(email="pedro@acme.com", role="steward", github_username="PSPedro176")
-    assert a.email == "pedro@acme.com" and a.role == "steward" and a.github_username == "PSPedro176"
+    a = store.assign(email="pedro@acme.com", role="admin", github_username="PSPedro176")
+    assert a.email == "pedro@acme.com" and a.role == "admin" and a.github_username == "PSPedro176"
     # Re-assigning the SAME (email, role) updates in place — no duplicate row.
-    b = store.assign(email="pedro@acme.com", role="steward", github_username="pedro-gh")
+    b = store.assign(email="pedro@acme.com", role="admin", github_username="pedro-gh")
     assert b.id == a.id
     all_rows = store.list_all()
     assert len(all_rows) == 1 and all_rows[0].github_username == "pedro-gh"
@@ -40,35 +40,41 @@ def test_assign_rejects_unknown_role(store):
         store.assign(email="a@x", role="superuser")
 
 
+def test_assign_rejects_unknown_steward_role(store):
+    # R1: "steward" is retired — the store must reject it the same as any other unknown role.
+    with pytest.raises(ValueError):
+        store.assign(email="a@x", role="steward")
+
+
 def test_assign_rejects_empty_email(store):
     with pytest.raises(ValueError):
         store.assign(email="  ", role="admin")
 
 
-def test_same_email_can_hold_multiple_roles(store):
+def test_same_email_admin_assignment(store):
+    # R1: only admin role — a single email can only hold admin (no second distinct role).
     store.assign(email="malcoln@acme.com", role="admin")
-    store.assign(email="malcoln@acme.com", role="steward")
     roles = {r.role for r in store.list_all() if r.email == "malcoln@acme.com"}
-    assert roles == {"admin", "steward"}
+    assert roles == {"admin"}
 
 
 def test_revoke_removes_the_assignment(store):
-    store.assign(email="a@x", role="steward")
-    store.revoke(email="a@x", role="steward")
+    store.assign(email="a@x", role="admin")
+    store.revoke(email="a@x", role="admin")
     assert store.list_all() == []
 
 
 def test_revoke_is_idempotent_when_absent(store):
-    store.revoke(email="ghost@x", role="steward")  # no-op, must not raise
+    store.revoke(email="ghost@x", role="admin")  # no-op, must not raise
 
 
 def test_github_username_for_unmapped_returns_none(store):
-    store.assign(email="a@x", role="steward")  # no github_username given
+    store.assign(email="a@x", role="admin")  # no github_username given
     assert store.github_username_for("a@x") is None
 
 
 def test_github_username_for_mapped(store):
-    store.assign(email="a@x", role="steward", github_username="a-gh")
+    store.assign(email="a@x", role="admin", github_username="a-gh")
     assert store.github_username_for("a@x") == "a-gh"
     assert store.github_username_for("A@X") == "a-gh"  # case-insensitive lookup
 
@@ -91,19 +97,20 @@ def test_effective_emails_store_wins_once_configured(store):
     assert store.effective_emails("admin", env_fallback=frozenset({"old-admin@x"})) == {"new-admin@x"}
 
 
-def test_effective_emails_ignores_env_for_a_role_with_zero_store_rows(store):
-    # Once the store holds ANY row (any role), env is ignored for EVERY role — configuring a
-    # Steward in-app but leaving Admins unconfigured must yield an EMPTY admin set, not a silent
+def test_effective_emails_ignores_env_once_store_is_non_empty(store):
+    # R1: once the store holds ANY row, env is ignored for every role — configuring one admin
+    # in-app but leaving others unconfigured must yield exactly the store rows, not a silent
     # env fallback ("no false sense of control", applied to precedence itself).
-    store.assign(email="steward@x", role="steward")
-    assert store.effective_emails("admin", env_fallback=frozenset({"env-admin@x"})) == frozenset()
+    store.assign(email="admin@x", role="admin")
+    # env has a DIFFERENT admin; since the store is non-empty, the env is ignored.
+    assert store.effective_emails("admin", env_fallback=frozenset({"env-admin@x"})) == frozenset({"admin@x"})
 
 
 def test_effective_emails_scoped_to_the_requested_role(store):
-    store.assign(email="s@x", role="steward")
+    # R1: only admin role; store holds two admin entries — both returned.
     store.assign(email="a@x", role="admin")
-    assert store.effective_emails("steward", env_fallback=frozenset()) == {"s@x"}
-    assert store.effective_emails("admin", env_fallback=frozenset()) == {"a@x"}
+    store.assign(email="b@x", role="admin")
+    assert store.effective_emails("admin", env_fallback=frozenset()) == {"a@x", "b@x"}
 
 
 def test_healthcheck_and_close_do_not_raise(store):
@@ -112,9 +119,9 @@ def test_healthcheck_and_close_do_not_raise(store):
 
 
 def test_revoke_admin_ok_when_a_replacement_admin_remains(store):
-    store.assign(email="pedro@acme.com", role="steward")
+    store.assign(email="pedro@acme.com", role="admin")
     store.assign(email="malcoln@acme.com", role="admin")
-    store.revoke(email="pedro@acme.com", role="steward")  # malcoln (admin) still gates -> allowed
+    store.revoke(email="pedro@acme.com", role="admin")  # malcoln (admin) still gates -> allowed
     assert [(r.email, r.role) for r in store.list_all()] == [("malcoln@acme.com", "admin")]
 
 

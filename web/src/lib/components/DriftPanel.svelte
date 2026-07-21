@@ -1,11 +1,21 @@
 <script lang="ts">
-  // F5 Phase 1: renders a READ-ONLY GitHub-gate drift report. Reused on BOTH the Settings screen
-  // (the full picture, admin-only) and the promotion-review screen (contextual, for the assigned
-  // Steward) — one component, two mount points, per the acceptance criteria ("not only a passive
-  // panel nobody opens"). `severity: 'unknown'` (a GitHub read failure) renders distinctly from
-  // `'warning'` (a real divergence) — an unreachable gate must never look like a clean bill of health.
+  // DriftPanel: renders a READ-ONLY GitHub-gate drift report. No longer actively used in R1 —
+  // the drift feature was retired in favour of the Settings GitHub mirror (GET /admin/github-roles).
+  // Kept as a tombstone in case it's needed for future debug/comparison surfaces.
   import Badge from './Badge.svelte';
-  import type { DriftReport } from '../types';
+
+  // Inline type since DriftReport was removed from types.ts in R1.
+  interface DriftFinding {
+    kind: string;
+    severity: 'warning' | 'unknown';
+    message: string;
+    detail: Record<string, unknown>;
+  }
+  interface DriftReport {
+    has_drift: boolean;
+    has_unknown: boolean;
+    findings: DriftFinding[];
+  }
 
   interface Props {
     report: DriftReport;

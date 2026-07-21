@@ -1,4 +1,4 @@
-"""Durable Lakebase-backed Steward/Admin configuration and GitHub identity mapping.
+"""Durable Lakebase-backed Admin configuration (R1: single-role model).
 
 Uses the same store pattern as the other durable configuration modules (`InMemoryBackend` for offline
 tests, `PgBackend` for Lakebase, the same OAuth-refreshing connection-pool recipe): a `RolesStore`
@@ -6,25 +6,27 @@ holds all domain logic (ids, timestamps, upsert-by-email semantics) and delegate
 an injectable backend.
 
 Why a NEW store rather than folding roles into `promotion_store`: roles are
-not an audit trail of an event stream — they're a small, mutable CONFIGURATION set (who is
-Steward/Admin right now), read on nearly every request (`whoami`, every admin gate) and written
-rarely (an admin changes an assignment). A dedicated table keeps that hot read-path a single
-`SELECT *` with no joins, and keeps the CRUD semantics (upsert-by-email, delete) distinct from the
-append-only stores' contracts.
+not an audit trail of an event stream — they're a small, mutable CONFIGURATION set (who is Admin
+right now), read on nearly every request (`whoami`, every admin gate) and written rarely (an admin
+changes an assignment). A dedicated table keeps that hot read-path a single `SELECT *` with no
+joins, and keeps the CRUD semantics (upsert-by-email, delete) distinct from the append-only stores'
+contracts.
 
-**Store-over-env precedence (the F5 acceptance criteria):** `effective_admin_emails()` /
-`effective_steward_emails()` return the STORE's roles when the store holds ANY role rows at all;
-only when the store is EMPTY (fresh install, or Lakebase absent) do the legacy `APP_ADMINS` /
-`APP_STEWARDS` / `APP_STEWARD` env vars apply, as a **bootstrap fallback** — matching the PRD's "no
-redeploy to change governance assignments" requirement (once a single role is configured in-app, env changes
-no longer matter) while keeping today's env-only deployments working unchanged.
+**Single-role model (R1):** The app holds exactly ONE authorization bit — `admin` (Plataforma) —
+to gate its own admin console. All separation-of-duties is enforced by GitHub (branch protection +
+Environment required-reviewer). "Steward" is retired as an app role; the app only mirrors GitHub's
+enforcement read-only via the Settings screen.
+
+**Store-over-env precedence (the F5 acceptance criteria):** `effective_emails()` returns the STORE's
+roles when the store holds ANY role rows at all; only when the store is EMPTY (fresh install, or
+Lakebase absent) does the legacy `APP_ADMINS` env var apply, as a **bootstrap fallback** — matching
+the PRD's "no redeploy to change governance assignments" requirement (once a single role is
+configured in-app, env changes no longer matter) while keeping today's env-only deployments working
+unchanged.
 
 **Fail-closed (A2's guarantee, extended to F5):** an empty store AND empty/unset env vars must
 resolve to an EMPTY admin set — never "everyone" or "no gate at all". Every helper here returns an
 empty `frozenset`/list rather than raising or defaulting open.
-
-**Phase 2 is explicitly NOT built here.** This store only holds the app's OWN desired-state config;
-it never writes to GitHub. See `genie_reviewer/github_drift.py` for the read-only comparison.
 """
 from __future__ import annotations
 
@@ -37,20 +39,21 @@ from typing import Callable, Optional, Protocol
 
 # --- domain model -------------------------------------------------------------
 
-# Pilot roles: Steward owns promotion review; Admin owns configuration and audit.
-ROLES = ("steward", "admin")
+# R1: single-role model — the app holds exactly one authorization bit: "admin" (Plataforma).
+# All separation-of-duties is enforced by GitHub; the app only mirrors it read-only.
+ROLES = ("admin",)
 
-# The roles that grant admin-console/gate access (`_admin_emails` unions these). Removing the LAST
-# of these while the store is otherwise non-empty locks EVERYONE out (env fallback only applies to a
-# COMPLETELY empty store) — see `RolesStore.revoke`'s guard + `LastAdminError`.
-_ADMIN_ROLES = ("admin", "steward")
+# The roles that grant admin-console/gate access. Removing the LAST admin while the store is
+# otherwise non-empty locks EVERYONE out (env fallback only applies to a COMPLETELY empty store) —
+# see `RolesStore.revoke`'s guard + `LastAdminError`.
+_ADMIN_ROLES = ("admin",)
 
 
 class LastAdminError(ValueError):
-    """Raised when a revoke would remove the last effective admin/steward while the store still holds
+    """Raised when a revoke would remove the last effective admin while the store still holds
     other rows — which would drive the admin-gate set to empty (no env fallback for a non-empty
     store), 403-ing EVERYONE out of every admin endpoint including the role CRUD needed to recover.
-    The operator must assign a replacement admin/steward first."""
+    The operator must assign a replacement admin first."""
 
 
 @dataclasses.dataclass
@@ -127,11 +130,11 @@ class RolesStore:
         """Remove a role assignment. A no-op if it didn't exist (idempotent, mirrors DELETE
         semantics elsewhere in the app — never a 404 for "already gone").
 
-        LOCKOUT GUARD (F5 review): if this row is an existing admin/steward and removing it would
-        leave the store non-empty but with ZERO admin/steward rows, raise `LastAdminError` — every
-        admin endpoint (incl. this CRUD) would otherwise 403 for everyone, with no env fallback
-        (env only backs a COMPLETELY empty store). Revoking down to a fully-empty store IS allowed
-        (env fallback then applies), as is revoking a non-admin role."""
+        LOCKOUT GUARD: if this row is an existing admin and removing it would leave the store
+        non-empty but with ZERO admin rows, raise `LastAdminError` — every admin endpoint (incl.
+        this CRUD) would otherwise 403 for everyone, with no env fallback (env only backs a
+        COMPLETELY empty store). Revoking down to a fully-empty store IS allowed (env fallback then
+        applies)."""
         ne = _norm_email(email)
         if role in _ADMIN_ROLES:
             rows = self.list_all()
@@ -140,7 +143,7 @@ class RolesStore:
                 remaining = [r for r in rows if not (_norm_email(r.email) == ne and r.role == role)]
                 if remaining and not any(r.role in _ADMIN_ROLES for r in remaining):
                     raise LastAdminError(
-                        "cannot remove the last admin/steward — assign a replacement first")
+                        "cannot remove the last admin — assign a replacement first")
         self._b.delete(ne, role)
 
     def list_all(self) -> list[RoleAssignment]:
@@ -154,15 +157,13 @@ class RolesStore:
 
     # -- effective role sets (store-over-env precedence) -----------------------
     def effective_emails(self, role: str, *, env_fallback: frozenset[str]) -> frozenset[str]:
-        """The effective set of emails holding `role`, applying the F5 precedence: if the store
-        holds ANY role rows AT ALL (any role, not just this one — a store that's been configured
-        for *anything* is no longer "empty"), the store is authoritative for every role and
-        `env_fallback` is ignored EVEN IF this specific role has zero store rows (an admin who
-        configures a Steward in-app but leaves Admins unconfigured should see an EMPTY admin set,
-        not silently fall back to the env var — that's the "no false sense of control" the PRD
-        calls out, applied to precedence itself). Only a COMPLETELY empty store (fresh install,
-        nothing configured yet) falls back to env. Fails closed either way: an empty result here
-        propagates as "no one has this role", never "everyone"."""
+        """The effective set of emails holding `role`, applying the store-over-env precedence: if
+        the store holds ANY role rows AT ALL (any role, not just this one — a store that's been
+        configured for *anything* is no longer "empty"), the store is authoritative for every role
+        and `env_fallback` is ignored EVEN IF this specific role has zero store rows. Only a
+        COMPLETELY empty store (fresh install, nothing configured yet) falls back to env. Fails
+        closed either way: an empty result here propagates as "no one has this role", never
+        "everyone"."""
         all_rows = self._b.list_all()
         if not all_rows:
             return env_fallback
@@ -194,8 +195,8 @@ class InMemoryBackend:
 
     def migrate(self) -> None:
         self.migrated = True
-        # Cleanup is intentionally idempotent: retired persona rows disappear on every
-        # startup, including in faithful in-memory migration tests.
+        # R1: purge any rows whose role is no longer in ROLES (e.g. retired "steward" rows from a
+        # pre-R1 store). Idempotent: running migrate() again after cleanup is a no-op.
         self._rows = {key: row for key, row in self._rows.items() if row["role"] in ROLES}
 
     def upsert(self, row: dict) -> None:
@@ -220,18 +221,19 @@ MIGRATIONS = (
     """CREATE TABLE IF NOT EXISTS roles (
         id               text PRIMARY KEY,
         email            text NOT NULL,
-        role             text NOT NULL CHECK (role IN ('steward', 'admin')),
+        role             text NOT NULL CHECK (role IN ('admin')),
         github_username  text,
         created_at       timestamptz NOT NULL,
         updated_at       timestamptz NOT NULL,
         UNIQUE (email, role)
     )""",
     "CREATE INDEX IF NOT EXISTS ix_roles_role ON roles(role)",
-    # Retired persona assignments have no capability in the three-actor pilot. Repeating this
-    # statement is harmless and makes upgrades converge before the stricter S8 schema constraint.
+    # R1: retire any pre-existing 'steward' rows. Also retire the old 'approver' rows from a
+    # prior schema version. Both statements are idempotent and safe to re-run.
+    "DELETE FROM roles WHERE role = 'steward'",
     "DELETE FROM roles WHERE role = 'appro' || 'ver'",
     "ALTER TABLE roles DROP CONSTRAINT IF EXISTS roles_role_check",
-    "ALTER TABLE roles ADD CONSTRAINT roles_role_check CHECK (role IN ('steward', 'admin'))",
+    "ALTER TABLE roles ADD CONSTRAINT roles_role_check CHECK (role IN ('admin'))",
 )
 
 _ROLE_COLS = ("id", "email", "role", "github_username", "created_at", "updated_at")

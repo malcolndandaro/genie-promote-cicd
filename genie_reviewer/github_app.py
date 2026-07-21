@@ -666,11 +666,28 @@ class GitHubApp:
                 return (a.get("user") or {}).get("login")
         return None
 
-    # --- F5 Phase 1: READ-ONLY gate introspection (drift detection) ---------
+    # --- R1: READ-ONLY gate introspection (Settings GitHub mirror) ----------
     #
-    # These two accessors are the ENTIRE GitHub-write-adjacent surface `github_drift.py` uses. Both
-    # are GET-only — no `administration:write` scope is requested or required. Phase 2 (writing
-    # these gates) is explicitly out of scope (see genie_reviewer/github_drift.py's docstring).
+    # These accessors power the Settings screen's "Quem controla a promoção" mirror — all GET-only,
+    # no write scope required or requested. The Settings screen never offers a "fix it" button.
+
+    def list_write_collaborators(self) -> list[str]:
+        """GitHub logins of collaborators with (at least) `write` permission — the people who can
+        mark a draft PR ready and merge it (i.e. the Responsável Técnico pool). Uses
+        `GET /repos/{owner}/{repo}/collaborators?permission=push` which requires only
+        `Metadata: Read` (automatic for all App installations). Returns an empty list rather than
+        raising on a 404 (no collaborators returned) or a non-critical error, so a missing-scope
+        situation degrades to an empty list that the Settings screen renders as a graceful "não foi
+        possível ler do GitHub" — the caller always handles None/empty, never trusts "empty == no
+        one has access". Raises `GitHubError` for unexpected server errors (the caller catches)."""
+        status, body = self._transport(
+            "GET", f"{_API}{self._repo_path('/collaborators?permission=push')}",
+            self._headers(self._token()), None)
+        if status == 404:
+            return []
+        if status != 200 or not isinstance(body, list):
+            raise GitHubError(status, "list write collaborators", body)
+        return [c["login"] for c in body if isinstance(c, dict) and c.get("login")]
 
     def get_environment_reviewers(self, environment: str) -> list[str]:
         """The GitHub logins configured as required reviewers on a deployment Environment (e.g.

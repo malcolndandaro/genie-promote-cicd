@@ -7,12 +7,9 @@
   import ReviewPanel from './ReviewPanel.svelte';
   import AuditTrail from './AuditTrail.svelte';
   import RehydrateAction from './RehydrateAction.svelte';
-  import DriftPanel from './DriftPanel.svelte';
   import { pendingTimeline } from '../pipeline';
   import { PHASE_LABEL, phaseTone } from '../status';
-  import { getPromotionDrift } from '../api';
   import { genieSpaceUrl } from '../links';
-  import type { DriftReport } from '../types';
   import type { Promotion } from '../promotion.svelte';
 
   interface Props {
@@ -44,16 +41,6 @@
       ? promotion.liveStatus?.deploy?.run_url ?? null
       : null,
   );
-
-  // F5 US-35: contextual drift, surfaced HERE for the assigned Steward — not only on a passive
-  // Settings panel nobody opens. Fetched once per promotion (not polled — role/GitHub-gate drift
-  // doesn't change on the promotion's own 5s status cadence); failures are swallowed to `null` so a
-  // drift-check hiccup never blocks rendering the review itself.
-  let driftP = $state<Promise<DriftReport> | null>(null);
-  $effect(() => {
-    const id = promotion.promotionId;
-    driftP = promotion.isSteward && id ? getPromotionDrift(id) : null;
-  });
 
   // Poll the live PR/CI/deploy status while a promotion PR is open (GH3). The effect lives WITH the
   // review so polling runs exactly when the review is on screen (the active flow OR a promotion
@@ -161,26 +148,7 @@
         evidenceLoading={promotion.evidenceLoading}
         evidenceError={promotion.evidenceError}
         onLoadEvidence={() => promotion.refreshDeploymentEvidence()}
-      >
-        {#snippet approval()}
-          {#if driftP}
-            <div class="drift-section">
-              {#await driftP then report}
-                {#if report.findings.length > 0}
-                  <div class="drift-callout" role="status">
-                    <span class="drift-callout__heading">
-                      Antes de aprovar: divergência entre o papel de Steward e o gate do GitHub
-                    </span>
-                    <DriftPanel {report} compact />
-                  </div>
-                {/if}
-              {:catch}
-                <!-- a drift-check failure must never block rendering the review/approval itself -->
-              {/await}
-            </div>
-          {/if}
-        {/snippet}
-      </ReviewPanel>
+      />
       {#if promotion.promotionId}
         <div class="audit-section">
           <AuditTrail events={promotion.audit} />
@@ -219,23 +187,6 @@
     animation: status-spin 0.7s linear infinite;
   }
   @keyframes status-spin { to { transform: rotate(360deg); } }
-  .drift-section {
-    margin-bottom: var(--space-4);
-  }
-  .drift-callout {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
-    background: var(--warning-soft);
-    border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
-    border-radius: var(--radius-sm);
-  }
-  .drift-callout__heading {
-    font-size: 0.8rem;
-    font-weight: 700;
-    color: var(--warning);
-  }
   .error-state {
     display: flex;
     align-items: center;
