@@ -1038,8 +1038,9 @@ Então:
 10. Verifique que o deploy completa todas as etapas: preflight, `bundle deploy`, resolução do Space,
     `CAN_MANAGE` do app, reconciliação de público, leitura ao vivo e certificação. A certificação
     acontece somente após verificar conteúdo e ACLs, cria ou atualiza
-    `system.certification_status=certified` e faz uma leitura de confirmação. O SP de deploy do CI
-    precisa do privilégio mínimo `ASSIGN` nessa tag governada, concedido por uma policy de tag de
+    `system.certification_status=certified` e faz uma leitura de confirmação, tolerando por cerca de
+    60 segundos a consistência eventual da API de tags antes de falhar. O SP de deploy do CI precisa
+    do privilégio mínimo `ASSIGN` nessa tag governada, concedido por uma policy de tag de
     conta ou individual; ser workspace admin não é suficiente. Todo deploy aprovado do conjunto
     desejado re-certifica cada Space renderizado gerenciado, portanto apagar ou descontinuar a tag
     manualmente é temporário e não é um controle de revogação. O preflight lê a policy e confirma

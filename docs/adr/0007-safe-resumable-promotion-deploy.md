@@ -46,7 +46,8 @@ After preflight succeeds:
 4. `reconcile_audience` — reconcile app-managed audience ACLs to AudienceSpec, deriving `CAN_RUN`;
 5. `verify_live_state` — read back content identity, technical ACL and managed audience;
 6. `certify_space` — read, create or update the Genie Space's
-   `system.certification_status=certified` workspace-entity tag, then read it back;
+   `system.certification_status=certified` workspace-entity tag, then read it back with a bounded
+   retry for workspace-tag propagation;
 7. `complete` — only now report the deployment as deployed.
 
 Audience reconciliation is the last access-changing stage; certification follows the content and ACL
@@ -64,7 +65,8 @@ assertion is additive, audience reconciliation converges on the declared managed
 certification is a no-op when the Space is already certified (otherwise it converges by create or
 update). Every approved full desired-set deployment re-certifies every managed rendered Space, so a
 manual deletion or deprecation is temporary and is not a revocation control. Final readback proves
-the target state.
+the target state; transient `NotFound` or stale values are retried for about 60 seconds, while an
+exhausted readback still fails closed as `partial_failed`.
 
 The workflow emits a stable stage id, completed-stage list and target identifiers as step output and
 annotations. GitHub remains the live source of truth; Lakebase mirrors the Attempt/phase through the
