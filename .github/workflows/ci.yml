@@ -41,13 +41,19 @@ jobs:
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_PROD_SP_SECRET }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
       - uses: databricks/setup-cli@main
         with:
           version: 1.4.0
       - name: Unit tests (engine + engine API)
         run: |
-          python3 -m pip install -q 'databricks-sdk>=0.111.0' fastapi uvicorn httpx pytest
-          python3 -m pytest tests/ -q
+          python -m venv .venv
+          .venv/bin/python -m pip install -q \
+            'databricks-sdk>=0.111.0' fastapi uvicorn httpx pytest
+          .venv/bin/python -m pytest tests/ -q
       - name: Pre-render + identifier allowlist (standalone — no content, emits empty resources)
         run: bash scripts/render.sh prod
       - name: Stub the app source dir (ADR-0006/A1 — promote_app targets prod)

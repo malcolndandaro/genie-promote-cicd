@@ -22,6 +22,8 @@ vivem em um repositório de conteúdo separado (por exemplo, `genie-spaces-conte
 - Um Databricks App hospedado em PROD, com backend FastAPI e frontend Svelte.
 - Autoria nativa no Genie em DEV e deploy governado para PROD.
 - Checagens determinísticas de ambiente, público (audience) e avaliação (eval).
+- Certificação pós-verificação dos Spaces implantados, pelo tag governado
+  `system.certification_status=certified`.
 - Revisão automática por LLM (revisor), com contrato de resposta protegido e persona editável.
 - Um Knowledge Assistant (KA) fixo — o handbook de CI/CD, global a todos os spaces — consultado pela
   revisão como fonte consultiva adicional (nunca bloqueante).
@@ -44,6 +46,9 @@ flowchart LR
   approval --> deploy[SP de deploy]
   deploy --> prod[Genie Space no PROD]
   deploy --> audience[Público Genie CAN_RUN]
+  prod --> verify[Verifica conteúdo + ACLs]
+  audience --> verify
+  verify --> certification[Certifica o Space<br/>tag governado]
   app <--> lakebase[(Lakebase<br/>estado + auditoria)]
   prod -. exportação autorizada .-> app
   app -. escrita protegida .-> dev
@@ -81,7 +86,8 @@ repositório de conteúdo, quando as proteções descritas no
    faz o merge — esse é o ato de **promover**, sempre manual no GitHub. (Reenviar uma promoção cujo
    PR já estava pronto o rebaixa de volta para rascunho automaticamente.)
 8. A **Plataforma** aprova o deploy no gate do Environment `prod` protegido.
-9. A identidade de CI implanta o par exato de revisões (conteúdo + engine) e verifica a ACL ao vivo.
+9. A identidade de CI implanta o par exato de revisões (conteúdo + engine), reconcilia o público,
+   verifica conteúdo e ACLs ao vivo e só então certifica cada Space com o tag governado.
 
 O pipeline reconcilia as permissões de público Genie `CAN_RUN`. Ele **não** concede acesso a dados no
 Unity Catalog; os grants de tabela permanecem sob o processo normal de governança do cliente.
@@ -97,7 +103,7 @@ Unity Catalog; os grants de tabela permanecem sob o processo normal de governan�
 | **Service principal do app** | Roda o app, abre/rebaixa PRs em rascunho (nunca marca como pronto), conecta ao Lakebase, consulta o revisor e lê Spaces governados. |
 | **SP de transporte do DEV** | Faz as chamadas Genie entre workspaces, somente após o app verificar a autorização por usuário (fail-closed). |
 | **SP de validação** | Roda os checks de PR voltados a PROD, sem autoridade de deploy ou de admin. |
-| **SP de deploy** | Implanta atrás do gate de produção, assegura o acesso do app e reconcilia as ACLs de público Genie. |
+| **SP de deploy** | Implanta atrás do gate de produção, assegura o acesso do app, reconcilia as ACLs de público Genie, verifica o estado ao vivo e certifica os Spaces no tag governado. |
 | **GitHub App (bot)** | Cria branches/PRs de conteúdo e lê checks e deployments. Nunca os aprova nem marca um PR como pronto. |
 
 A separação de funções (SoD) é imposta **inteiramente pelo GitHub**: a permissão `Write` define quem
@@ -126,6 +132,10 @@ Leia isto antes de tratar o acelerador como pronto para produção:
   Instalações de produção devem separar a validação em uma identidade de menor privilégio; caso
   contrário, todo ator capaz de rodar código de PR estará dentro da fronteira de confiança de
   administrador de PROD.
+- O SP de deploy precisa de `ASSIGN` mínimo no tag governado
+  `system.certification_status` (por policy de conta ou individual). Ser workspace admin não basta;
+  o preflight confirma a policy e o valor `certified`, mas uma ausência de `ASSIGN` só pode falhar
+  honestamente na etapa de certificação.
 - Os workflows de conteúdo hoje derivam entradas de shell a partir de nomes de arquivos de conteúdo.
   Até esse limite ser endurecido, restrinja mudanças de conteúdo a contribuidores confiáveis.
 - O bundle só-engine é um formato de bootstrap único. Depois que o conteúdo de PROD passa a ser
