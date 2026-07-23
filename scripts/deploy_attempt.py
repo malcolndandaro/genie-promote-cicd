@@ -14,8 +14,9 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "genie_reviewer"))
@@ -44,6 +45,8 @@ _EVIDENCE_PREFIX = "DEPLOY_ATTEMPT:"
 _GENIE_SPACE_TAG_ENTITY_TYPE = "geniespaces"
 _CERTIFICATION_TAG_KEY = "system.certification_status"
 _CERTIFICATION_TAG_VALUE = "certified"
+_CERTIFICATION_READBACK_MAX_ATTEMPTS = 30
+_CERTIFICATION_READBACK_RETRY_SECONDS = 2.0
 
 
 def _gh_escape(value: str) -> str:
@@ -162,10 +165,18 @@ class ProductionOperations:
     """Thin production adapter; domain ordering stays in ``run_attempt`` and is fully fakeable."""
 
     def __init__(self, root: Path, warehouse_id: str, previous_content_root: Path | None = None,
-                 client=None):
+                 client=None, *,
+                 certification_readback_max_attempts: int = _CERTIFICATION_READBACK_MAX_ATTEMPTS,
+                 certification_readback_retry_seconds: float = _CERTIFICATION_READBACK_RETRY_SECONDS,
+                 certification_readback_sleep: Callable[[float], None] = time.sleep):
+        if certification_readback_max_attempts < 1:
+            raise ValueError("certification_readback_max_attempts must be at least 1")
         self.root = root
         self.warehouse_id = warehouse_id
         self.previous_content_root = previous_content_root
+        self.certification_readback_max_attempts = certification_readback_max_attempts
+        self.certification_readback_retry_seconds = certification_readback_retry_seconds
+        self.certification_readback_sleep = certification_readback_sleep
         if client is None:
             from databricks.sdk import WorkspaceClient
             client = WorkspaceClient()
@@ -315,11 +326,20 @@ class ProductionOperations:
                         update_mask="tag_value",
                     )
 
-            readback = assignments.get_tag_assignment(
-                _GENIE_SPACE_TAG_ENTITY_TYPE, space_id, _CERTIFICATION_TAG_KEY,
-            )
-            if readback.tag_value != _CERTIFICATION_TAG_VALUE:
-                raise RuntimeError(f"{slug}: certification tag readback was not certified")
+            for attempt in range(self.certification_readback_max_attempts):
+                try:
+                    readback = assignments.get_tag_assignment(
+                        _GENIE_SPACE_TAG_ENTITY_TYPE, space_id, _CERTIFICATION_TAG_KEY,
+                    )
+                except NotFound:
+                    if attempt + 1 == self.certification_readback_max_attempts:
+                        raise
+                else:
+                    if readback.tag_value == _CERTIFICATION_TAG_VALUE:
+                        break
+                    if attempt + 1 == self.certification_readback_max_attempts:
+                        raise RuntimeError(f"{slug}: certification tag readback was not certified")
+                self.certification_readback_sleep(self.certification_readback_retry_seconds)
 
 
 def _evidence(root: Path) -> AttemptEvidence:

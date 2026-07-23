@@ -16,11 +16,12 @@ import workflow_support  # noqa: E402
 
 
 class _Emitter:
-    def __init__(self):
+    def __init__(self, evidence=None):
+        self.evidence = evidence
         self.states = []
 
     def emit(self):
-        self.states.append(None)  # run_attempt's evidence object is asserted directly
+        self.states.append(self.evidence.to_dict() if self.evidence is not None else None)
 
 
 class _Operations:
@@ -240,11 +241,12 @@ def test_preflight_accepts_a_tag_policy_that_declares_certified():
     assert ("get_tag_policy", "system.certification_status") in calls
 
 
-def _production_operations_with_tags(tags):
+def _production_operations_with_tags(tags, **kwargs):
     return deploy_attempt.ProductionOperations(
         deploy_attempt.ROOT,
         "warehouse-1",
         client=NS(workspace_entity_tag_assignments=tags),
+        **kwargs,
     )
 
 
@@ -285,6 +287,77 @@ def test_certify_space_replaces_a_deprecated_tag_then_reads_back_certified():
     )
 
 
+def test_certify_space_retries_a_transient_not_found_after_create():
+    class _TagAssignmentsWithDelayedCreateReadback(_TagAssignments):
+        def __init__(self):
+            super().__init__()
+            self.delay_readback = False
+
+        def create_tag_assignment(self, tag_assignment):
+            created = super().create_tag_assignment(tag_assignment)
+            self.delay_readback = True
+            return created
+
+        def get_tag_assignment(self, entity_type, entity_id, tag_key):
+            if self.delay_readback:
+                self.delay_readback = False
+                self.calls.append(("get", entity_type, entity_id, tag_key))
+                raise NotFound("tag assignment is still propagating")
+            return super().get_tag_assignment(entity_type, entity_id, tag_key)
+
+    tags = _TagAssignmentsWithDelayedCreateReadback()
+    waits = []
+    _production_operations_with_tags(
+        tags,
+        certification_readback_max_attempts=2,
+        certification_readback_retry_seconds=0.5,
+        certification_readback_sleep=waits.append,
+    ).certify_space({"receivables": "space-1"})
+
+    assert [call[0] for call in tags.calls] == ["get", "create", "get", "get"]
+    assert waits == [0.5]
+
+
+def test_certify_space_retries_a_transient_old_value_after_update():
+    class _TagAssignmentsWithDelayedUpdateReadback(_TagAssignments):
+        def __init__(self):
+            super().__init__({
+                ("geniespaces", "space-1", "system.certification_status"): "deprecated",
+            })
+            self.delay_readback = False
+
+        def update_tag_assignment(self, entity_type, entity_id, tag_key, tag_assignment, update_mask):
+            updated = super().update_tag_assignment(
+                entity_type, entity_id, tag_key, tag_assignment, update_mask,
+            )
+            self.delay_readback = True
+            return updated
+
+        def get_tag_assignment(self, entity_type, entity_id, tag_key):
+            if self.delay_readback:
+                self.delay_readback = False
+                self.calls.append(("get", entity_type, entity_id, tag_key))
+                return TagAssignment(
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    tag_key=tag_key,
+                    tag_value="deprecated",
+                )
+            return super().get_tag_assignment(entity_type, entity_id, tag_key)
+
+    tags = _TagAssignmentsWithDelayedUpdateReadback()
+    waits = []
+    _production_operations_with_tags(
+        tags,
+        certification_readback_max_attempts=2,
+        certification_readback_retry_seconds=0.5,
+        certification_readback_sleep=waits.append,
+    ).certify_space({"receivables": "space-1"})
+
+    assert [call[0] for call in tags.calls] == ["get", "update", "get", "get"]
+    assert waits == [0.5]
+
+
 def test_certify_space_is_a_noop_for_an_already_certified_space_but_reads_back():
     tags = _TagAssignments({("geniespaces", "space-1", "system.certification_status"): "certified"})
 
@@ -294,6 +367,35 @@ def test_certify_space_is_a_noop_for_an_already_certified_space_but_reads_back()
         ("get", "geniespaces", "space-1", "system.certification_status"),
         ("get", "geniespaces", "space-1", "system.certification_status"),
     ]
+
+
+def test_certify_space_retries_transient_readback_for_an_already_certified_space():
+    class _TagAssignmentsWithTransientCertifiedReadback(_TagAssignments):
+        def __init__(self):
+            super().__init__({
+                ("geniespaces", "space-1", "system.certification_status"): "certified",
+            })
+            self.get_count = 0
+
+        def get_tag_assignment(self, entity_type, entity_id, tag_key):
+            self.get_count += 1
+            if self.get_count == 2:
+                self.calls.append(("get", entity_type, entity_id, tag_key))
+                raise NotFound("certified tag readback is briefly unavailable")
+            return super().get_tag_assignment(entity_type, entity_id, tag_key)
+
+    tags = _TagAssignmentsWithTransientCertifiedReadback()
+    waits = []
+    _production_operations_with_tags(
+        tags,
+        certification_readback_max_attempts=2,
+        certification_readback_retry_seconds=0.5,
+        certification_readback_sleep=waits.append,
+    ).certify_space({"receivables": "space-1"})
+
+    assert [call[0] for call in tags.calls] == ["get", "get", "get"]
+    assert not any(call[0] in {"create", "update"} for call in tags.calls)
+    assert waits == [0.5]
 
 
 def test_certify_space_propagates_a_non_not_found_sdk_failure():
@@ -316,7 +418,13 @@ def test_certification_readback_mismatch_is_a_partial_failure():
     tags = _TagAssignmentsWithStaleReadback({
         ("geniespaces", "space-1", "system.certification_status"): "deprecated",
     })
-    production = _production_operations_with_tags(tags)
+    waits = []
+    production = _production_operations_with_tags(
+        tags,
+        certification_readback_max_attempts=2,
+        certification_readback_retry_seconds=0.5,
+        certification_readback_sleep=waits.append,
+    )
 
     class _OperationsWithCertificationReadbackFailure(_Operations):
         def certify_space(self, targets):
@@ -324,13 +432,64 @@ def test_certification_readback_mismatch_is_a_partial_failure():
             production.certify_space(targets)
 
     evidence = _evidence()
+    emitter = _Emitter(evidence)
     assert deploy_attempt.run_attempt(
-        _OperationsWithCertificationReadbackFailure(), evidence, _Emitter(),
+        _OperationsWithCertificationReadbackFailure(), evidence, emitter,
     ) == 1
     assert evidence.failed_stage == "certify_space"
     assert evidence.terminal_state == "partial_failed"
     assert "RuntimeError: receivables: certification tag readback was not certified" in evidence.reason
-    assert [call[0] for call in tags.calls] == ["get", "update", "get"]
+    assert [call[0] for call in tags.calls] == ["get", "update", "get", "get"]
+    assert waits == [0.5]
+
+
+def test_certification_readback_not_found_exhaustion_is_a_partial_failure():
+    class _TagAssignmentsWithNeverVisibleCreate(_TagAssignments):
+        def __init__(self):
+            super().__init__()
+            self.created = False
+
+        def create_tag_assignment(self, tag_assignment):
+            created = super().create_tag_assignment(tag_assignment)
+            self.created = True
+            return created
+
+        def get_tag_assignment(self, entity_type, entity_id, tag_key):
+            if self.created:
+                self.calls.append(("get", entity_type, entity_id, tag_key))
+                raise NotFound("tag assignment did not become visible")
+            return super().get_tag_assignment(entity_type, entity_id, tag_key)
+
+    tags = _TagAssignmentsWithNeverVisibleCreate()
+    waits = []
+    production = _production_operations_with_tags(
+        tags,
+        certification_readback_max_attempts=2,
+        certification_readback_retry_seconds=0.5,
+        certification_readback_sleep=waits.append,
+    )
+
+    class _OperationsWithCertificationReadbackFailure(_Operations):
+        def certify_space(self, targets):
+            self._call("certify_space")
+            production.certify_space(targets)
+
+    evidence = _evidence()
+    emitter = _Emitter(evidence)
+    assert deploy_attempt.run_attempt(
+        _OperationsWithCertificationReadbackFailure(), evidence, emitter,
+    ) == 1
+    assert evidence.failed_stage == "certify_space"
+    assert evidence.terminal_state == "partial_failed"
+    assert "NotFound: tag assignment did not become visible" in evidence.reason
+    assert [call[0] for call in tags.calls] == ["get", "create", "get", "get"]
+    assert waits == [0.5]
+    assert emitter.states[-1]["completed_stages"] == [
+        "preflight", "bundle_deploy", "resolve_space", "assert_app_manage",
+        "reconcile_audience", "verify_live_state",
+    ]
+    assert emitter.states[-1]["failed_stage"] == "certify_space"
+    assert emitter.states[-1]["terminal_state"] == "partial_failed"
 
 
 def test_post_deploy_resolver_retries_a_stale_genie_listing_until_the_title_appears():
