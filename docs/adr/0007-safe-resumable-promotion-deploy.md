@@ -29,7 +29,9 @@ Preflight includes:
 - only `CAN_RUN` as the derived audience ACL level;
 - live target table/principal existence and duplicate-title checks;
 - `AUDIENCE-01` effective-grant inspection (missing SELECT is informational);
-- authentication/capability checks for every identity needed by later stages.
+- read-only lookup of the governed `system.certification_status` tag policy, including that it
+  declares `certified` as an allowed value;
+- authentication/capability checks where Databricks exposes a stable read-only check.
 
 Invalid content/principals block before mutation. An API/auth/timeout that prevents preflight is an
 operational failure, not an author finding, and also leaves production untouched.
@@ -43,16 +45,26 @@ After preflight succeeds:
 3. `assert_app_manage` — idempotently assert the app SP's technical `CAN_MANAGE`;
 4. `reconcile_audience` — reconcile app-managed audience ACLs to AudienceSpec, deriving `CAN_RUN`;
 5. `verify_live_state` — read back content identity, technical ACL and managed audience;
-6. `complete` — only now report the deployment as deployed.
+6. `certify_space` — read, create or update the Genie Space's
+   `system.certification_status=certified` workspace-entity tag, then read it back;
+7. `complete` — only now report the deployment as deployed.
 
-Audience exposure is deliberately last. No stage grants UC privileges.
+Audience reconciliation is the last access-changing stage; certification follows the content and ACL
+verification in stage 5. The CI deploy service principal needs least-privilege `ASSIGN` on the governed
+`system.certification_status` tag, granted through an account or individual tag policy;
+workspace-admin alone is insufficient. Databricks exposes no stable non-mutating `ASSIGN` probe in
+this flow: preflight verifies only the policy and allowed value, while absent `ASSIGN` fails honestly
+at `certify_space`. No stage grants UC privileges.
 
 ### 3. Idempotent replay, not blind resume
 
 Every mutation is safe to repeat. A retry starts with preflight and replays the ordered stages; it
 does not trust a manually selected “resume from step N”. Bundle deploy is declarative, technical ACL
-assertion is additive, audience reconciliation converges on the declared managed set, and final
-readback proves the target state.
+assertion is additive, audience reconciliation converges on the declared managed set, and
+certification is a no-op when the Space is already certified (otherwise it converges by create or
+update). Every approved full desired-set deployment re-certifies every managed rendered Space, so a
+manual deletion or deprecation is temporary and is not a revocation control. Final readback proves
+the target state.
 
 The workflow emits a stable stage id, completed-stage list and target identifiers as step output and
 annotations. GitHub remains the live source of truth; Lakebase mirrors the Attempt/phase through the

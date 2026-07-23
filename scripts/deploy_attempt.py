@@ -35,11 +35,15 @@ MUTATION_STAGES = (
     "assert_app_manage",
     "reconcile_audience",
     "verify_live_state",
+    "certify_space",
     "complete",
 )
 _SUFFICIENT = {"CAN_RUN", "CAN_EDIT", "CAN_MANAGE", "IS_OWNER"}
 _TECHNICAL_SUFFICIENT = {"CAN_MANAGE", "IS_OWNER"}
 _EVIDENCE_PREFIX = "DEPLOY_ATTEMPT:"
+_GENIE_SPACE_TAG_ENTITY_TYPE = "geniespaces"
+_CERTIFICATION_TAG_KEY = "system.certification_status"
+_CERTIFICATION_TAG_VALUE = "certified"
 
 
 def _gh_escape(value: str) -> str:
@@ -82,6 +86,7 @@ class Operations(Protocol):
     def assert_app_manage(self, targets: dict[str, str]) -> None: ...
     def reconcile_audience(self, targets: dict[str, str]) -> None: ...
     def verify_live_state(self, targets: dict[str, str]) -> None: ...
+    def certify_space(self, targets: dict[str, str]) -> None: ...
 
 
 class EvidenceEmitter:
@@ -124,6 +129,7 @@ def run_attempt(operations: Operations, evidence: AttemptEvidence,
         "assert_app_manage": lambda: operations.assert_app_manage(evidence.target_ids),
         "reconcile_audience": lambda: operations.reconcile_audience(evidence.target_ids),
         "verify_live_state": lambda: operations.verify_live_state(evidence.target_ids),
+        "certify_space": lambda: operations.certify_space(evidence.target_ids),
         "complete": lambda: None,
     }
     for index, stage in enumerate(MUTATION_STAGES):
@@ -143,7 +149,8 @@ def run_attempt(operations: Operations, evidence: AttemptEvidence,
         evidence.completed_stages.append(stage)
         if index + 1 < len(MUTATION_STAGES):
             evidence.current_stage = MUTATION_STAGES[index + 1]
-        emitter.emit()
+        if stage != "complete":
+            emitter.emit()
 
     evidence.current_stage = "complete"
     evidence.terminal_state = "succeeded"
@@ -197,6 +204,15 @@ class ProductionOperations:
         app = self.w.apps.get(self.app_name)
         if not getattr(app, "service_principal_client_id", None):
             raise RuntimeError(f"app {self.app_name!r} has no service principal")
+        certification_policy = self.w.tag_policies.get_tag_policy(_CERTIFICATION_TAG_KEY)
+        declared_certification_values = {
+            value.name for value in certification_policy.values or []
+        }
+        if _CERTIFICATION_TAG_VALUE not in declared_certification_values:
+            raise RuntimeError(
+                f"certification tag policy {_CERTIFICATION_TAG_KEY!r} does not declare "
+                f"{_CERTIFICATION_TAG_VALUE!r}",
+            )
         live = list(self.w.genie.list_spaces().spaces or [])
         for slug, rendered, title_path, audience_path in self._artifacts():
             title = title_path.read_text(encoding="utf-8").strip()
@@ -265,6 +281,45 @@ class ProductionOperations:
             missing = [p.name for p in desired.principals if by_name.get(p.name) not in _SUFFICIENT]
             if missing:
                 raise RuntimeError(f"{slug}: audience readback failed for {', '.join(missing)}")
+
+    def certify_space(self, targets: dict[str, str]) -> None:
+        """Assert and read back the required system certification tag for every deployed Space."""
+        from databricks.sdk.errors import NotFound
+        from databricks.sdk.service.tags import TagAssignment
+
+        assignments = self.w.workspace_entity_tag_assignments
+        for slug, space_id in targets.items():
+            try:
+                current = assignments.get_tag_assignment(
+                    _GENIE_SPACE_TAG_ENTITY_TYPE, space_id, _CERTIFICATION_TAG_KEY,
+                )
+            except NotFound:
+                assignments.create_tag_assignment(TagAssignment(
+                    entity_type=_GENIE_SPACE_TAG_ENTITY_TYPE,
+                    entity_id=space_id,
+                    tag_key=_CERTIFICATION_TAG_KEY,
+                    tag_value=_CERTIFICATION_TAG_VALUE,
+                ))
+            else:
+                if current.tag_value != _CERTIFICATION_TAG_VALUE:
+                    assignments.update_tag_assignment(
+                        _GENIE_SPACE_TAG_ENTITY_TYPE,
+                        space_id,
+                        _CERTIFICATION_TAG_KEY,
+                        TagAssignment(
+                            entity_type=_GENIE_SPACE_TAG_ENTITY_TYPE,
+                            entity_id=space_id,
+                            tag_key=_CERTIFICATION_TAG_KEY,
+                            tag_value=_CERTIFICATION_TAG_VALUE,
+                        ),
+                        update_mask="tag_value",
+                    )
+
+            readback = assignments.get_tag_assignment(
+                _GENIE_SPACE_TAG_ENTITY_TYPE, space_id, _CERTIFICATION_TAG_KEY,
+            )
+            if readback.tag_value != _CERTIFICATION_TAG_VALUE:
+                raise RuntimeError(f"{slug}: certification tag readback was not certified")
 
 
 def _evidence(root: Path) -> AttemptEvidence:
