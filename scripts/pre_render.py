@@ -60,6 +60,103 @@ def find_refs(serialized: str) -> list[str]:
     return list(seen)
 
 
+def dashboard_sql_text(doc: "dict | str") -> str:
+    """Concatenate ONLY the data-carrying SQL of an AI/BI dashboard (`datasets[].queryLines`).
+
+    This exists because the deterministic catalog allowlist must be STRUCTURAL for a dashboard, not
+    textual. `_REF3` is a whole-document regex, and a dashboard document legitimately contains prose:
+    probed against a real dev dashboard, `find_violations` over the raw file matched
+    **`en.wikipedia.org`** (from a markdown link in a `multilineTextboxSpec` widget) and reported
+    catalog `en` as a foreign-catalog ENV-01 BLOCKER. That is a false positive: a text widget is not
+    a data-access path — no query runs from it.
+
+    A dashboard's ONLY data-access path is a dataset's query, so scanning exactly that text keeps
+    ENV-01 strict where it matters (a `dev_`/`sbx_`/cross-domain catalog inside a dataset query is
+    still caught, including one buried mid-query) while it stops blocking on documentation.
+
+    The converse case is handled separately and deliberately: a catalog name written in a text
+    widget's PROSE (the same probe found a heading reading
+    `# cerc_mlops_dev_catalog.inference.inference_scores Monitoring`) is still REBOUND by the
+    whole-document `rebind`, so the promoted dashboard reads correctly in prod, and is reported as an
+    advisory DASH-04 finding by `dashboard_check` — never as a BLOCKER.
+
+    Accepts either a parsed dict or a raw JSON string. A shape this doesn't recognize yields '' —
+    which is the safe direction here: an empty scan finds no violations, and a dashboard with no
+    parseable datasets is independently caught as a DASH-03 structural BLOCKER.
+    """
+    if isinstance(doc, str):
+        try:
+            doc = json.loads(doc)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(doc, dict):
+        return ""
+    parts: list[str] = []
+    for dataset in doc.get("datasets") or []:
+        if not isinstance(dataset, dict):
+            continue
+        lines = dataset.get("queryLines")
+        if isinstance(lines, list):
+            parts.append("".join(str(line) for line in lines))
+        elif isinstance(lines, str):
+            parts.append(lines)
+        # Some exports carry a single `query` string instead of `queryLines`; include it so a
+        # foreign-catalog ref there is still gated rather than silently unscanned.
+        query = dataset.get("query")
+        if isinstance(query, str):
+            parts.append(query)
+    return "\n".join(parts)
+
+
+def dashboard_prose_text(doc: "dict | str") -> str:
+    """The NON-data text of a dashboard — today its text/markdown widget lines.
+
+    The counterpart to `dashboard_sql_text`: this is the text a leftover catalog reference is only a
+    DOCUMENTATION defect in, which `dashboard_check` reports as an advisory DASH-04 rather than a
+    BLOCKER. Kept here (beside the SQL extractor) so both halves of the "where does a dashboard's
+    text live" question are answered in one place.
+    """
+    if isinstance(doc, str):
+        try:
+            doc = json.loads(doc)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(doc, dict):
+        return ""
+    parts: list[str] = []
+
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                # `multilineTextboxSpec.lines` is the shape real exports use; match any *TextboxSpec
+                # so a future/renamed text widget still contributes its prose.
+                if key.endswith("TextboxSpec") and isinstance(value, dict):
+                    lines = value.get("lines")
+                    if isinstance(lines, list):
+                        parts.append("\n".join(str(line) for line in lines))
+                    elif isinstance(lines, str):
+                        parts.append(lines)
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(doc.get("pages") or [])
+    return "\n".join(parts)
+
+
+def scan_text(serialized: str, *, sql_only: bool) -> str:
+    """The text the deterministic catalog allowlist should scan for one artifact.
+
+    `sql_only=False` (Genie) scans the WHOLE serialized document, unchanged — a Genie Space carries
+    no prose widgets and its example/benchmark SQL must stay in scope. `sql_only=True` (dashboard)
+    narrows to `dashboard_sql_text`. Callers pass `ResourceKind.sql_only_ref_scan`, so the choice is
+    a registry fact rather than a branch at each call site.
+    """
+    return dashboard_sql_text(serialized) if sql_only else serialized
+
+
 def _ref_pattern(ref: str) -> "re.Pattern[str]":
     """A regex matching `ref` (catalog.schema.table) exactly as `_REF3` would have matched it — each
     part OPTIONALLY backtick-quoted — so `apply_table_mapping` replaces a ref regardless of whether
@@ -118,6 +215,10 @@ def main(argv: "list[str] | None" = None) -> int:
     r.add_argument("--to", dest="to_env", required=True)
     r.add_argument("--domain", required=True)
     r.add_argument("--out", required=True)
+    # Same choice as `check` (and the same default), because `render` re-checks for post-rebind leaks:
+    # without this a dashboard would pass the narrowed `check` but still fail here on a markdown URL.
+    r.add_argument("--scan", choices=("all", "dashboard-sql"), default="all",
+                   help="text to scan for post-render leaks (default: all = whole document)")
 
     m = sub.add_parser("apply-mapping",
                        help="apply a table de-para (mapping.json) to an already-rendered file, in place")
@@ -131,11 +232,18 @@ def main(argv: "list[str] | None" = None) -> int:
     c.add_argument("infile")
     c.add_argument("--to", dest="to_env", required=True)
     c.add_argument("--domain", required=True)
+    # Which text to scan. `all` (default) is the pre-existing whole-document behaviour and stays the
+    # default so every current caller is unchanged. `dashboard-sql` narrows the scan to
+    # `datasets[].queryLines` — required for an AI/BI dashboard, whose markdown/text widgets would
+    # otherwise produce false foreign-catalog BLOCKERs (see `dashboard_sql_text`).
+    c.add_argument("--scan", choices=("all", "dashboard-sql"), default="all",
+                   help="text to scan for catalog refs (default: all = whole document)")
 
     a = p.parse_args(argv)
     if a.cmd == "render":
         out = render_file(a.infile, a.out, a.from_env, a.to_env, a.domain)
-        leaks = find_violations(out, a.to_env, a.domain)
+        leaks = find_violations(scan_text(out, sql_only=(a.scan == "dashboard-sql")),
+                                a.to_env, a.domain)
         if leaks:
             print(f"ERROR: post-render leaks remain: {leaks}", file=sys.stderr)
             return 2
@@ -148,11 +256,13 @@ def main(argv: "list[str] | None" = None) -> int:
         return 0
     # check
     raw = open(a.infile, encoding="utf-8").read()
-    leaks = find_violations(raw, a.to_env, a.domain)
+    scanned = scan_text(raw, sql_only=(a.scan == "dashboard-sql"))
+    leaks = find_violations(scanned, a.to_env, a.domain)
     if leaks:
         print(f"FAIL: {a.infile} references non-{a.to_env} catalogs: {leaks}", file=sys.stderr)
         return 1
-    print(f"OK: {a.infile} references only {a.to_env}_{a.domain}")
+    where = "dataset SQL" if a.scan == "dashboard-sql" else "all refs"
+    print(f"OK: {a.infile} references only {a.to_env}_{a.domain} ({where})")
     return 0
 
 

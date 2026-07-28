@@ -20,8 +20,8 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (route) =>
     route.fulfill({ json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }),
   );
-  await page.route('**/api/spaces', (route) =>
-    route.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }),
+  await page.route('**/api/resources', (route) =>
+    route.fulfill({ json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } }),
   );
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [] } }));
   await page.route('**/api/principals**', (route) => {
@@ -59,7 +59,8 @@ test('requires Público do Space and sends canonical AudienceSpec', async ({ pag
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
   expect(posted).toMatchObject({
-    space_id: 'sp1',
+    resource_id: 'sp1',
+    resource_kind: 'genie_space',
     audience_spec: {
       principals: [{ principal: 'ana@databricks.com', is_group: false }],
     },

@@ -9,12 +9,12 @@ test.beforeEach(async ({ page }) => {
 });
 
 const oneSpace = (route: import('@playwright/test').Route) =>
-  route.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } });
+  route.fulfill({ json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } });
 
 test('lists the user spaces (OBO) as cards, each with a per-space promote action', async ({
   page,
 }) => {
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.goto('/#/espacos');
 
   // App shell sidebar present.
@@ -28,7 +28,7 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
 });
 
 test('the page header is compact and explains the governed promotion flow', async ({ page }) => {
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.goto('/#/espacos');
 
@@ -46,9 +46,9 @@ test('the page header is compact and explains the governed promotion flow', asyn
 // fire the request. The grid locks (including the chosen card itself) until the panel is
 // confirmed or cancelled, since the actual "Solicitar promoção" action now lives in the panel.
 test('choosing and switching Spaces keeps one panel and resets it to the new Space', async ({ page }) => {
-  await page.route('**/api/spaces', (route) =>
+  await page.route('**/api/resources', (route) =>
     route.fulfill({
-      json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Cedentes' }] },
+      json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }, { id: 'sp2', title: 'Cedentes', kind: 'genie_space', env: 'dev' }] },
     }),
   );
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
@@ -75,9 +75,9 @@ test('choosing and switching Spaces keeps one panel and resets it to the new Spa
 });
 
 test('confirming the panel shows a busy state while the promotion is in flight', async ({ page }) => {
-  await page.route('**/api/spaces', (route) =>
+  await page.route('**/api/resources', (route) =>
     route.fulfill({
-      json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Cedentes' }] },
+      json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }, { id: 'sp2', title: 'Cedentes', kind: 'genie_space', env: 'dev' }] },
     }),
   );
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
@@ -123,7 +123,7 @@ test('the Space status follows the active run instead of a stale deployed histor
     findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
     eval: { status: 'pass', summary: 'ok' }, allowlist_violations: [], timeline: [],
   };
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [deployed] } }));
   await page.route('**/api/promote', (route) => route.fulfill({ json: {
     promotion_id: 'p-new', review, pr: { number: 2, url: 'https://gh/pr/2' },
@@ -145,7 +145,7 @@ test('the Space status follows the active run instead of a stale deployed histor
 });
 
 test('each space card carries a dev env badge next to the kind badge', async ({ page }) => {
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.goto('/#/espacos');
 
@@ -170,7 +170,7 @@ test('initial load opens the latest promotion instead of an older non-terminal P
     findings: [], gate: { conclusion: 'success', blocker_count: 0, summary: 'ok' },
     eval: { status: 'pass', summary: 'ok' }, allowlist_violations: [], timeline: [],
   };
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions?scope=mine', (r) =>
     r.fulfill({ json: { promotions: [latest, stale] } }));
   await page.route('**/api/promotions/promo-13', (r) => r.fulfill({ json: {
@@ -202,7 +202,7 @@ test('initial load opens the latest promotion instead of an older non-terminal P
 });
 
 test('a no-op promotion (already in prod) shows a "nada a promover" notice, no pipeline', async ({ page }) => {
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   // The backend detected the space is already in prod byte-identical: no PR, no_change: true.
   await page.route('**/api/promote', (route) =>
@@ -225,26 +225,26 @@ test('a no-op promotion (already in prod) shows a "nada a promover" notice, no p
 });
 
 test('shows the empty state pointing to the dev workspace when there are no spaces', async ({ page }) => {
-  await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [] } }));
+  await page.route('**/api/resources', (route) => route.fulfill({ json: { resources: [] } }));
   await page.goto('/#/espacos');
 
-  await expect(page.getByText('Nenhum Genie Space encontrado')).toBeVisible();
-  await expect(page.getByText('Genie nativo do workspace de dev', { exact: false })).toBeVisible();
+  await expect(page.getByText('Nenhum recurso encontrado')).toBeVisible();
+  await expect(page.getByText('Painel AI/BI no workspace de dev', { exact: false })).toBeVisible();
 });
 
-test('shows an error state with retry when /api/spaces fails', async ({ page }) => {
-  await page.route('**/api/spaces', (route) =>
+test('shows an error state with retry when /api/resources fails', async ({ page }) => {
+  await page.route('**/api/resources', (route) =>
     route.fulfill({ status: 502, json: { detail: 'engine error: list_spaces' } }),
   );
   await page.goto('/#/espacos');
 
-  await expect(page.getByText(/Não foi possível listar os espaços/)).toBeVisible();
+  await expect(page.getByText(/Não foi possível listar os recursos/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();
 });
 
 test('search and status filter narrow the Space list without losing context', async ({ page }) => {
-  await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [
-    { space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Arranjos' },
+  await page.route('**/api/resources', (route) => route.fulfill({ json: { resources: [
+    { id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }, { id: 'sp2', title: 'Arranjos', kind: 'genie_space', env: 'dev' },
   ] } }));
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [{
     id: 'p1', resource_id: 'sp1', resource_kind: 'genie_space', resource_title: 'Recebíveis',
@@ -253,19 +253,19 @@ test('search and status filter narrow the Space list without losing context', as
   }] } }));
   await page.goto('/');
 
-  await page.getByRole('textbox', { name: 'Buscar Space' }).fill('arr');
+  await page.getByRole('textbox', { name: 'Buscar recurso' }).fill('arr');
   await expect(page.getByRole('heading', { name: 'Arranjos', level: 3 })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toHaveCount(0);
 
-  await page.getByRole('textbox', { name: 'Buscar Space' }).fill('');
+  await page.getByRole('textbox', { name: 'Buscar recurso' }).fill('');
   await page.getByRole('combobox', { name: 'Filtrar por status' }).selectOption('open');
   await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Arranjos', level: 3 })).toHaveCount(0);
 });
 
 test('direct Space switch clears an unsaved Público do Space', async ({ page }) => {
-  await page.route('**/api/spaces', (route) => route.fulfill({ json: { spaces: [
-    { space_id: 'sp1', title: 'Recebíveis' }, { space_id: 'sp2', title: 'Arranjos' },
+  await page.route('**/api/resources', (route) => route.fulfill({ json: { resources: [
+    { id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }, { id: 'sp2', title: 'Arranjos', kind: 'genie_space', env: 'dev' },
   ] } }));
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [] } }));
   await page.route('**/api/principals**', (route) => route.fulfill({ json: { principals: [
@@ -289,7 +289,7 @@ test('Prod to Dev export is contextual and only enabled after a deployed version
     current_phase: 'deployed', terminal: true,
     created_at: '2026-07-15T10:00:00Z', updated_at: '2026-07-15T11:00:00Z',
   };
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [deployed] } }));
   await page.route('**/api/promotions/p-live', (route) => route.fulfill({ json: {
     promotion: deployed,
@@ -313,7 +313,7 @@ test('Prod to Dev export is contextual and only enabled after a deployed version
 
 test('author journey has no document-level horizontal overflow on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.route('**/api/spaces', oneSpace);
+  await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [] } }));
   await page.goto('/');
   await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();

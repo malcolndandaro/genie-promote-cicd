@@ -14,12 +14,17 @@
   // without it, so it must never block "Confirmar promoção".
   import Button from './Button.svelte';
   import { getPromotePreview } from '../api';
+  import { kindMeta } from '../resources';
   import type { Promotion } from '../promotion.svelte';
 
   interface Props {
     promotion: Promotion;
   }
   let { promotion }: Props = $props();
+
+  /** The kind's display label ("Genie Space" / "Painel AI/BI"), so the declaration copy names what
+   * the caller is actually promoting. */
+  let kindLabel = $derived(kindMeta(promotion.resource?.kind ?? 'genie_space').label);
 
   interface MappingRow {
     source: string;
@@ -38,7 +43,9 @@
     loading = true;
     error = null;
     try {
-      const preview = await getPromotePreview(spaceId);
+      // The kind decides WHICH refs the preview offers: for a dashboard only its dataset SQL is
+      // scanned, so a hostname from a markdown widget is never offered as a table to remap.
+      const preview = await getPromotePreview(spaceId, promotion.resource?.kind ?? 'genie_space');
       if (loadedForId !== spaceId) return; // selection changed mid-flight
       rows = preview.tables.map((t) => ({ source: t.source, target: t.default_target, defaultTarget: t.default_target }));
       if (!title.trim() && preview.title) title = preview.title; // safety backfill only — never overrides an edit
@@ -88,14 +95,14 @@
     <input
       type="text"
       class="mapping-form__input"
-      aria-label="Nome do space em produção"
+      aria-label="Nome do recurso em produção"
       bind:value={title}
-      placeholder="Nome do Space em produção"
+      placeholder={`Nome do ${kindLabel} em produção`}
     />
   </label>
 
   {#if loading}
-    <p class="text-sm muted" role="status" aria-busy="true">Carregando tabelas do espaço…</p>
+    <p class="text-sm muted" role="status" aria-busy="true">Carregando tabelas do recurso…</p>
   {:else if error}
     <p class="text-xs muted">
       Não foi possível carregar o de-para de tabelas ({error}) — a promoção usará o rebind padrão dev → prod.

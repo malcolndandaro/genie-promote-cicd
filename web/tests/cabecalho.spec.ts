@@ -6,8 +6,8 @@ function routes(
   who: Record<string, unknown>,
 ) {
   page.route('**/api/whoami', (r) => r.fulfill({ json: who }));
-  page.route('**/api/spaces', (r) =>
-    r.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }),
+  page.route('**/api/resources', (r) =>
+    r.fulfill({ json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } }),
   );
   page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
 }

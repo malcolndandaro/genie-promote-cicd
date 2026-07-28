@@ -22,6 +22,29 @@ def _can_select(assignments: list[dict], principal: str) -> bool:
     )
 
 
+def genie_tables(space: dict) -> list[str]:
+    """The table identifiers a Genie Space declares (`data_sources.tables[].identifier`)."""
+    return [str(t.get("identifier") or "").strip()
+            for t in (space.get("data_sources") or {}).get("tables", []) or []]
+
+
+def dashboard_tables(doc: dict) -> list[str]:
+    """The table refs an AI/BI dashboard reads, parsed out of its DATASET SQL.
+
+    A dashboard has no structural table declaration — its tables exist only inside
+    `datasets[].queryLines` — so the refs are recovered with the same 3-part-ref grammar the ENV-01
+    allowlist uses (`pre_render.find_refs` over `pre_render.dashboard_sql_text`). Scanning ONLY the
+    dataset SQL is deliberate: a whole-document scan picks up hostnames from markdown widgets (probed
+    live: `en.wikipedia.org`), which would then be reported as a nonexistent prod table — turning a
+    documentation link into an AUDIENCE-01 BLOCKER.
+    """
+    import json as _json
+
+    import pre_render
+
+    return pre_render.find_refs(pre_render.dashboard_sql_text(_json.dumps(doc, ensure_ascii=False)))
+
+
 def check_audience(
     space: dict,
     spec: AudienceSpec,
@@ -29,7 +52,23 @@ def check_audience(
     *,
     principal_exists: Callable[[str, bool], bool] | None = None,
     table_exists: Callable[[str], bool] | None = None,
+    tables_of: Callable[[dict], list[str]] | None = None,
+    audience_level: str = "CAN_RUN",
 ) -> list[dict]:
+    """Deterministic AUDIENCE-01: are the declared principals real, and do they hold SELECT on the
+    tables the promoted resource reads?
+
+    ``tables_of`` (optional) extracts the table refs from the resource document, so this function is
+    resource-kind-agnostic: it defaults to `genie_tables` (unchanged behaviour for every existing
+    caller) and a dashboard caller passes `dashboard_tables`. The severity policy is identical for
+    both kinds — a missing principal or an absent table BLOCKS, a missing SELECT is informational,
+    and an inspection outage is OPERATIONAL.
+
+    ``audience_level`` names the level this app derives for a declared principal, for the message
+    text only (`resource_kind.<KIND>.audience_level`: Genie `CAN_RUN`, dashboard `CAN_READ`). It never
+    changes the CHECK — this function validates existence and SELECT, never the ACL itself.
+    """
+    extract = tables_of or genie_tables
     findings: list[dict] = []
     valid_principals = []
     for principal in spec.principals:
@@ -49,14 +88,15 @@ def check_audience(
             findings.append({
                 "rule_id": "AUDIENCE-01", "severity": "BLOCKER",
                 "principal": principal.name, "citation": _CITATION,
-                "message": f"o principal '{principal.name}' não existe ou não pode receber CAN_RUN",
+                "message": (f"o principal '{principal.name}' não existe ou não pode receber "
+                            f"{audience_level}"),
                 "suggestion": "Escolha novamente um usuário ou grupo disponível no diretório.",
             })
             continue
         valid_principals.append(principal)
 
-    for table in (space.get("data_sources") or {}).get("tables", []) or []:
-        full_name = str(table.get("identifier") or "").strip()
+    for full_name in extract(space):
+        full_name = str(full_name or "").strip()
         if len(full_name.split(".")) != 3:
             findings.append({
                 "rule_id": "AUDIENCE-01", "severity": "BLOCKER", "table": full_name,

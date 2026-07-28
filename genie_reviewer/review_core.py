@@ -66,6 +66,101 @@ def build_space_context(space: dict) -> dict:
     }
 
 
+def build_dashboard_context(doc: dict) -> dict:
+    """Extract the review-relevant surface from an AI/BI dashboard (`.lvdash.json`).
+
+    Returns the SAME dict SHAPE `build_space_context` does, so `build_review_prompt`,
+    `parse_review`, `decide_gate`, `finalize_findings` and `PROTECTED_CORE` are all reused UNCHANGED
+    — the kind seam is the context builder, not the prompt machinery.
+
+    The mapping from dashboard concepts onto that shape:
+      - ``tables``      -> one entry per DATASET (`identifier` = the dataset name, `columns` = the
+                           fields its widgets render), so the prompt's "tabelas" block shows what the
+                           panel actually reads and displays.
+      - ``example_sqls``-> each dataset's query text. This is what the LLM reviews for SQL
+                           conventions and for cross-env refs the deterministic scan can't judge
+                           semantically (SQL-01, ENV-01's semantic half).
+      - ``instructions``-> the dashboard's own prose (text/markdown widgets) plus page titles: the
+                           closest analogue of a Space's text instructions, and the surface PII-02
+                           style rules read.
+      - ``joins``       -> page/widget structure summary (page -> widget types), which is what
+                           "does this panel hang together" looks like for a dashboard.
+      - ``benchmark_questions``/``benchmark_sqls``/``n_benchmark`` -> EMPTY / 0. A dashboard has no
+                           benchmarks; `finalize_findings` is called with `min_benchmark=0` for this
+                           kind so EVAL-01 does NOT fire (see `resource_kind.has_benchmarks`).
+
+    `_as_text` is reused for every extracted string, so the same whitespace collapsing that keeps a
+    padded Genie SQL line inside the prompt budget applies here.
+    """
+    datasets = doc.get("datasets") or []
+    # Which fields each dataset's widgets render — collected first so the "columns" of a dataset
+    # reflect what is actually displayed, not the raw SELECT list (which we may not be able to parse).
+    fields_by_dataset: dict[str, list[str]] = {}
+    structure: list[str] = []
+    prose: list[str] = []
+    for page in doc.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        page_name = _as_text(page.get("displayName") or page.get("name"))
+        widget_kinds: list[str] = []
+        for entry in page.get("layout") or []:
+            if not isinstance(entry, dict):
+                continue
+            widget = entry.get("widget")
+            if not isinstance(widget, dict):
+                continue
+            spec = widget.get("spec") if isinstance(widget.get("spec"), dict) else {}
+            widget_kinds.append(str(spec.get("widgetType") or "texto"))
+            for key, value in widget.items():
+                if key.endswith("TextboxSpec") and isinstance(value, dict):
+                    prose.append(_as_text(value.get("lines")))
+            for query in widget.get("queries") or []:
+                if not isinstance(query, dict):
+                    continue
+                qspec = query.get("query")
+                if not isinstance(qspec, dict):
+                    continue
+                name = qspec.get("datasetName")
+                if not isinstance(name, str):
+                    continue
+                bucket = fields_by_dataset.setdefault(name, [])
+                for field in qspec.get("fields") or []:
+                    if isinstance(field, dict) and field.get("name"):
+                        bucket.append(str(field["name"]))
+        if page_name or widget_kinds:
+            structure.append(f"{page_name or '(página sem título)'}: {', '.join(widget_kinds) or 'vazia'}")
+
+    tables = []
+    sqls = []
+    for dataset in datasets:
+        if not isinstance(dataset, dict):
+            continue
+        name = str(dataset.get("name") or "")
+        # De-duplicate the rendered field names while preserving first-appearance order.
+        seen: dict[str, None] = {}
+        for field in fields_by_dataset.get(name, []):
+            seen.setdefault(field, None)
+        tables.append({"identifier": name, "columns": list(seen)})
+        lines = dataset.get("queryLines")
+        if isinstance(lines, list):
+            sqls.append(_as_text("".join(str(line) for line in lines)))
+        elif isinstance(lines, str):
+            sqls.append(_as_text(lines))
+        elif isinstance(dataset.get("query"), str):
+            sqls.append(_as_text(dataset["query"]))
+
+    return {
+        "tables": tables,
+        "instructions": [p for p in prose if p],
+        "example_sqls": [s for s in sqls if s],
+        # A dashboard carries no benchmark questions — see the docstring.
+        "benchmark_questions": [],
+        "benchmark_sqls": [],
+        "n_benchmark": 0,
+        "joins": structure,
+    }
+
+
 # --- Core 2: prompt assembly (Portuguese) ---------------------------------------
 #
 # S8 (app-ux-overhaul): the system prompt is split into an EDITABLE persona/policy default
@@ -258,6 +353,15 @@ def finalize_findings(
     min_benchmark: int = 2,  # prod requires >= 2 benchmark Q→SQL (lets a 2-question space promote)
     eval01_severity: str = "BLOCKER",  # G2: admin-configurable via rules_config.eval01_config
 ) -> list[dict]:
+    """Merge the LLM's findings with the deterministic ones, adding the EVAL-01 benchmark backstop.
+
+    ``min_benchmark=0`` disables the EVAL-01 backstop entirely (``n_benchmark`` can never be < 0).
+    That is the documented path for a resource kind that has NO benchmark concept at all — an AI/BI
+    dashboard (`resource_kind.DASHBOARD_KIND.has_benchmarks is False`), whose quality floor is the
+    structural DASH-* rules plus the prod SQL check instead. It is ALSO the path an admin who
+    disables the EVAL-01 rule takes (`rules_config.eval01_config` returns 0 when disabled), so the
+    two reasons for "no benchmark floor" converge on one behaviour rather than two code paths.
+    """
     det = list(deterministic_findings or [])
     if n_benchmark < min_benchmark and not any(f.get("rule_id") == "EVAL-01" for f in det):
         det.append({

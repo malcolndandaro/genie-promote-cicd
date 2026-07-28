@@ -8,22 +8,40 @@
  * overrides labels + statuses.
  */
 import type { Review } from './types';
-import type { StepStatus, TimelineStep, EvalQuestion } from './types';
+import type { ResourceKind, StepStatus, TimelineStep, EvalQuestion } from './types';
 import type { PromoteStatus } from './api';
 
-export const PIPELINE_STEPS: { key: string; label: string }[] = [
-  { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)' },
-  { key: 'review', label: 'Revisão do agente (Genie Reviewer)' },
-  { key: 'eval', label: 'Eval-run' },
-  { key: 'pr_review', label: 'Revisão do PR (aprovação de merge)' },
-  { key: 'merge', label: 'Merge para main' },
-  { key: 'approval', label: 'Aprovação da Plataforma (deploy)' },
-  { key: 'deploy', label: 'Deploy em produção (service principal)' },
-];
+/**
+ * The QUALITY step differs by resource kind, because the two kinds make different quality claims: a
+ * Genie Space's is its eval-run pass-rate; an AI/BI dashboard's is its structural integrity (every
+ * widget wired to a dataset that exists) plus its SQL validated against prod. Showing a dashboard an
+ * "Eval-run" node would name a check that can never run for it, so the step is REPLACED, not
+ * degraded. The server's `review.timeline` is authoritative for the verdict; these are the labels +
+ * the in-flight (pre-result) shape.
+ */
+const QUALITY_STEP: Record<ResourceKind, { key: string; label: string }> = {
+  genie_space: { key: 'eval', label: 'Eval-run' },
+  dashboard: { key: 'structure', label: 'Checagens do painel (datasets, widgets, páginas)' },
+};
+
+export function pipelineSteps(kind: ResourceKind = 'genie_space'): { key: string; label: string }[] {
+  return [
+    { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)' },
+    { key: 'review', label: 'Revisão do agente (Genie Reviewer)' },
+    QUALITY_STEP[kind],
+    { key: 'pr_review', label: 'Revisão do PR (aprovação de merge)' },
+    { key: 'merge', label: 'Merge para main' },
+    { key: 'approval', label: 'Aprovação da Plataforma (deploy)' },
+    { key: 'deploy', label: 'Deploy em produção (service principal)' },
+  ];
+}
+
+/** The Genie step list, kept as a named export for callers that predate the kind seam. */
+export const PIPELINE_STEPS: { key: string; label: string }[] = pipelineSteps('genie_space');
 
 /** The steps to show while the review is running (all pending; the animation conveys activity). */
-export function pendingTimeline(): TimelineStep[] {
-  return PIPELINE_STEPS.map((s) => ({ ...s, status: 'pending' as StepStatus }));
+export function pendingTimeline(kind: ResourceKind = 'genie_space'): TimelineStep[] {
+  return pipelineSteps(kind).map((s) => ({ ...s, status: 'pending' as StepStatus }));
 }
 
 /** Label fallbacks for the verdict steps if the server omits one (it always emits all three). */
@@ -31,6 +49,7 @@ const VERDICT_LABELS: Record<string, string> = {
   checks: 'Checagens determinísticas (pré-render + allowlist)',
   review: 'Revisão do agente (Genie Reviewer)',
   eval: 'Eval-run',
+  structure: 'Checagens do painel (datasets, widgets, páginas)',
 };
 
 /**
@@ -39,9 +58,11 @@ const VERDICT_LABELS: Record<string, string> = {
  * are driven LIVE by the polled `get_status` (pr_review/merge/approval/deploy). Reflect, never
  * assert — a step is `pass` only when GitHub reports it, otherwise pending/running.
  */
-export function buildPromotionSteps(review: Review, live: PromoteStatus | null): TimelineStep[] {
+export function buildPromotionSteps(review: Review, live: PromoteStatus | null,
+                                    kind: ResourceKind = 'genie_space'): TimelineStep[] {
   const byKey = new Map(review.timeline.map((s) => [s.key, s]));
-  const verdict: TimelineStep[] = ['checks', 'review', 'eval'].map((key) => {
+  const verdictKeys = ['checks', 'review', QUALITY_STEP[kind].key];
+  const verdict: TimelineStep[] = verdictKeys.map((key) => {
     const s = byKey.get(key) ?? { key, label: VERDICT_LABELS[key], status: 'pending' as StepStatus };
     if (key !== 'checks') return s;
     // G8: the app's own "checks" verdict is a PRE-PR preview (pre-render + allowlist + a grant

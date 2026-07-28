@@ -44,12 +44,22 @@ logger = logging.getLogger("authz")
 # carrying `all_permissions: list[Permission]` with a `.permission_level` `PermissionLevel` enum).
 GENIE_OBJECT_TYPE = "genie"
 
-# Any of these permission levels means "may use the Space" for our purposes (read-export or
+# The AI/BI dashboard equivalent. `dashboards` and `genie` are SIBLINGS in the permissions object-type
+# namespace (verified live against dev + prod). Note the PLURAL: the singular `dashboard` is rejected
+# by the API, and `dbsql-dashboards` is a DIFFERENT object type (legacy Redash) this app never touches.
+DASHBOARD_OBJECT_TYPE = "dashboards"
+
+# Any of these permission levels means "may use the resource" for our purposes (read-export or
 # write-overwrite are both gated the same way today — the guard answers "can this identity touch
-# this Space at all", not which specific action). CAN_MANAGE/IS_OWNER/CAN_EDIT are the levels Genie
-# actually issues; CAN_RUN is the audience level managed by this app.
+# this resource at all", not which specific action). CAN_MANAGE/IS_OWNER/CAN_EDIT are the levels Genie
+# actually issues; CAN_RUN is the audience level this app manages for a Space.
+#
+# CAN_READ is included for AI/BI dashboards: it is the dashboard audience level this app manages
+# (`resource_kind.DASHBOARD_KIND.audience_level`) and the least level that lets someone open a
+# published dashboard. Genie has no CAN_READ-equivalent below CAN_RUN, so adding it here widens
+# nothing for Spaces — Genie's own levels are only CAN_RUN/CAN_EDIT/CAN_MANAGE.
 _ACCESS_LEVELS = frozenset({
-    "IS_OWNER", "CAN_MANAGE", "CAN_EDIT", "CAN_RUN",
+    "IS_OWNER", "CAN_MANAGE", "CAN_EDIT", "CAN_RUN", "CAN_READ",
 })
 
 
@@ -122,12 +132,19 @@ def _grants_access(entry) -> bool:
     return False
 
 
-def assert_can_access(identity: VerifiedIdentity, space_id: str, *, transport: WorkspaceClient) -> None:
-    """FAIL-CLOSED, NEVER-CACHED, live per-action check: may `identity` access the dev Genie Space
+def assert_can_access(identity: VerifiedIdentity, space_id: str, *, transport: WorkspaceClient,
+                      object_type: str = GENIE_OBJECT_TYPE) -> None:
+    """FAIL-CLOSED, NEVER-CACHED, live per-action check: may `identity` access the dev resource
     `space_id`? Raises `AccessDenied` if not — including when the check itself can't be completed
     (ACL read error, timeout, malformed response, dev unreachable). This is deliberately a raise,
     not a bool return: a caller that forgets to check a bool return is a common way "fail closed"
     quietly becomes "fail open"; a raise can't be silently ignored.
+
+    ``object_type`` selects the permissions namespace to read the ACL from — `GENIE_OBJECT_TYPE`
+    (the default, so every pre-existing caller is unchanged) or `DASHBOARD_OBJECT_TYPE`. The GUARD
+    ITSELF is identical for both kinds: the decision is made from the verified identity against the
+    resource's own ACL, and the standing service principal is transport only. That sameness is the
+    point — a second resource kind must not get a second, subtly weaker access control.
 
     ``transport`` is the dev-reader/writer SP's WorkspaceClient (``app_logic._client(scope="dev-sp")``)
     — used ONLY to make the ACL-read API call ("transport only", per the PRD/ADR-0006: the SP's own
@@ -141,7 +158,7 @@ def assert_can_access(identity: VerifiedIdentity, space_id: str, *, transport: W
     after some TTL expires).
     """
     try:
-        perms = transport.permissions.get(request_object_type=GENIE_OBJECT_TYPE, request_object_id=space_id)
+        perms = transport.permissions.get(request_object_type=object_type, request_object_id=space_id)
     except DatabricksError as e:
         # Fail closed: ANY error resolving the ACL (space not found, dev SP unreachable/ungranted,
         # dev workspace mid-wipe, transient API failure) denies access. We deliberately do NOT

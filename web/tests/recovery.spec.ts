@@ -42,8 +42,8 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (route) =>
     route.fulfill({ json: { email: 'ana@databricks.com', steward: 'pedro@databricks.com' } }),
   );
-  await page.route('**/api/spaces', (route) =>
-    route.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }),
+  await page.route('**/api/resources', (route) =>
+    route.fulfill({ json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } }),
   );
   await page.route(`**/api/promote/${PR.number}/status`, (route) =>
     route.fulfill({

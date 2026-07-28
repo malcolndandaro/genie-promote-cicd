@@ -109,6 +109,14 @@ env:
   # A new customer sets their own map (or leaves it empty -> id-derived slugs).
   - name: APP_SPACE_SLUGS
     value: '{"01f16e8322661161a83f7d1f2a1bec14": "receivables"}'
+  # The AI/BI dashboard counterpart of APP_SPACE_SLUGS. Pin a friendly/legacy slug so an
+  # ALREADY-DEPLOYED dashboard keeps its committed file + generated bundle resource across the switch
+  # to per-dashboard promotion (the pre-existing `recebiveis` dashboard is exactly that case — its
+  # `.title` sidecar must also keep matching the live display name, since the title is how the deploy
+  # resolves the live id). Empty means id-derived slugs (d_<id>), which is what every NEW dashboard
+  # promoted through the app gets.
+  - name: APP_DASHBOARD_SLUGS
+    value: '{}'
   # The ONE fixed Knowledge Assistant every review consults — the CI/CD handbook, global to every
   # Space (the configurable per-Space KA registry was removed as a simplification). Config-driven
   # (ADR-0004): the serving-endpoint name differs per workspace/fork. Set to "" to disable the KA

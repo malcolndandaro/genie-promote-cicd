@@ -36,10 +36,13 @@ import audience_check  # noqa: E402  (pilot AudienceSpec deterministic validatio
 import audience_spec  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
 import change_request  # noqa: E402  (provider-neutral revision + observation contract)
+import dashboard_check  # noqa: E402  (DASH-01..04 — the dashboard structural gate)
 import eval_gate  # noqa: E402
 import handbook_rules  # noqa: E402
 import pre_render  # noqa: E402
+import resource_kind  # noqa: E402  (the ONE registry of per-kind facts — the promotion kind seam)
 import review_core  # noqa: E402
+import workspace_resource  # noqa: E402  (the per-kind Databricks API adapter)
 import rules_config  # noqa: E402  (G2 — admin-configurable rules; safe fallback to handbook_rules.RULES)
 from github_app import GitHubApp  # noqa: E402
 from promotion_comment import PROMOTION_COMMENT_MARKER, render_promotion_comment  # noqa: E402
@@ -68,46 +71,72 @@ GH_SECRET_SCOPE = os.environ.get("APP_GH_SECRET_SCOPE", "genie_promote")
 # keeps "receivables" so its existing file/PR/resource are preserved; otherwise the slug is derived
 # from the id (prefixed so it's a valid branch + DABs resource key).
 GH_PROMOTION_BRANCH_PREFIX = os.environ.get("APP_GH_PROMOTION_BRANCH_PREFIX", "promote")
-GH_GENIE_SRC_DIR = "src/genie"
+GH_GENIE_SRC_DIR = "src/genie"  # kept for back-compat; the registry owns per-kind dirs now
 try:
     _SPACE_SLUGS = json.loads(os.environ.get("APP_SPACE_SLUGS") or "{}")
 except (ValueError, TypeError):
     _SPACE_SLUGS = {}
+# The dashboard counterpart of APP_SPACE_SLUGS: pin a friendly/legacy slug so an already-promoted
+# dashboard keeps its committed file + generated bundle resource across this change.
+try:
+    _DASHBOARD_SLUGS = json.loads(os.environ.get("APP_DASHBOARD_SLUGS") or "{}")
+except (ValueError, TypeError):
+    _DASHBOARD_SLUGS = {}
+
+def _pinned_slugs(kind: str) -> dict:
+    """The pinned-slug map for one kind, read through the MODULE ATTRIBUTES rather than a dict
+    captured at import time — so a test (or a re-read of env) that patches `_SPACE_SLUGS` /
+    `_DASHBOARD_SLUGS` is honoured, exactly as it was before the kind seam existed."""
+    if kind == resource_kind.DASHBOARD:
+        return _DASHBOARD_SLUGS
+    return _SPACE_SLUGS
+
+
+def resource_slug(resource_id: str, kind: str | None = None) -> str:
+    """Stable, branch/path/identifier-safe slug for one resource of any kind.
+
+    A pinned slug wins (`APP_SPACE_SLUGS` / `APP_DASHBOARD_SLUGS`); otherwise the id is sanitized and
+    given the kind's prefix, which keeps the two kinds' slug namespaces disjoint. Genie's behaviour is
+    byte-identical to the pre-kind-seam `space_slug`.
+    """
+    rkind = resource_kind.get(kind)
+    return rkind.slug_for(resource_id, _pinned_slugs(rkind.kind))
 
 
 def space_slug(space_id: str) -> str:
-    """Stable, branch/path/identifier-safe slug for a space. A pinned slug (APP_SPACE_SLUGS) wins;
-    otherwise derive from the id (alnum/underscore only, guaranteed to start with a letter)."""
-    pinned = _SPACE_SLUGS.get(space_id)
-    if pinned:
-        return pinned
-    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in space_id)
-    return safe if safe[:1].isalpha() else f"s_{safe}"
+    """Back-compat alias for `resource_slug(space_id, "genie_space")`."""
+    return resource_slug(space_id, resource_kind.GENIE_SPACE)
 
 
 def branch_for(slug: str) -> str:
     return f"{GH_PROMOTION_BRANCH_PREFIX}/{slug}"
 
 
-def src_path_for(slug: str) -> str:
-    return f"{GH_GENIE_SRC_DIR}/{slug}.serialized_space.json"
+def src_path_for(slug: str, kind: str | None = None) -> str:
+    """The promoted definition's committed path (serialized_space JSON / .lvdash.json)."""
+    return resource_kind.get(kind).artifact_path(slug)
 
 
-def audience_path_for(slug: str) -> str:
-    """Canonical required Público do Space sidecar (ADR-0009)."""
-    return f"{GH_GENIE_SRC_DIR}/{slug}.audience.json"
+def title_path_for(slug: str, kind: str | None = None) -> str:
+    """The declared production display name — also the deploy's id-resolution key."""
+    return resource_kind.get(kind).title_path(slug)
 
 
-def mapping_path_for(slug: str) -> str:
-    """The per-space table de-para sidecar committed
+def audience_path_for(slug: str, kind: str | None = None) -> str:
+    """Canonical required Público do recurso sidecar (ADR-0009)."""
+    return resource_kind.get(kind).audience_path(slug)
+
+
+def mapping_path_for(slug: str, kind: str | None = None) -> str:
+    """The per-resource table de-para sidecar committed
     next to the artifact so CI's render.sh finds it by convention (`pre_render.py apply-mapping`,
     applied AFTER the dev_->prod_ rebind, BEFORE the strict allowlist check)."""
-    return f"{GH_GENIE_SRC_DIR}/{slug}.mapping.json"
+    return resource_kind.get(kind).mapping_path(slug)
 
 
-def revision_path_for(slug: str) -> str:
+def revision_path_for(slug: str, kind: str | None = None) -> str:
     """Self-describing immutable content/engine pair reviewed and deployed for this promotion."""
-    return f"{GH_GENIE_SRC_DIR}/{slug}.revision.json"
+    return resource_kind.get(kind).revision_path(slug)
 
 # The UI-facing fields of a review (drop the large prod_serialized payload) — shared with the API.
 REVIEW_FIELDS = ("findings", "gate", "eval", "timeline", "allowlist_violations",
@@ -214,29 +243,77 @@ def list_spaces(profile: str | None = None, *, client: WorkspaceClient | None = 
     skips the guard: there is no separate "caller" to check against the profile's own access, so the
     profile's own Genie permissions ARE the access boundary, same as running the CLI directly.
     """
+    return [{"space_id": r["resource_id"], "title": r["title"]}
+            for r in list_dev_resources(resource_kind.GENIE_SPACE, profile,
+                                        client=client, user_token=user_token)]
+
+
+def list_dev_resources(kind: str | None = None, profile: str | None = None, *,
+                       client: WorkspaceClient | None = None,
+                       user_token: str | None = None) -> list[dict]:
+    """The DEV resources of one kind the VERIFIED identity may access: ``[{resource_id, title}]``.
+
+    The kind-generalized core of `list_spaces` — the authorization story is IDENTICAL for every kind
+    and is the whole reason this is one function rather than one per kind:
+
+    the standing dev-reader/writer SP can reach EVERY dev resource by platform necessity (neither
+    Genie nor Lakeview offers per-resource delegation), which is exactly the confused-deputy risk A2
+    exists to close. So this never returns the SP's raw view: it (1) verifies the caller's identity
+    from their OBO token and (2) filters the SP's list down to what `authz.assert_can_access` confirms
+    that identity may use — live, per-resource, never cached, fail-closed (a resource is DROPPED on
+    any check error, never included on uncertainty).
+
+    An injected ``client`` bypasses all of the above and is used as-is (the test/local-override
+    convention shared with every other function here). A bare local ``profile`` with no ``user_token``
+    also skips the guard: there is no separate caller to check, so the profile's own permissions ARE
+    the access boundary, same as running the CLI directly.
+    """
+    rkind = resource_kind.get(kind)
     if client is not None:
-        w = client
-    elif user_token:
+        return workspace_resource.list_resources(client, rkind)
+    if user_token:
         # Verify WHO the OBO token belongs to against the app's OWN (prod) host — the token is
         # prod-minted and cannot authenticate to dev (ADR-0006 Decision 2). Only the transport
         # (scope="dev-sp") and the ACL read (assert_can_access) run against dev; the identity is
         # prod-issued. (Same host as engine_api._verified_email.)
         identity = authz.verify_identity(user_token, host=Config().host)
         dev = _client(scope="dev-sp")
-        resp = dev.genie.list_spaces()
         accessible = []
-        for s in (resp.spaces or []):
+        for r in workspace_resource.list_resources(dev, rkind):
             try:
-                authz.assert_can_access(identity, s.space_id, transport=dev)
+                authz.assert_can_access(identity, r["resource_id"], transport=dev,
+                                        object_type=rkind.permissions_object_type)
             except authz.AccessDenied:
                 continue
-            accessible.append({"space_id": s.space_id, "title": s.title or "(sem título)"})
+            accessible.append(r)
         return accessible
-    else:
-        w = _client(profile)
-    resp = w.genie.list_spaces()
-    return [{"space_id": s.space_id, "title": s.title or "(sem título)"}
-            for s in (resp.spaces or [])]
+    return workspace_resource.list_resources(_client(profile), rkind)
+
+
+def list_all_dev_resources(profile: str | None = None, *,
+                           user_token: str | None = None) -> list[dict]:
+    """Every promotable DEV resource across EVERY kind, as the discriminated DTO the SPA consumes:
+    ``[{id, title, kind, env}]``.
+
+    This is what makes "Meus espaços" one list instead of one per kind. It iterates
+    `resource_kind.all_kinds()` rather than naming kinds, so a third kind appears here for free once
+    its registry entry and adapter exist.
+
+    A kind whose listing FAILS is skipped rather than failing the whole page: a dev workspace that
+    (say) has Genie enabled but no dashboards, or a transient API error on one kind, must not blank
+    out the resources the caller can legitimately see. This is a availability-vs-completeness call,
+    not a security one — the per-resource `assert_can_access` filter inside `list_dev_resources` is
+    what enforces access, and it fails CLOSED independently of this.
+    """
+    out: list[dict] = []
+    for rkind in resource_kind.all_kinds():
+        try:
+            resources = list_dev_resources(rkind.kind, profile, user_token=user_token)
+        except Exception:  # noqa: BLE001 — one kind's outage must not blank the whole list
+            continue
+        out.extend({"id": r["resource_id"], "title": r["title"], "kind": rkind.kind, "env": "dev"}
+                   for r in resources)
+    return out
 
 
 def list_prod_spaces(profile: str | None = None, *, client: WorkspaceClient | None = None) -> list[dict]:
@@ -258,9 +335,20 @@ def list_prod_spaces(profile: str | None = None, *, client: WorkspaceClient | No
     reflects live prod state, per the F4 acceptance criteria — a caller must not wrap this in any
     memoization.
     """
-    w = client or _client(profile)
-    resp = w.genie.list_spaces()
-    return [{"space_id": s.space_id, "title": s.title or "(sem título)"} for s in (resp.spaces or [])]
+    return [{"space_id": r["resource_id"], "title": r["title"]}
+            for r in list_prod_resources(resource_kind.GENIE_SPACE, profile, client=client)]
+
+
+def list_prod_resources(kind: str | None = None, profile: str | None = None, *,
+                        client: WorkspaceClient | None = None) -> list[dict]:
+    """Every PROD-deployed resource of one kind (``[{resource_id, title}]``) — the kind-generalized
+    core of `list_prod_spaces`; see that function's docstring for the (unchanged) admin-read rationale
+    and why this is deliberately NOT identity-filtered.
+
+    Called FRESH on every invocation (no caching anywhere in this chain) so an inventory reflects live
+    prod state — a caller must not memoize it.
+    """
+    return workspace_resource.list_resources(client or _client(profile), resource_kind.get(kind))
 
 
 def list_principals(query: str = "", *, profile: str | None = None, client: WorkspaceClient | None = None,
@@ -309,14 +397,20 @@ def list_principals(query: str = "", *, profile: str | None = None, client: Work
 
 
 def export_serialized(space_id: str, profile: str | None = None, client: WorkspaceClient | None = None,
-                      *, user_token: str | None = None) -> dict:
-    """Export a Space's ``serialized_space``. Cross-workspace rewiring (A2): with a ``user_token``
-    and no injected ``client``, this reaches dev via the dev-reader/writer SP (OBO can't span
-    workspaces once prod-hosted) but gates FIRST with ``authz.assert_can_access`` on the caller's
-    VERIFIED identity — denying (fail-closed) before ever touching the SP's broad dev reach. An
-    injected ``client`` (tests/local overrides) bypasses the guard, same convention as
-    ``list_spaces``; a bare ``profile`` with no token is the offline/local-dev path (the profile's
-    own Genie permission IS the access boundary, same as the CLI)."""
+                      *, user_token: str | None = None, kind: str | None = None) -> dict:
+    """Export one resource's serialized definition (``serialized_space`` / ``serialized_dashboard``).
+
+    Cross-workspace rewiring (A2): with a ``user_token`` and no injected ``client``, this reaches dev
+    via the dev-reader/writer SP (OBO can't span workspaces once prod-hosted) but gates FIRST with
+    ``authz.assert_can_access`` on the caller's VERIFIED identity — denying (fail-closed) before ever
+    touching the SP's broad dev reach. An injected ``client`` (tests/local overrides) bypasses the
+    guard, same convention as ``list_spaces``; a bare ``profile`` with no token is the offline/local-dev
+    path (the profile's own permission IS the access boundary, same as the CLI).
+
+    ``kind`` selects the API + permissions namespace via the registry; it defaults to Genie so every
+    pre-existing caller is unchanged.
+    """
+    rkind = resource_kind.get(kind)
     if client is not None:
         w = client
     elif user_token:
@@ -326,16 +420,17 @@ def export_serialized(space_id: str, profile: str | None = None, client: Workspa
         # prod-issued. (Same host as engine_api._verified_email.)
         identity = authz.verify_identity(user_token, host=Config().host)
         w = _client(scope="dev-sp")
-        authz.assert_can_access(identity, space_id, transport=w)  # raises AccessDenied -> deny first
+        # raises AccessDenied -> deny first
+        authz.assert_can_access(identity, space_id, transport=w,
+                                object_type=rkind.permissions_object_type)
     else:
         w = _client(profile)
-    space = w.genie.get_space(space_id, include_serialized_space=True)
-    ss = space.serialized_space
-    return json.loads(ss) if isinstance(ss, str) else (ss or {})
+    return workspace_resource.get_serialized(w, rkind, space_id)
 
 
 def preview_promotion(space_id: str, *, user_token: str, domain: str = DOMAIN,
-                      dev_client: WorkspaceClient | None = None) -> dict:
+                      dev_client: WorkspaceClient | None = None,
+                      kind: str | None = None) -> dict:
     """G7: a READ-ONLY preview of a promotion's table de-para, called BEFORE ``request_promotion``
     so the confirm step can render an editable prod Space name + a table de-para for the caller to
     review/override BEFORE committing to a mapping at all. Persists nothing.
@@ -350,19 +445,25 @@ def preview_promotion(space_id: str, *, user_token: str, domain: str = DOMAIN,
     Space references (via ``pre_render.find_refs``, including refs buried inside example/benchmark
     SQL), each with the plain dev_->prod_ default target ``request_promotion``'s CI render would
     use if the caller overrides nothing."""
+    rkind = resource_kind.get(kind)
     if dev_client is not None:
         dev = dev_client
     else:
         identity = authz.verify_identity(user_token, host=Config().host)
         dev = _client(scope="dev-sp")
-        authz.assert_can_access(identity, space_id, transport=dev)  # raises AccessDenied -> deny first
-    space = dev.genie.get_space(space_id, include_serialized_space=True)
-    ss = space.serialized_space
-    raw = ss if isinstance(ss, str) else json.dumps(ss or {}, ensure_ascii=False)
+        # raises AccessDenied -> deny first
+        authz.assert_can_access(identity, space_id, transport=dev,
+                                object_type=rkind.permissions_object_type)
+    doc = workspace_resource.get_serialized(dev, rkind, space_id)
+    raw = json.dumps(doc, ensure_ascii=False)
+    # For a dashboard, extract refs from the DATASET SQL only: a whole-document scan would offer the
+    # caller bogus de-para rows for hostnames in markdown widgets (a real dev dashboard's link made
+    # the 3-part-ref grammar match `en.wikipedia.org`). See `pre_render.dashboard_sql_text`.
+    scanned = pre_render.scan_text(raw, sql_only=rkind.sql_only_ref_scan)
 
     tables = [{"source": ref, "default_target": pre_render.rebind(ref, "dev", "prod", domain)}
-             for ref in pre_render.find_refs(raw)]
-    return {"title": getattr(space, "title", None), "tables": tables}
+             for ref in pre_render.find_refs(scanned)]
+    return {"title": workspace_resource.get_title(dev, rkind, space_id), "tables": tables}
 
 
 def _claude(system: str, user: str, profile: str, client: WorkspaceClient | None = None) -> str:
@@ -430,17 +531,20 @@ def _extract_responses_text(resp: dict) -> str:
     return ""
 
 
-def _ka_question(ctx: dict) -> str:
-    """The one-shot governance Q&A sent to each in-scope KA endpoint — summarizes the space
+def _ka_question(ctx: dict, kind: "resource_kind.ResourceKind | None" = None) -> str:
+    """The one-shot governance Q&A sent to each in-scope KA endpoint — summarizes the resource
     being promoted and asks the KA (grounded on whatever it's indexed, e.g. a handbook) whether
     it sees anything worth flagging. D5: purely advisory input, never a rule the reviewer must
     obey — the answer is surfaced as-is, not merged into the reviewer's own judgment."""
+    rkind = kind or resource_kind.GENIE_SPACE_KIND
     tables = ", ".join(t["identifier"] for t in ctx.get("tables", [])) or "(nenhuma)"
     instructions = " | ".join(ctx.get("instructions", [])[:3]) or "(nenhuma)"
+    noun = "espaço" if rkind.has_benchmarks else "painel"
+    subject = "Tabelas" if rkind.has_benchmarks else "Datasets"
     return (
-        "Este Genie Space está sendo promovido para produção. Com base no conhecimento indexado, "
-        "há alguma preocupação de governança, convenção ou boa prática relevante para este espaço? "
-        f"Tabelas: {tables}. Instruções: {instructions}."
+        f"Este {rkind.label_pt} está sendo promovido para produção. Com base no conhecimento "
+        f"indexado, há alguma preocupação de governança, convenção ou boa prática relevante para "
+        f"este {noun}? {subject}: {tables}. Instruções: {instructions}."
     )
 
 
@@ -455,7 +559,8 @@ def cicd_ka_endpoints() -> list[dict]:
 
 
 def _ka_advisory_findings(ka_endpoints: list[dict] | None, ctx: dict, profile: str,
-                          client: WorkspaceClient | None = None) -> list[dict]:
+                          client: WorkspaceClient | None = None,
+                          kind: "resource_kind.ResourceKind | None" = None) -> list[dict]:
     """S7b: one advisory finding per in-scope, enabled KA endpoint (D5 — additive only, NEVER a
     BLOCKER; `ka_endpoints` is already filtered to this space's scope by the caller via
     `KaEndpointsStore.list_enabled_for_space_dicts`). A query failure degrades to a quiet,
@@ -464,7 +569,7 @@ def _ka_advisory_findings(ka_endpoints: list[dict] | None, ctx: dict, profile: s
     preview above."""
     if not ka_endpoints:
         return []
-    question = _ka_question(ctx)
+    question = _ka_question(ctx, kind)
     findings = []
     for ep in ka_endpoints:
         rule_id = f"KA:{ep['name']}"
@@ -511,16 +616,32 @@ def validate_persona_template(template_text: str, profile: str, client: Workspac
             "ajuste o texto e tente novamente.")
 
 
-def build_timeline(checks_ok: bool, gate: dict, eval_res: dict, approved: bool, deployed: bool) -> list[dict]:
-    """The promotion status timeline the UI renders (S9)."""
+def build_timeline(checks_ok: bool, gate: dict, eval_res: dict, approved: bool, deployed: bool,
+                   kind: str | None = None, findings: list[dict] | None = None) -> list[dict]:
+    """The promotion status timeline the UI renders (S9).
+
+    The quality step differs by kind, because the two kinds make different quality CLAIMS: a Genie
+    Space's is its eval-run pass-rate; a dashboard's is its structural integrity (DASH-*). Showing a
+    dashboard an "Eval-run (n/a)" node would be honest but useless — it names a check that can never
+    run — so the step is replaced rather than degraded. Everything else in the timeline is shared.
+    """
     def st(done, fail=False, running=False):
         return "fail" if fail else "pass" if done else "running" if running else "pending"
+    rkind = resource_kind.get(kind)
     review_fail = gate.get("conclusion") == "failure"
+    if rkind.has_benchmarks:
+        quality = {"key": "eval", "label": f"Eval-run ({eval_res.get('status', 'n/a')})",
+                   "status": "fail" if eval_res.get("status") == "block" else "pass"}
+    else:
+        dash_blockers = [f for f in (findings or [])
+                         if str(f.get("rule_id", "")).startswith("DASH-")
+                         and f.get("severity") == "BLOCKER"]
+        quality = {"key": "structure", "label": "Checagens do painel (datasets, widgets, páginas)",
+                   "status": "fail" if dash_blockers else "pass"}
     return [
         {"key": "checks", "label": "Checagens determinísticas (pré-render + allowlist)", "status": st(checks_ok, fail=not checks_ok)},
         {"key": "review", "label": "Revisão do agente (Genie Reviewer)", "status": st(not review_fail, fail=review_fail)},
-        {"key": "eval", "label": f"Eval-run ({eval_res.get('status', 'n/a')})",
-         "status": "fail" if eval_res.get("status") == "block" else "pass"},
+        quality,
         {"key": "approval", "label": "Revisão do Responsável Técnico (GitHub)", "status": st(approved, running=not approved)},
         {"key": "deploy", "label": "Deploy em produção (service principal)", "status": st(deployed)},
     ]
@@ -545,22 +666,44 @@ def _effective_grants(profile: str, full_name: str, client: WorkspaceClient | No
     return out
 
 
-def _pii_audience_findings(space: dict, spec: "audience_spec.AudienceSpec | None") -> list[dict]:
+def _pii_columns(doc: dict, kind: "resource_kind.ResourceKind") -> list[str]:
+    """Column references in ``doc`` whose NAME signals PII / bank secrecy, per kind's own shape.
+
+    Genie declares its columns structurally (``data_sources.tables[].column_configs``). A dashboard
+    has no such declaration — its columns appear as the fields its widgets render — so for a dashboard
+    this reads the rendered field names off the review context (the same extraction
+    `build_dashboard_context` performs), keeping PII-01's advisory reach equivalent for both kinds
+    rather than silently blind for one.
+    """
+    flagged: list[str] = []
+    if kind.has_benchmarks:  # Genie shape
+        for table in (doc.get("data_sources") or {}).get("tables", []) or []:
+            for column in table.get("column_configs") or []:
+                name = (column.get("column_name") or "").lower()
+                if any(term in name for term in handbook_rules.PII_SIGNAL_TERMS):
+                    flagged.append(f"{table.get('identifier', '')}.{column.get('column_name')}")
+        return flagged
+    for dataset in review_core.build_dashboard_context(doc).get("tables", []):
+        for column in dataset.get("columns") or []:
+            if any(term in column.lower() for term in handbook_rules.PII_SIGNAL_TERMS):
+                flagged.append(f"{dataset.get('identifier', '')}.{column}")
+    return flagged
+
+
+def _pii_audience_findings(space: dict, spec: "audience_spec.AudienceSpec | None",
+                           kind: "resource_kind.ResourceKind | None" = None) -> list[dict]:
     """Advisory-only PII expansion note using the pilot's audience vocabulary."""
     if spec is None:
         return []
-    flagged_cols: list[str] = []
-    for table in (space.get("data_sources") or {}).get("tables", []) or []:
-        for column in table.get("column_configs") or []:
-            name = (column.get("column_name") or "").lower()
-            if any(term in name for term in handbook_rules.PII_SIGNAL_TERMS):
-                flagged_cols.append(f"{table.get('identifier', '')}.{column.get('column_name')}")
+    rkind = kind or resource_kind.GENIE_SPACE_KIND
+    flagged_cols = _pii_columns(space, rkind)
     if not flagged_cols:
         return []
+    audience_word = "Público do Space" if rkind.has_benchmarks else "Público do painel"
     return [{
         "severity": "SUGGESTION", "rule_id": "PII-01",
         "citation": "Genie Promotion Handbook › PII › PII-01",
-        "message": (f"o Público do Space ({', '.join(spec.names())}) alcança colunas com sinal de "
+        "message": (f"o {audience_word} ({', '.join(spec.names())}) alcança colunas com sinal de "
                     f"PII/sigilo bancário ({', '.join(flagged_cols)}) — confirme máscaras e row filters."),
         "suggestion": "Revise as proteções UC antes da aprovação; o app não concede acesso aos dados.",
     }]
@@ -578,10 +721,18 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
                  audience_spec_: "audience_spec.AudienceSpec | None" = None,
                  rule_overrides: list[dict] | None = None,
                  ka_endpoints: list[dict] | None = None,
-                 persona_template: str | None = None) -> dict:
+                 persona_template: str | None = None,
+                 kind: str | None = None) -> dict:
     """The hero flow: export -> pre-render -> allowlist + Audience validation
     -> agent review (EVAL-01 deterministic) -> eval gate. Deterministic findings own their
     rule_id (no double-count). Returns findings/gate/eval/allowlist_violations/timeline/prod_serialized.
+
+    ``kind`` (optional, defaults to Genie) selects the resource kind. What varies by kind, and only
+    this, is: which API exports the definition, which text the ENV-01 allowlist scans, which review
+    context is built, which rules are grounded, and which quality gate applies (a Genie Space's
+    benchmark/eval-run pair vs. a dashboard's DASH-* structural checks). Everything else — the
+    deterministic-findings-own-their-rule_id contract, the KA advisory, `decide_gate`, and the
+    PROTECTED_CORE prompt guarantee — is shared, unchanged, by construction.
 
     ``rule_overrides`` (G2, optional) is the raw admin-configured override rows from
     `app/rules_store.py` (`RulesStore.list_all_dicts()`), or `None` when no store is bound —
@@ -614,13 +765,19 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     """
     if audience_spec_ is None:
         raise ValueError("AudienceSpec is required")
+    rkind = resource_kind.get(kind)
     grant_profile = grant_profile or os.environ.get("APP_PROD_PROFILE")  # None -> skip preview
     # export_serialized resolves its OWN transport: dev-sp + assert_can_access(verified identity)
     # when user_token is set (the only way to reach dev post-ADR-0006), else the local profile.
-    dev_serialized = export_serialized(space_id, profile, user_token=user_token)
+    dev_serialized = export_serialized(space_id, profile, user_token=user_token, kind=rkind.kind)
     rendered = pre_render.rebind(json.dumps(dev_serialized, ensure_ascii=False), "dev", to_env, domain)
     prod_space = json.loads(rendered)
-    violations = pre_render.find_violations(rendered, to_env, domain)  # deterministic ENV allowlist
+    # ENV-01's deterministic allowlist. For a dashboard the scan is STRUCTURAL (dataset SQL only):
+    # a whole-document scan false-positives on prose — probed live, a markdown link made the 3-part-ref
+    # grammar report catalog `en` from `en.wikipedia.org` as a foreign-catalog BLOCKER. A dev catalog
+    # left in prose is instead rebound (above) and reported advisorily as DASH-04.
+    violations = pre_render.find_violations(
+        pre_render.scan_text(rendered, sql_only=rkind.sql_only_ref_scan), to_env, domain)
 
     # Deterministic findings own
     # their rule_id via finalize_findings, so the LLM can't soften them and they aren't duplicated.
@@ -639,18 +796,31 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
             lambda fq: _effective_grants(grant_profile, fq, client=gw),
             principal_exists=lambda name, is_group: _audience_principal_exists(gw, name, is_group),
             table_exists=lambda fq: bool(gw.tables.exists(full_name=fq)),
+            tables_of=(audience_check.genie_tables if rkind.has_benchmarks
+                       else audience_check.dashboard_tables),
+            audience_level=rkind.audience_level,
         )
-    deterministic += _pii_audience_findings(prod_space, audience_spec_)
+    deterministic += _pii_audience_findings(prod_space, audience_spec_, rkind)
+    # The dashboard structural gate (DASH-01..04) — the quality floor that REPLACES the benchmark
+    # rules for a kind that has no benchmarks. Deterministic and offline, so it runs on every review
+    # regardless of credentials, and its BLOCKERs reach `decide_gate` exactly like ENV-01's.
+    if not rkind.has_benchmarks:
+        deterministic += dashboard_check.check_dashboard(prod_space, to_env=to_env, domain=domain)
 
     # G2: the EFFECTIVE rule set (hardcoded RULES + admin overrides/custom rules) grounds the
     # prompt; EVAL-01's threshold/severity backstop is resolved the same way (finalize_findings
     # owns that check deterministically — see rules_config's docstring for why). The eval-RUN
     # pass-rate threshold (a distinct gate — see eval_run_threshold's docstring) is resolved from
     # the same override row, then fed to run_eval_gate_rest below.
-    effective = rules_config.effective_rules(rule_overrides)
+    effective = rules_config.effective_rules(rule_overrides, kind=rkind.kind)
     min_bench, eval01_severity = rules_config.eval01_config(rule_overrides)
     eval_threshold = rules_config.eval_run_threshold(rule_overrides)
-    ctx = review_core.build_space_context(prod_space)
+    if not rkind.has_benchmarks:
+        # A kind with no benchmark concept must never have EVAL-01 synthesized for it: 0 is the
+        # documented off switch for the backstop (see `review_core.finalize_findings`).
+        min_bench = 0
+    ctx = (review_core.build_space_context(prod_space) if rkind.has_benchmarks
+           else review_core.build_dashboard_context(prod_space))
     system, user = review_core.build_review_prompt(ctx, effective, deterministic,
                                                     persona_template=persona_template)
     # LLM reviewer = shared operation -> app SP / local profile (a serving scope isn't part of
@@ -665,12 +835,23 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     # benchmark questions) stays non-blocking (graceful degradation). Runs against the DEV space via
     # the same transport as the export (dev-reader SP under OBO once prod-hosted, ADR-0006; or the
     # given profile locally). Any failure degrades to advisory — never breaks the review.
-    try:
-        eval_client = _client(scope="dev-sp") if user_token else _client(profile)
-        eval_res = eval_gate.run_eval_gate_rest(space_id, client=eval_client, threshold=eval_threshold)
-    except Exception as e:  # noqa: BLE001 — never break the review; degrade to advisory
-        eval_res = eval_gate.decide_eval(None, eval_threshold, available=False,
-                                         reason=f"eval-run indisponível neste ambiente ({e})")
+    if not rkind.has_benchmarks:
+        # A dashboard has no benchmark questions, so there is no eval-run to attempt. Report that as
+        # a plain "not applicable" rather than an "unavailable" outage: the quality claim for this
+        # kind is carried by the DASH-* structural findings above (already in `deterministic`) plus
+        # the prod dataset-SQL check in CI — NOT by a degraded eval verdict.
+        eval_res = eval_gate.decide_eval(
+            None, eval_threshold, available=False,
+            reason=f"{rkind.label_pt} não tem perguntas de benchmark — a qualidade é verificada "
+                   "pelas checagens estruturais do painel e pela validação do SQL em produção.")
+    else:
+        try:
+            eval_client = _client(scope="dev-sp") if user_token else _client(profile)
+            eval_res = eval_gate.run_eval_gate_rest(space_id, client=eval_client,
+                                                    threshold=eval_threshold)
+        except Exception as e:  # noqa: BLE001 — never break the review; degrade to advisory
+            eval_res = eval_gate.decide_eval(None, eval_threshold, available=False,
+                                             reason=f"eval-run indisponível neste ambiente ({e})")
     # A blocking eval-run becomes a deterministic EVAL-RUN BLOCKER finding, so decide_gate below
     # turns the whole gate to `failure` (the app then shows "promoção bloqueada" and offers no
     # merge). It's a distinct rule_id from EVAL-01 (which is the ">= N benchmark questions" COUNT
@@ -687,13 +868,14 @@ def review_space(space_id: str, profile: str | None = None, to_env: str = "prod"
     # S7b: additive-only KA advisory findings — appended AFTER the deterministic + eval findings own
     # their rule_ids, so decide_gate sees them but they can never win a BLOCKER (every KA finding is
     # SUGGESTION or, on failure, STYLE — never BLOCKER, D5).
-    findings = findings + _ka_advisory_findings(ka_endpoints, ctx, profile, client=sp)
+    findings = findings + _ka_advisory_findings(ka_endpoints, ctx, profile, client=sp, kind=rkind)
     gate = review_core.decide_gate(findings)
     return {
         "findings": findings, "gate": gate, "eval": eval_res,
         "allowlist_violations": violations,
         "audience_spec": audience_spec_.to_dict(),
-        "timeline": build_timeline(not violations, gate, eval_res, approved=False, deployed=False),
+        "timeline": build_timeline(not violations, gate, eval_res, approved=False, deployed=False,
+                                   kind=rkind.kind, findings=findings),
         "prod_serialized": prod_space,
         # The DEV-shaped export (what the promotion PR commits to src/; CI rebinds dev_->prod_).
         # Returned here so request_promotion reuses it instead of a second OBO export.
@@ -733,7 +915,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                       rule_overrides: list[dict] | None = None,
                       ka_endpoints: list[dict] | None = None,
                       persona_template: str | None = None,
-                      table_mapping: "dict[str, str] | None" = None) -> dict:
+                      table_mapping: "dict[str, str] | None" = None,
+                      kind: str | None = None) -> dict:
     """GH2 (+ F2 + G7): open (or update) a real promotion PR for a space and post the attributed
     review comment.
 
@@ -766,9 +949,11 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     """
     if audience_spec_ is None:
         raise ValueError("AudienceSpec is required")
+    rkind = resource_kind.get(kind)
     full = review_space(space_id, profile=profile, user_token=user_token, domain=domain,
                         audience_spec_=audience_spec_, rule_overrides=rule_overrides,
-                        ka_endpoints=ka_endpoints, persona_template=persona_template)
+                        ka_endpoints=ka_endpoints, persona_template=persona_template,
+                        kind=rkind.kind)
     full.setdefault("audience_spec", audience_spec_.to_dict())
     review = {k: full[k] for k in REVIEW_FIELDS}
     blocked = (review.get("gate") or {}).get("conclusion") == "failure"
@@ -780,25 +965,27 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     gh = github or _github_app(profile)  # the bot (app SP reads the scope)
     who = requester_email or "usuário autenticado"
     safe_id = "".join(c for c in space_id if c.isalnum() or c in "-_")  # title can't carry markup
-    slug = space_slug(space_id)            # per-space: this space's own branch + committed file
-    branch, path = branch_for(slug), src_path_for(slug)
-    # G7: the prod Space name is now a Requester DECLARATION (pre-filled with the dev title by the
+    # per-resource: this resource's own branch + committed file
+    slug = resource_slug(space_id, rkind.kind)
+    branch, path = branch_for(slug), src_path_for(slug, rkind.kind)
+    # G7: the prod display name is now a Requester DECLARATION (pre-filled with the dev title by the
     # UI, editable) rather than a silent copy. The `.title` sidecar carries it into rendering.
     prod_title = resource_title or safe_id
-    # A per-space title sidecar so render.sh can name the generated prod genie_spaces resource (and so
-    # the prod space keeps a friendly title). Committed next to the artifact; no shared manifest, so
-    # concurrent per-space PRs never conflict.
-    extra = {f"{GH_GENIE_SRC_DIR}/{slug}.title": prod_title + "\n"}
+    # A per-resource title sidecar so render.sh can name the generated prod resource (and so the prod
+    # resource keeps a friendly title). Committed next to the artifact; no shared manifest, so
+    # concurrent per-resource PRs never conflict.
+    extra = {title_path_for(slug, rkind.kind): prod_title + "\n"}
     # A re-request on this SAME branch/PR clears a stale table-mapping sidecar.
     remove: list[str] = []
-    extra[audience_path_for(slug)] = json.dumps(
+    extra[audience_path_for(slug, rkind.kind)] = json.dumps(
         audience_spec_.to_dict(), ensure_ascii=False, indent=2) + "\n"
     if table_mapping:
         # The table de-para sidecar (G7): committed alongside the artifact so CI's render.sh applies
         # it (AFTER the dev_->prod_ rebind, BEFORE the strict allowlist check) — NEVER applied here.
-        extra[mapping_path_for(slug)] = json.dumps(table_mapping, ensure_ascii=False, indent=2) + "\n"
+        extra[mapping_path_for(slug, rkind.kind)] = json.dumps(
+            table_mapping, ensure_ascii=False, indent=2) + "\n"
     else:
-        remove.append(mapping_path_for(slug))
+        remove.append(mapping_path_for(slug, rkind.kind))
     # ADR-0008: bind the desired content tree to the immutable engine commit selected by the
     # content repository. The manifest is excluded from its own digest and then committed beside
     # the artifact, so PR checks and deploy can prove they consumed the same pair after merge.
@@ -807,21 +994,22 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
         {path: content, **extra}, remove
     )
     revisions = change_request.RevisionPair(content_revision, engine_revision)
-    extra[revision_path_for(slug)] = json.dumps(
+    extra[revision_path_for(slug, rkind.kind)] = json.dumps(
         {"version": 1, "revisions": revisions.to_dict()},
         ensure_ascii=False,
         indent=2,
         sort_keys=True,
     ) + "\n"
+    resource_word = "Espaço" if rkind.has_benchmarks else "Painel"
     pr = gh.open_or_update_promotion(
         branch=branch, path=path, content=content, extra_files=extra, remove_files=remove,
-        title=f"Rascunho de promoção — Genie Space ({safe_id})",
+        title=f"Rascunho de promoção — {rkind.label_pt} ({safe_id})",
         body=(f"Promoção preparada por **{who}** via o app (bot abriu o rascunho em seu nome).\n\n"
               f"Este PR foi aberto como **rascunho** — o `pr-checks` roda normalmente para validar "
               f"o conteúdo, mas o merge está bloqueado até o **Responsável Técnico** marcar o PR "
               f"como pronto (*mark as ready*) manualmente no GitHub. A **Plataforma** aprova o "
               f"deploy de produção pelo gate de Environment.\n\n"
-              f"Espaço `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo."),
+              f"{resource_word} `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo."),
     )
     # No-op promotion: the space is already in prod byte-identical (nothing to promote). No PR was
     # opened — surface it so the app tells the user instead of showing an empty pipeline. The review

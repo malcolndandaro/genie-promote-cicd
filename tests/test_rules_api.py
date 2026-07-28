@@ -99,7 +99,10 @@ def test_rules_endpoints_require_the_store(monkeypatch):
 def test_list_rules_returns_hardcoded_effective_and_overrides(monkeypatch, rules_store_fixture):
     _setup_admin(monkeypatch)
     body = client.get("/api/admin/rules", headers=ADMIN_HEADERS).json()
-    assert len(body["hardcoded"]) == 7
+    # The admin console shows the FULL inventory across every resource kind (per-kind filtering
+    # happens at review time, not here), so this asserts the shape rather than a count that grows
+    # with each new kind.
+    assert {r["rule_id"] for r in body["hardcoded"]} >= {"ENV-01", "EVAL-01", "DASH-01"}
     assert body["effective"] == body["hardcoded"]  # no overrides yet — byte-identical
     assert body["overrides"] == []
 

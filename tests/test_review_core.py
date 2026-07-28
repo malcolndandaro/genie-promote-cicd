@@ -229,6 +229,70 @@ def test_finalize_dedups_llm_against_deterministic_owner():
 
 
 def test_handbook_rules_have_required_fields():
-    assert len(handbook_rules.RULES) == 7
+    # The inventory is the union of every kind's rules (7 Genie-era + 4 dashboard structural rules);
+    # `test_rules_are_scoped_to_the_kinds_that_can_satisfy_them` below pins the per-kind split, which
+    # is the behaviour that actually matters. Asserting non-emptiness here keeps this test about the
+    # SHAPE of a rule rather than about a count that grows with every new resource kind.
+    assert handbook_rules.RULES
     for r in handbook_rules.RULES:
         assert r["rule_id"] and r["severity_hint"] in rc.SEVERITIES and r["citation"] and r["content"]
+
+
+def test_rules_are_scoped_to_the_kinds_that_can_satisfy_them():
+    """A rule must never be grounded on a resource kind that could never satisfy it: benchmarks are
+    a Genie concept, dashboard structure is a dashboard concept."""
+    genie = {r["rule_id"] for r in handbook_rules.rules_for_kind("genie_space")}
+    dashboard = {r["rule_id"] for r in handbook_rules.rules_for_kind("dashboard")}
+
+    # Benchmark rules are Genie-only; the dashboard structural rules are dashboard-only.
+    assert {"EVAL-01", "EVAL-02"} <= genie
+    assert not {"EVAL-01", "EVAL-02"} & dashboard
+    assert {"DASH-01", "DASH-02", "DASH-03", "DASH-04"} <= dashboard
+    assert not {"DASH-01", "DASH-02", "DASH-03", "DASH-04"} & genie
+
+    # The env/PII/SQL families are universal — both kinds read data and both can leak.
+    assert {"ENV-01", "ENV-02", "PII-01", "PII-02", "SQL-01"} <= genie & dashboard
+
+    # No kind supplied == the whole inventory (the pre-kind-seam meaning of RULES).
+    assert {r["rule_id"] for r in handbook_rules.rules_for_kind(None)} == {
+        r["rule_id"] for r in handbook_rules.RULES}
+
+
+def test_dashboard_review_does_not_get_the_benchmark_backstop():
+    """A dashboard has no benchmarks, so EVAL-01 must not be synthesized for it — `min_benchmark=0`
+    is the documented off switch (`resource_kind.DASHBOARD_KIND.has_benchmarks is False`)."""
+    out = rc.finalize_findings([], [], n_benchmark=0, min_benchmark=0)
+    assert not [f for f in out if f["rule_id"] == "EVAL-01"]
+    # A Genie space with no benchmarks still gets it.
+    out_genie = rc.finalize_findings([], [], n_benchmark=0, min_benchmark=2)
+    assert [f for f in out_genie if f["rule_id"] == "EVAL-01"]
+
+
+def test_build_dashboard_context_maps_datasets_widgets_and_prose():
+    """The dashboard context must fill the SAME shape the prompt assembler consumes, with no
+    benchmark signal, so `build_review_prompt` is reused unchanged."""
+    doc = {
+        "datasets": [
+            {"name": "ds_vol", "queryLines": ["SELECT a FROM prod_recebiveis.diamond.f\n"]},
+            {"name": "ds_dead", "queryLines": ["SELECT 1"]},
+        ],
+        "pages": [{
+            "displayName": "Painel",
+            "layout": [
+                {"widget": {"name": "w1", "spec": {"widgetType": "bar"},
+                            "queries": [{"query": {"datasetName": "ds_vol",
+                                                    "fields": [{"name": "a"}, {"name": "a"}]}}]}},
+                {"widget": {"name": "t1", "multilineTextboxSpec": {"lines": ["## Título"]}}},
+            ],
+        }],
+    }
+    ctx = rc.build_dashboard_context(doc)
+
+    assert [t["identifier"] for t in ctx["tables"]] == ["ds_vol", "ds_dead"]
+    assert ctx["tables"][0]["columns"] == ["a"]          # de-duplicated rendered fields
+    assert any("prod_recebiveis.diamond.f" in s for s in ctx["example_sqls"])
+    assert any("Título" in i for i in ctx["instructions"])   # prose becomes "instructions"
+    assert ctx["joins"] == ["Painel: bar, texto"]             # page -> widget structure
+    # No benchmark signal at all — this is what keeps EVAL-01 from firing.
+    assert ctx["n_benchmark"] == 0
+    assert ctx["benchmark_questions"] == [] and ctx["benchmark_sqls"] == []

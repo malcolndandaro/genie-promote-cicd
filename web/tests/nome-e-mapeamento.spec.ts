@@ -23,8 +23,8 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (route) =>
     route.fulfill({ json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }),
   );
-  await page.route('**/api/spaces', (route) =>
-    route.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }),
+  await page.route('**/api/resources', (route) =>
+    route.fulfill({ json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } }),
   );
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.route('**/api/promote/preview**', (route) =>
@@ -56,7 +56,7 @@ test('the prod Space name is pre-filled with the dev title and editable', async 
   await confirmPilotPromotion(page);
 
   await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
-  expect(posted).toMatchObject({ space_id: 'sp1', resource_title: 'Recebíveis PROD' });
+  expect(posted).toMatchObject({ resource_id: 'sp1', resource_title: 'Recebíveis PROD' });
 });
 
 test('confirming without editing the name sends the dev title unchanged', async ({ page }) => {

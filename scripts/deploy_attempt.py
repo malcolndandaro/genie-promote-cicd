@@ -26,10 +26,14 @@ import audience_spec  # noqa: E402
 import change_request  # noqa: E402
 import content_revision  # noqa: E402
 import reconcile_audience  # noqa: E402
-from workflow_support import resolve_space_id  # noqa: E402
+import resource_kind  # noqa: E402  (the ONE registry of per-kind facts)
+import workspace_resource  # noqa: E402  (the per-kind Databricks API adapter)
 
 
 PREFLIGHT = "preflight"
+# The stage NAMES are a persisted contract: they are stored in
+# `deployment_attempts.completed_stages` and rendered in the app's deploy panel. Adding a second
+# resource kind therefore does NOT add stages — each stage now iterates the artifacts of EVERY kind.
 MUTATION_STAGES = (
     "bundle_deploy",
     "resolve_space",
@@ -39,10 +43,12 @@ MUTATION_STAGES = (
     "certify_space",
     "complete",
 )
-_SUFFICIENT = {"CAN_RUN", "CAN_EDIT", "CAN_MANAGE", "IS_OWNER"}
+# Levels that count as "this principal can use the resource". CAN_READ is the dashboard audience
+# level (`resource_kind.DASHBOARD_KIND.audience_level`); Genie has no level below CAN_RUN, so
+# including it widens nothing for Spaces.
+_SUFFICIENT = {"CAN_READ", "CAN_RUN", "CAN_EDIT", "CAN_MANAGE", "IS_OWNER"}
 _TECHNICAL_SUFFICIENT = {"CAN_MANAGE", "IS_OWNER"}
 _EVIDENCE_PREFIX = "DEPLOY_ATTEMPT:"
-_GENIE_SPACE_TAG_ENTITY_TYPE = "geniespaces"
 _CERTIFICATION_TAG_KEY = "system.certification_status"
 _CERTIFICATION_TAG_VALUE = "certified"
 _CERTIFICATION_READBACK_MAX_ATTEMPTS = 30
@@ -186,10 +192,18 @@ class ProductionOperations:
     def _run(self, *args: str) -> None:
         subprocess.run(list(args), cwd=self.root, check=True)
 
-    def _artifacts(self) -> list[tuple[str, Path, Path, Path]]:
+    def _artifacts_of(self, kind) -> list[tuple[str, Path, Path, Path]]:
+        """The rendered artifacts of ONE kind: ``(slug, rendered, title_path, audience_path)``.
+
+        The title + AudienceSpec sidecars are REQUIRED for every kind: the title is the deploy's only
+        id-resolution key (neither `bundle summary` nor the DABs deploy reports a Genie space id or a
+        dashboard id back), and the AudienceSpec is the reconciled desired set. A missing one fails
+        here rather than mid-mutation.
+        """
         out = []
-        for rendered in sorted((self.root / "build" / "genie").glob("*.serialized_space.json")):
-            slug = rendered.name.removesuffix(".serialized_space.json")
+        build_dir = self.root / "build" / kind.build_subdir
+        for rendered in sorted(build_dir.glob(f"*{kind.artifact_suffix}")):
+            slug = rendered.name.removesuffix(kind.artifact_suffix)
             title = rendered.with_name(f"{slug}.title")
             audience = rendered.with_name(f"{slug}.audience.json")
             if not title.exists() or not title.read_text(encoding="utf-8").strip():
@@ -199,9 +213,28 @@ class ProductionOperations:
             with audience.open(encoding="utf-8") as handle:
                 audience_spec.parse_sidecar(json.load(handle))
             out.append((slug, rendered, title, audience))
-        if not out:
-            raise ValueError("no rendered Genie Space artifacts found")
         return out
+
+    def _all_artifacts(self) -> list[tuple[object, str, Path, Path, Path]]:
+        """Every rendered artifact across EVERY kind, each tagged with its kind.
+
+        The "nothing to deploy" refusal is evaluated over the UNION, not per kind: a promotion that
+        contains only dashboards (or only Spaces) is perfectly valid, while a genuinely empty content
+        tree still fails closed — an empty desired state must never be mistaken for "deploy nothing",
+        because for a bundle it reads as "delete the managed content".
+        """
+        out: list[tuple[object, str, Path, Path, Path]] = []
+        for kind in resource_kind.all_kinds():
+            for slug, rendered, title, audience in self._artifacts_of(kind):
+                out.append((kind, slug, rendered, title, audience))
+        if not out:
+            raise ValueError("no rendered promotable artifacts found")
+        return out
+
+    def _artifacts(self) -> list[tuple[str, Path, Path, Path]]:
+        """Back-compat shim: the Genie-only artifact list (kept for callers/tests predating the kind
+        seam). New code should use `_all_artifacts`, which covers every kind."""
+        return self._artifacts_of(resource_kind.GENIE_SPACE_KIND)
 
     def preflight(self) -> None:
         # These commands write only the runner's local build directory; production is untouched.
@@ -224,65 +257,128 @@ class ProductionOperations:
                 f"certification tag policy {_CERTIFICATION_TAG_KEY!r} does not declare "
                 f"{_CERTIFICATION_TAG_VALUE!r}",
             )
-        live = list(self.w.genie.list_spaces().spaces or [])
-        for slug, rendered, title_path, audience_path in self._artifacts():
+        # Per-kind live inventory, read ONCE per kind so a many-artifact promotion doesn't re-list.
+        live_by_kind = {
+            kind.kind: workspace_resource.list_resources(self.w, kind)
+            for kind in resource_kind.all_kinds()
+        }
+        for kind, slug, rendered, title_path, audience_path in self._all_artifacts():
             title = title_path.read_text(encoding="utf-8").strip()
-            matches = [space for space in live if (space.title or "") == title]
+            matches = [r for r in live_by_kind[kind.kind] if r["title"] == title]
             if len(matches) > 1:
                 raise ValueError(f"{slug}: duplicate live title {title!r}")
             if matches:
-                # A read-only capability probe for the post-deploy ACL stages.
-                self.w.permissions.get(request_object_type="genie",
-                                       request_object_id=matches[0].space_id)
+                # A read-only capability probe for the post-deploy ACL stages: if the SP cannot read
+                # this resource's ACL now, it will not be able to reconcile it after the deploy —
+                # better to learn that BEFORE any mutation.
+                self.w.permissions.get(request_object_type=kind.permissions_object_type,
+                                       request_object_id=matches[0]["resource_id"])
             self._run(sys.executable, "scripts/check_audience.py", str(rendered),
-                      str(audience_path))
+                      str(audience_path), "--kind", kind.kind)
+            if not kind.has_benchmarks:
+                # The dashboard quality floor, asserted BEFORE any mutation: structural integrity
+                # offline, then the rendered dataset SQL actually validated against the prod warehouse.
+                self._run(sys.executable, "scripts/check_dashboard.py", str(rendered))
+                self._run(sys.executable, "scripts/check_dashboard_sql.py", str(rendered),
+                          "--warehouse-id", self.warehouse_id)
 
     def bundle_deploy(self) -> None:
         self._run("databricks", "bundle", "deploy", "-t", "prod", "--var",
                   f"warehouse_id={self.warehouse_id}")
 
+    def _kind_of(self, slug: str):
+        """Which kind a slug in ``target_ids`` belongs to.
+
+        Resolved by looking the slug back up in the rendered artifacts rather than by parsing its
+        prefix — the artifacts are the authority, and this keeps working for a pinned/friendly slug
+        (`receivables`, `recebiveis`) that carries no kind prefix at all.
+
+        Falls back to Genie when the slug matches no rendered artifact. Every slug in ``targets``
+        comes from `resolve_space`, which builds it FROM those artifacts, so in a real deploy the
+        lookup always hits. The fallback exists for the stage-in-isolation case (a replay or a test
+        driving one stage directly) and Genie is the correct default there: it is the historical kind
+        every pre-existing deploy target belongs to.
+        """
+        try:
+            artifacts = self._all_artifacts()
+        except ValueError:
+            return resource_kind.GENIE_SPACE_KIND
+        for kind, artifact_slug, _rendered, _title, _audience in artifacts:
+            if artifact_slug == slug:
+                return kind
+        return resource_kind.GENIE_SPACE_KIND
+
     def resolve_space(self) -> dict[str, str]:
+        """Resolve every deployed resource's live id by its declared title, per kind.
+
+        Bounded-retry + refuse-to-guess semantics live in `workspace_resource.resolve_by_title`; both
+        kinds get identical treatment, so a duplicate title fails the deploy rather than reconciling
+        ACLs onto the wrong object.
+        """
         return {
-            slug: resolve_space_id(self.w, title.read_text(encoding="utf-8").strip())
-            for slug, _rendered, title, _audience in self._artifacts()
+            slug: workspace_resource.resolve_by_title(
+                self.w, kind, title.read_text(encoding="utf-8").strip())
+            for kind, slug, _rendered, title, _audience in self._all_artifacts()
         }
 
     def assert_app_manage(self, targets: dict[str, str]) -> None:
+        """Grant the app's own service principal CAN_MANAGE on every deployed resource.
+
+        Without this the resource effectively does not exist for the app: the A2 access guard and the
+        export both need manage-level reads, and neither Genie nor Lakeview offers a workspace-wide
+        listing to a non-admin. Additive and idempotent.
+        """
         from databricks.sdk.service import iam
         app_sp = self.w.apps.get(self.app_name).service_principal_client_id
-        for space_id in targets.values():
+        for slug, resource_id in targets.items():
             self.w.permissions.update(
-                request_object_type="genie", request_object_id=space_id,
+                request_object_type=self._kind_of(slug).permissions_object_type,
+                request_object_id=resource_id,
                 access_control_list=[iam.AccessControlRequest(
                     service_principal_name=app_sp,
                     permission_level=iam.PermissionLevel.CAN_MANAGE,
                 )],
             )
 
-    def _previous(self, slug: str):
+    def _previous(self, slug: str, kind=None):
+        """The PREVIOUS AudienceSpec for a slug, from the pre-merge content checkout.
+
+        Reconciliation needs it to know which principals IT had granted (and may therefore remove) —
+        without it a principal dropped from the desired set would linger. Read from the kind's own
+        source dir so a dashboard's previous audience is found too.
+        """
         if self.previous_content_root is None:
             return None
-        base = self.previous_content_root / "src" / "genie"
-        path = base / f"{slug}.audience.json"
+        src_dir = (kind or resource_kind.GENIE_SPACE_KIND).src_dir
+        path = self.previous_content_root / src_dir / f"{slug}.audience.json"
         if path.exists():
             with path.open(encoding="utf-8") as handle:
                 return audience_spec.parse_sidecar(json.load(handle))
         return None
 
     def reconcile_audience(self, targets: dict[str, str]) -> None:
-        for slug, _rendered, _title, audience_path in self._artifacts():
+        """Converge each deployed resource's app-managed audience to its declared AudienceSpec.
+
+        The derived level is the kind's own (`CAN_RUN` for a Space, `CAN_READ` for a dashboard). A
+        principal manually elevated above that level is preserved, never downgraded — see
+        `reconcile_audience.desired_acl`.
+        """
+        for kind, slug, _rendered, _title, audience_path in self._all_artifacts():
             with audience_path.open(encoding="utf-8") as handle:
                 desired = audience_spec.parse_sidecar(json.load(handle))
             reconcile_audience.reconcile(
-                self.w, targets[slug], desired, previous=self._previous(slug))
+                self.w, targets[slug], desired, previous=self._previous(slug, kind),
+                object_type=kind.permissions_object_type, level=kind.audience_level)
 
     def verify_live_state(self, targets: dict[str, str]) -> None:
+        """Read back what was actually granted. Readback — not the write's return — is the evidence."""
         app_sp = self.w.apps.get(self.app_name).service_principal_client_id
-        for slug, _rendered, _title, audience_path in self._artifacts():
+        for kind, slug, _rendered, _title, audience_path in self._all_artifacts():
             with audience_path.open(encoding="utf-8") as handle:
                 desired = audience_spec.parse_sidecar(json.load(handle))
             acl = self.w.permissions.get(
-                request_object_type="genie", request_object_id=targets[slug]).access_control_list or []
+                request_object_type=kind.permissions_object_type,
+                request_object_id=targets[slug]).access_control_list or []
             by_name = {
                 reconcile_audience._name(entry): reconcile_audience._direct_level(entry)
                 for entry in acl
@@ -294,32 +390,40 @@ class ProductionOperations:
                 raise RuntimeError(f"{slug}: audience readback failed for {', '.join(missing)}")
 
     def certify_space(self, targets: dict[str, str]) -> None:
-        """Assert and read back the required system certification tag for every deployed Space."""
+        """Assert and read back the governed certification tag for every deployed resource.
+
+        The tag entity type is per kind (`geniespaces` / `dashboards`) — both verified live; the
+        singular/alternate spellings are rejected by the API. The readback is retried because tag
+        propagation is EVENTUALLY CONSISTENT: the first read after a write can legitimately miss or
+        return the old value, and that is not a permission problem. An exhausted budget still fails
+        closed.
+        """
         from databricks.sdk.errors import NotFound
         from databricks.sdk.service.tags import TagAssignment
 
         assignments = self.w.workspace_entity_tag_assignments
-        for slug, space_id in targets.items():
+        for slug, resource_id in targets.items():
+            entity_type = self._kind_of(slug).tag_entity_type
             try:
                 current = assignments.get_tag_assignment(
-                    _GENIE_SPACE_TAG_ENTITY_TYPE, space_id, _CERTIFICATION_TAG_KEY,
+                    entity_type, resource_id, _CERTIFICATION_TAG_KEY,
                 )
             except NotFound:
                 assignments.create_tag_assignment(TagAssignment(
-                    entity_type=_GENIE_SPACE_TAG_ENTITY_TYPE,
-                    entity_id=space_id,
+                    entity_type=entity_type,
+                    entity_id=resource_id,
                     tag_key=_CERTIFICATION_TAG_KEY,
                     tag_value=_CERTIFICATION_TAG_VALUE,
                 ))
             else:
                 if current.tag_value != _CERTIFICATION_TAG_VALUE:
                     assignments.update_tag_assignment(
-                        _GENIE_SPACE_TAG_ENTITY_TYPE,
-                        space_id,
+                        entity_type,
+                        resource_id,
                         _CERTIFICATION_TAG_KEY,
                         TagAssignment(
-                            entity_type=_GENIE_SPACE_TAG_ENTITY_TYPE,
-                            entity_id=space_id,
+                            entity_type=entity_type,
+                            entity_id=resource_id,
                             tag_key=_CERTIFICATION_TAG_KEY,
                             tag_value=_CERTIFICATION_TAG_VALUE,
                         ),
@@ -329,7 +433,7 @@ class ProductionOperations:
             for attempt in range(self.certification_readback_max_attempts):
                 try:
                     readback = assignments.get_tag_assignment(
-                        _GENIE_SPACE_TAG_ENTITY_TYPE, space_id, _CERTIFICATION_TAG_KEY,
+                        entity_type, resource_id, _CERTIFICATION_TAG_KEY,
                     )
                 except NotFound:
                     if attempt + 1 == self.certification_readback_max_attempts:

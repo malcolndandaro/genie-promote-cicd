@@ -9,7 +9,8 @@
   import RehydrateAction from './RehydrateAction.svelte';
   import { pendingTimeline } from '../pipeline';
   import { PHASE_LABEL, phaseTone } from '../status';
-  import { genieSpaceUrl } from '../links';
+  import { resourceUrl } from '../links';
+  import { kindMeta } from '../resources';
   import type { Promotion } from '../promotion.svelte';
 
   interface Props {
@@ -23,12 +24,20 @@
   }
   let { promotion, userEmail, devHost = null, prodHost = null }: Props = $props();
 
-  // W3: only once BOTH the resolved prod Space id (server-side, phase-gated — see
+  /** The resource kind this promotion is for — drives the pipeline's quality step, the deep-link
+   * builder, and the copy. Defaults to Genie for a promotion recorded before the kind seam. */
+  let resourceKind = $derived(promotion.resource?.kind ?? 'genie_space');
+
+  // W3: only once BOTH the resolved prod resource id (server-side, phase-gated — see
   // `_with_prod_space_id`) AND the prod host are available — never guess a URL from a partial
-  // answer.
-  let prodGenieUrl = $derived(
-    promotion.liveStatus?.phase === 'deployed' && promotion.liveStatus?.prod_space_id && prodHost
-      ? genieSpaceUrl(prodHost, promotion.liveStatus.prod_space_id)
+  // answer. `resourceUrl` picks the right path per kind (Genie room vs. published dashboard).
+  let prodResourceUrl = $derived(
+    promotion.liveStatus?.phase === 'deployed'
+      ? resourceUrl(
+          prodHost,
+          promotion.liveStatus?.prod_resource_kind ?? resourceKind,
+          promotion.liveStatus?.prod_resource_id ?? promotion.liveStatus?.prod_space_id,
+        )
       : null,
   );
 
@@ -74,7 +83,7 @@
           <span class="running-dot" aria-hidden="true"></span>
           Executando pipeline de promoção…
         </h3>
-        <Pipeline steps={pendingTimeline()} running />
+        <Pipeline steps={pendingTimeline(resourceKind)} running />
       </div>
     {:else if promotion.phase === 'error'}
       <div class="error-state" role="alert">
@@ -111,9 +120,9 @@
               Aprovar no GitHub ↗
             </a>
           {/if}
-          {#if prodGenieUrl}
-            <a class="pr-banner__link" href={prodGenieUrl} target="_blank" rel="noopener noreferrer">
-              Abrir Genie em produção ↗
+          {#if prodResourceUrl}
+            <a class="pr-banner__link" href={prodResourceUrl} target="_blank" rel="noopener noreferrer">
+              Abrir {kindMeta(resourceKind).label} em produção ↗
             </a>
           {/if}
         </div>
@@ -149,6 +158,7 @@
         statusPending={promotion.waitingForLiveStatus}
         {devHost}
         devSpaceId={promotion.resource?.id ?? null}
+        resourceKind={resourceKind}
         showPipeline={!!promotion.pr && !promotion.noChange}
         evidenceLoading={promotion.evidenceLoading}
         evidenceError={promotion.evidenceError}

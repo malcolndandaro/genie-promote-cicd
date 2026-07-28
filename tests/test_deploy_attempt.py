@@ -208,6 +208,9 @@ def _production_operations_for_certification_preflight(tag_values):
         apps=NS(get=lambda _name: NS(service_principal_client_id="app-sp")),
         tag_policies=policies,
         genie=NS(list_spaces=lambda: NS(spaces=[])),
+        # The preflight now takes a live inventory per resource KIND, so the fake exposes the
+        # dashboard listing surface too (empty — this test is about the tag policy, not artifacts).
+        lakeview=NS(list=lambda: []),
     )
     operations = deploy_attempt.ProductionOperations(
         deploy_attempt.ROOT,
@@ -216,6 +219,7 @@ def _production_operations_for_certification_preflight(tag_values):
     )
     operations._run = lambda *args: calls.append(("run", args))
     operations._artifacts = lambda: []
+    operations._all_artifacts = lambda: []
     return operations, calls
 
 

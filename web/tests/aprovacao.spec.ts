@@ -55,8 +55,8 @@ const summary = (requester: string) => ({
 async function requestAsAuthor(page: Page, review: unknown, viewer = 'malcoln@databricks.com') {
   await page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: viewer, steward: 'pedro@databricks.com', is_admin: false } }));
-  await page.route('**/api/spaces', (r) =>
-    r.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }));
+  await page.route('**/api/resources', (r) =>
+    r.fulfill({ json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } }));
   await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.route('**/api/promote', (r) => r.fulfill({ json: { review, pr: PR, promotion_id: 'p1' } }));
   await page.goto('/');
@@ -75,7 +75,7 @@ async function openFromHistory(
   const s = summary(requester);
   await page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: viewer, steward: 'pedro@databricks.com', is_admin: isAdmin } }));
-  await page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
+  await page.route('**/api/resources', (r) => r.fulfill({ json: { resources: [] } }));
   await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.route('**/api/promotions?scope=all', (r) => r.fulfill({ json: { promotions: [s] } }));
   await page.route('**/api/promotions/p1', (r) =>

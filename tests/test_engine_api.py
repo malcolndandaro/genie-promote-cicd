@@ -718,8 +718,8 @@ def test_promote_preview_requires_a_token():
 def test_promote_preview_returns_title_and_tables(monkeypatch):
     captured = {}
 
-    def fake_preview(space_id, *, user_token):
-        captured.update(space_id=space_id, user_token=user_token)
+    def fake_preview(space_id, *, user_token, kind="genie_space"):
+        captured.update(space_id=space_id, user_token=user_token, kind=kind)
         return {"title": "Recebíveis", "tables": [
             {"source": "dev_recebiveis.diamond.fato_recebiveis",
              "default_target": "prod_recebiveis.diamond.fato_recebiveis"},
@@ -729,13 +729,14 @@ def test_promote_preview_returns_title_and_tables(monkeypatch):
     r = client.get("/promote/preview", params={"space_id": "dev-1"},
                    headers={"x-forwarded-access-token": "tok-p"})
     assert r.status_code == 200
-    assert captured == {"space_id": "dev-1", "user_token": "tok-p"}  # the token, never a header identity
+    # the token, never a header identity; and the kind defaults to Genie for a `space_id` caller
+    assert captured == {"space_id": "dev-1", "user_token": "tok-p", "kind": "genie_space"}
     assert r.json()["title"] == "Recebíveis"
     assert r.json()["tables"][0]["default_target"] == "prod_recebiveis.diamond.fato_recebiveis"
 
 
 def test_promote_preview_access_denied_maps_to_403(monkeypatch):
-    def boom(space_id, *, user_token):
+    def boom(space_id, *, user_token, kind="genie_space"):
         raise authz.AccessDenied("mallory@x may not access space dev-1")
 
     monkeypatch.setattr(engine_api.app_logic, "preview_promotion", boom)

@@ -34,7 +34,7 @@
         <p class="confirm__step">Preparar promoção</p>
         <h3 class="confirm__title">{resource.title}</h3>
         <p class="confirm__sub muted text-sm">
-          Confirme como este Space será publicado. O app abre um rascunho com revisão automática — o Responsável Técnico revisa e promove no GitHub.
+          Confirme como este recurso será publicado. O app abre um rascunho com revisão automática — o Responsável Técnico revisa e promove no GitHub.
         </p>
       </header>
 
@@ -49,9 +49,9 @@
         <AudienceSpecForm {promotion} />
       </section>
 
-      <section class="confirm__section confirm__history" aria-label="Histórico deste Space">
+      <section class="confirm__section confirm__history" aria-label="Histórico deste recurso">
         <div class="confirm__section-title">
-          <h4>Histórico deste Space</h4><span>últimas tentativas</span>
+          <h4>Histórico deste recurso</h4><span>últimas tentativas</span>
         </div>
         <PromotionList
           {promotions}
@@ -69,7 +69,7 @@
       {/if}
 
       <div class="confirm__actions">
-        <Button variant="outline" onclick={onCancel}>← Escolher outro espaço</Button>
+        <Button variant="outline" onclick={onCancel}>← Escolher outro recurso</Button>
         <Button
           onclick={() => promotion.requestPromotion()}
           loading={promotion.phase === 'reviewing'}

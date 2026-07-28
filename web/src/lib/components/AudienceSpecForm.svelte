@@ -2,12 +2,21 @@
   import Button from './Button.svelte';
   import Picker from './Picker.svelte';
   import { getPrincipals } from '../api';
+  import { kindMeta } from '../resources';
   import type { PickerOption } from '../picker';
   import type { Promotion } from '../promotion.svelte';
   import type { AudienceSpec, Principal } from '../types';
 
   interface Props { promotion: Promotion }
   let { promotion }: Props = $props();
+
+  /** The kind whose audience is being declared, and the ONE permission level the pipeline derives
+   * for it: Genie `CAN_RUN`, AI/BI dashboard `CAN_READ` (the least level that lets a business user
+   * open a published dashboard). Mirrors `resource_kind.<KIND>.audience_level` server-side — the
+   * AudienceSpec itself never carries a level, so this is display copy, not a submitted value. */
+  let resourceKind = $derived(promotion.resource?.kind ?? 'genie_space');
+  let kindLabel = $derived(kindMeta(resourceKind).label);
+  let audienceLevel = $derived(resourceKind === 'dashboard' ? 'CAN_READ' : 'CAN_RUN');
 
   type PrincipalOption = PickerOption & { principal: Principal };
   interface Row { id: number; principal: PrincipalOption | null }
@@ -52,9 +61,10 @@
 </script>
 
 <fieldset class="audience" aria-describedby="audience-help">
-  <legend>2. Público do Space <span>obrigatório</span></legend>
+  <legend>2. Público do {kindLabel} <span>obrigatório</span></legend>
   <p id="audience-help" class="muted text-sm">
-    Escolha quem poderá usar o Space em produção. Todos recebem <strong>CAN_RUN</strong>.
+    Escolha quem poderá usar o {kindLabel} em produção. Todos recebem
+    <strong>{audienceLevel}</strong>.
     A promoção não concede SELECT: ausências viram orientação para a fila Terraform da CERC.
   </p>
   {#each rows as row, index (row.id)}
@@ -67,7 +77,7 @@
           bind:value={row.principal}
         />
       </div>
-      <span class="audience__level">CAN_RUN</span>
+      <span class="audience__level">{audienceLevel}</span>
       <Button variant="ghost" onclick={() => remove(index)} ariaLabel="Remover do público">✕</Button>
     </div>
   {/each}

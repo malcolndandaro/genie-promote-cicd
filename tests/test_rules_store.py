@@ -177,7 +177,9 @@ import rules_config  # noqa: E402
 
 def test_seed_defaults_populates_an_empty_store_with_the_handbook_rules(store):
     n = store.seed_defaults(handbook_rules.RULES)
-    assert n == len(handbook_rules.RULES) == 7
+    # Every rule in the inventory becomes an editable row, across all resource kinds. Asserting
+    # against `len(RULES)` (not a literal) keeps this true as kinds are added.
+    assert n == len(handbook_rules.RULES)
     rows = store.list_all()
     assert {r.rule_id for r in rows} == {r["rule_id"] for r in handbook_rules.RULES}
     # seeded as plain (non-custom) overrides, enabled, carrying the handbook's own values
@@ -187,12 +189,13 @@ def test_seed_defaults_populates_an_empty_store_with_the_handbook_rules(store):
 
 
 def test_seed_defaults_is_idempotent_and_never_clobbers(store):
-    assert store.seed_defaults(handbook_rules.RULES) == 7
+    seeded = store.seed_defaults(handbook_rules.RULES)
+    assert seeded == len(handbook_rules.RULES)
     # an admin edits one rule AFTER the seed
     store.upsert(rule_id="ENV-01", actor_email="admin@x", enabled=False, severity="STYLE")
     # a second seed (e.g. next boot / another replica) is a no-op — store already populated
     assert store.seed_defaults(handbook_rules.RULES) == 0
-    assert len(store.list_all()) == 7
+    assert len(store.list_all()) == seeded
     assert store.get("ENV-01").enabled is False  # admin edit preserved, not reset by re-seed
 
 

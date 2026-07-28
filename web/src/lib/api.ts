@@ -22,7 +22,7 @@ import type {
   CheckDetail,
   DeployDetail,
 } from './types';
-import { spaceToResource } from './resources';
+import { dtoToResource, isKnownKind, spaceToResource } from './resources';
 
 /** A failed API call. `status` lets callers distinguish a 401 (re-auth) from a 502 (engine). */
 export class ApiError extends Error {
@@ -61,10 +61,19 @@ export function getWhoami(): Promise<Whoami> {
   return getJSON<Whoami>('/api/whoami');
 }
 
-/** The signed-in user's promotable resources (OBO). Today: Genie spaces. */
+/** Every promotable resource the signed-in user can access (OBO), across all resource kinds.
+ *
+ * `/api/resources` returns a DISCRIMINATED DTO (`{id,title,kind,env}`), so one call covers Genie
+ * Spaces and AI/BI dashboards and the kind registry does the rendering. A kind this client doesn't
+ * know is skipped rather than crashing the list (a newer engine may return a kind an older SPA
+ * predates). */
 export async function getResources(): Promise<PromotableResource[]> {
-  const data = await getJSON<{ spaces?: { space_id: string; title: string }[] }>('/api/spaces');
-  return (data.spaces ?? []).map(spaceToResource);
+  const data = await getJSON<{
+    resources?: { id: string; title: string; kind: string; env?: 'dev' | 'prod' }[];
+  }>('/api/resources');
+  return (data.resources ?? [])
+    .filter((dto) => isKnownKind(dto.kind))
+    .map((dto) => dtoToResource(dto as Parameters<typeof dtoToResource>[0]));
 }
 
 // --- G1: prefilled/searchable pickers — spaces + workspace-directory principals -------------------
@@ -140,7 +149,7 @@ export async function postPromote(
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
-      space_id: resource.id,
+      resource_id: resource.id,
       resource_title: prodTitle?.trim() || resource.title,
       resource_kind: resource.kind,
       audience_spec: audienceSpec,
@@ -224,9 +233,17 @@ export interface PromotePreview {
   tables: PromotePreviewTable[];
 }
 
-/** G7: preview a promotion's table de-para BEFORE requesting it — read-only, persists nothing. */
-export function getPromotePreview(spaceId: string): Promise<PromotePreview> {
-  return getJSON(`/api/promote/preview?space_id=${encodeURIComponent(spaceId)}`);
+/** G7: preview a promotion's table de-para BEFORE requesting it — read-only, persists nothing.
+ *
+ * For a dashboard the previewed refs come from its DATASET SQL only, so the de-para never offers a
+ * hostname from a markdown widget as a table to remap. */
+export function getPromotePreview(
+  resourceId: string,
+  kind: ResourceKind = 'genie_space'
+): Promise<PromotePreview> {
+  return getJSON(
+    `/api/promote/preview?resource_id=${encodeURIComponent(resourceId)}&kind=${encodeURIComponent(kind)}`
+  );
 }
 
 /** The append-only audit trail for a promotion (LB4) — refreshed as the status poll reconciles. */
@@ -307,8 +324,14 @@ export interface PromoteStatus {
   phase: PromotePhase;
   /** W3: the resolved PROD Genie Space id, present ONLY once `phase === 'deployed'` AND the
    * promotion's title matched exactly one live prod Space (never a guess) — lets the SPA render an
-   * "Abrir Genie em produção" deep-link via `genieSpaceUrl(prod_host, prod_space_id)`. */
+   * "Abrir Genie em produção" deep-link via `genieSpaceUrl(prod_host, prod_space_id)`.
+   * Kept as a Genie-only alias of `prod_resource_id` for back-compat. */
   prod_space_id?: string | null;
+  /** The kind-neutral resolved PROD resource id, same non-guessing rule as `prod_space_id` — use
+   * this with `resourceUrl(prod_host, prod_resource_kind, prod_resource_id)` to build the deep-link
+   * for ANY kind. */
+  prod_resource_id?: string | null;
+  prod_resource_kind?: ResourceKind | null;
 }
 
 /** Read the live status of a promotion PR (bot read; reflects GitHub, never asserts a deploy). */

@@ -7,7 +7,7 @@
     {
       icon: 'grid',
       title: 'Escolher',
-      desc: 'Selecione o Space no Dev',
+      desc: 'Selecione o recurso no Dev',
     },
     {
       icon: 'git-branch',

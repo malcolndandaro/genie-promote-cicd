@@ -6,7 +6,8 @@
   import Markdown from './Markdown.svelte';
   import DecisionSummary from './DecisionSummary.svelte';
   import { severityTone, buildPromotionSteps } from '../pipeline';
-  import type { Review } from '../types';
+  import { kindMeta } from '../resources';
+  import type { ResourceKind, Review } from '../types';
 
   interface Props {
     review: Review;
@@ -28,11 +29,14 @@
     evidenceError?: string | null;
     onLoadEvidence?: () => void | Promise<void>;
     statusPending?: boolean;
+    /** The resource kind under review — decides the pipeline's quality step and whether the
+     * benchmark eval panel is meaningful at all. Defaults to Genie for back-compat. */
+    resourceKind?: ResourceKind;
   }
   let {
     review, userEmail, liveStatus = null, devHost = null, devSpaceId = null, approval,
     showPipeline = true, evidenceLoading = false, evidenceError = null, onLoadEvidence,
-    statusPending = false,
+    statusPending = false, resourceKind = 'genie_space',
   }: Props = $props();
 
   // Findings have no stable id; the list never reorders, so a rule_id+index key is unique & safe.
@@ -40,7 +44,11 @@
   let blockers = $derived(keyed.filter((f) => f.severity === 'BLOCKER' || f.severity === 'OPERATIONAL'));
   let advisories = $derived(keyed.filter((f) => f.severity !== 'BLOCKER' && f.severity !== 'OPERATIONAL'));
   // The 7-step pipeline: verdict steps from review.timeline, git steps driven live by liveStatus.
-  let timeline = $derived(buildPromotionSteps(review, liveStatus));
+  let timeline = $derived(buildPromotionSteps(review, liveStatus, resourceKind));
+  // The benchmark eval panel is only meaningful for a kind that HAS benchmarks. A dashboard's
+  // quality evidence is its DASH-* findings (already rendered above with every other finding) plus
+  // the prod SQL check in CI — rendering an empty eval panel would imply a check that never ran.
+  let showEvalPanel = $derived(resourceKind === 'genie_space');
   // Required Público do Space shown so the Steward approves the exact CAN_RUN audience.
   let audienceSpec = $derived(review.audience_spec);
 </script>
@@ -130,12 +138,15 @@
         {/each}
       </div>
       <p class="muted text-xs">
-        O pipeline governa apenas o ACL do Space. Acesso aos dados continua no Terraform da CERC.
+        O pipeline governa apenas o ACL do {kindMeta(resourceKind).label}. Acesso aos dados continua
+        no Terraform da CERC.
       </p>
     </section>
   {/if}
 
-  <EvalResultsPanel evalResult={review.eval} {devHost} {devSpaceId} />
+  {#if showEvalPanel}
+    <EvalResultsPanel evalResult={review.eval} {devHost} {devSpaceId} />
+  {/if}
 
   {#if approval}
     <div class="approval">{@render approval()}</div>

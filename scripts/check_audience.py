@@ -39,17 +39,31 @@ def _load(path: str) -> audience_spec.AudienceSpec:
 
 
 def main() -> int:
-    if len(sys.argv) < 3:
-        print("usage: check_audience.py <rendered_space.json> <audience.json>", file=sys.stderr)
+    args = [a for a in sys.argv[1:] if a != "--kind"]
+    kind_name = None
+    if "--kind" in sys.argv[1:]:
+        idx = sys.argv[1:].index("--kind")
+        kind_name = sys.argv[1:][idx + 1] if len(sys.argv[1:]) > idx + 1 else None
+        args = [a for a in args if a != kind_name]
+    if len(args) < 2:
+        print("usage: check_audience.py <rendered.json> <audience.json> "
+              "[--kind genie_space|dashboard]", file=sys.stderr)
         return 2
-    with open(sys.argv[1], encoding="utf-8") as handle:
+    import resource_kind
+
+    kind = resource_kind.get(kind_name)
+    with open(args[0], encoding="utf-8") as handle:
         space = json.load(handle)
-    spec = _load(sys.argv[2])
+    spec = _load(args[1])
     w = WorkspaceClient()
     findings = audience_check.check_audience(
         space, spec, lambda table: _effective_grants(w, table),
         principal_exists=lambda name, is_group: _principal_exists(w, name, is_group),
         table_exists=lambda table: bool(w.tables.exists(full_name=table)),
+        # A dashboard declares no tables structurally — they live inside its dataset SQL.
+        tables_of=(audience_check.genie_tables if kind.has_benchmarks
+                   else audience_check.dashboard_tables),
+        audience_level=kind.audience_level,
     )
     for finding in findings:
         severity = finding["severity"]

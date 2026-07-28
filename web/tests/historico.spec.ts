@@ -28,7 +28,7 @@ const all = [
 function routes(page, { isAdmin }: { isAdmin: boolean }) {
   page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: 'ana@databricks.com', steward: 'pedro@databricks.com', is_admin: isAdmin } }));
-  page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
+  page.route('**/api/resources', (r) => r.fulfill({ json: { resources: [] } }));
   page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: mine } }));
   page.route('**/api/promotions?scope=all', (r) => r.fulfill({ json: { promotions: all } }));
   page.route('**/api/promotions/p-mine', (r) =>
@@ -89,7 +89,7 @@ test('the open promotion on a space is visible on its row before expanding (D7)'
   await page.getByRole('link', { name: 'Meus espaços' }).click();
 
   // The resumed run's live phase (not its older list snapshot) is visible on the collapsed row.
-  await expect(page.getByLabel('Spaces disponíveis').getByText('Checagens em execução')).toBeVisible();
+  await expect(page.getByLabel('Recursos disponíveis').getByText('Checagens em execução')).toBeVisible();
   await expect(page.getByText('— ana@databricks.com')).toBeVisible();
 });
 
@@ -108,7 +108,7 @@ test('a stale merged summary is reconciled to the live deployed status before th
   const statusStarted = new Promise<void>((resolve) => { markStatusStarted = resolve; });
   await page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: 'ana@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }));
-  await page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
+  await page.route('**/api/resources', (r) => r.fulfill({ json: { resources: [] } }));
   await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [stale] } }));
   await page.route('**/api/promotions/p-stale', (r) => r.fulfill({ json: {
     promotion: stale,
@@ -135,7 +135,7 @@ test('a stale merged summary is reconciled to the live deployed status before th
   await page.goto('/#/espacos');
   await statusStarted;
 
-  const spaces = page.getByLabel('Spaces disponíveis');
+  const spaces = page.getByLabel('Recursos disponíveis');
   await expect(spaces.getByText('Atualizando status…')).toBeVisible();
   await expect(spaces.getByText('Merge concluído')).toHaveCount(0);
   await expect(page.getByLabel('Atualizando status no GitHub')).toBeVisible();
@@ -157,7 +157,7 @@ test('expanding support details shows progress while GitHub evidence is loading'
   let coreStatusReads = 0;
   await page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: 'ana@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }));
-  await page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
+  await page.route('**/api/resources', (r) => r.fulfill({ json: { resources: [] } }));
   await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [stale] } }));
   await page.route('**/api/promotions/p-loading', (r) => r.fulfill({ json: {
     promotion: stale, review, pr: { number: 14, url: 'https://gh/pr/14' },
@@ -192,7 +192,7 @@ test('expanding support details shows progress while GitHub evidence is loading'
   });
 
   await page.goto('/#/espacos');
-  await expect(page.getByLabel('Spaces disponíveis').getByText('Implantando…')).toBeVisible();
+  await expect(page.getByLabel('Recursos disponíveis').getByText('Implantando…')).toBeVisible();
   await page.getByText('Detalhes para suporte e auditoria', { exact: true }).click();
   await evidenceStarted;
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildPromotionSteps } from './pipeline';
+import { buildPromotionSteps, pendingTimeline, pipelineSteps } from './pipeline';
 import type { Review } from './types';
 import type { PromoteStatus } from './api';
 
@@ -119,5 +119,50 @@ describe('buildPromotionSteps — Fix C deploy_detail', () => {
     const deploy = steps.find((s) => s.key === 'deploy');
     expect(deploy?.status).toBe('fail');
     expect(deploy?.detail).toBeNull();
+  });
+});
+
+describe('pipelineSteps — the quality step differs by resource kind', () => {
+  it('gives a Genie Space the eval-run step', () => {
+    const keys = pipelineSteps('genie_space').map((s) => s.key);
+    expect(keys).toContain('eval');
+    expect(keys).not.toContain('structure');
+  });
+
+  it('replaces eval-run with the dashboard checks for a dashboard', () => {
+    // A dashboard has no benchmarks, so an "Eval-run" node would name a check that can never run.
+    const steps = pipelineSteps('dashboard');
+    const keys = steps.map((s) => s.key);
+    expect(keys).toContain('structure');
+    expect(keys).not.toContain('eval');
+    expect(steps.find((s) => s.key === 'structure')?.label).toContain('painel');
+  });
+
+  it('keeps the same 7-step shape for both kinds', () => {
+    expect(pipelineSteps('dashboard')).toHaveLength(pipelineSteps('genie_space').length);
+  });
+
+  it('pendingTimeline reflects the kind while the review is in flight', () => {
+    expect(pendingTimeline('dashboard').map((s) => s.key)).toContain('structure');
+    expect(pendingTimeline().map((s) => s.key)).toContain('eval');
+  });
+});
+
+describe('buildPromotionSteps — kind-aware verdict steps', () => {
+  it("reads a dashboard's structural verdict from the server timeline", () => {
+    const review = {
+      findings: [],
+      gate: { conclusion: 'failure', blocker_count: 1, summary: '' },
+      eval: { status: 'advisory', summary: '' },
+      allowlist_violations: [],
+      timeline: [
+        { key: 'checks', label: 'Checagens', status: 'pass' as const },
+        { key: 'review', label: 'Revisão', status: 'pass' as const },
+        { key: 'structure', label: 'Checagens do painel', status: 'fail' as const },
+      ],
+    };
+    const steps = buildPromotionSteps(review, null, 'dashboard');
+    expect(steps.find((s) => s.key === 'structure')?.status).toBe('fail');
+    expect(steps.find((s) => s.key === 'eval')).toBeUndefined();
   });
 });

@@ -18,7 +18,7 @@ import handbook_rules
 SEVERITIES = ("BLOCKER", "SUGGESTION", "STYLE")
 
 
-def effective_rules(overrides: list[dict] | None = None) -> list[dict]:
+def effective_rules(overrides: list[dict] | None = None, *, kind: str | None = None) -> list[dict]:
     """Merge `handbook_rules.RULES` with admin override rows into the EFFECTIVE rule set the
     reviewer prompt (`review_core.build_review_prompt`) grounds on:
       - a hardcoded rule with no override row: passed through UNCHANGED.
@@ -27,10 +27,17 @@ def effective_rules(overrides: list[dict] | None = None) -> list[dict]:
       - a hardcoded rule with an ENABLED override: severity_hint/content/citation/params replaced
         by whatever the override sets (unset fields keep the hardcoded value).
       - a custom rule (`is_custom=True`, enabled): appended, in `handbook_rules.RULES`'s shape.
+
+    ``kind`` (optional) restricts the hardcoded half to the rules that APPLY to that resource kind
+    (`handbook_rules.rules_for_kind`) — so a Genie review never grounds on the dashboard structural
+    rules and a dashboard review never grounds on the benchmark rules, neither of which the other
+    kind could ever satisfy. ``kind=None`` keeps the historical "every rule" behaviour, so
+    `effective_rules(None)` is unchanged for any pre-existing caller. Admin CUSTOM rules are never
+    kind-filtered: an operator who writes one has said what it is for.
     """
     by_id = {o["rule_id"]: o for o in (overrides or [])}
     out: list[dict] = []
-    for rule in handbook_rules.RULES:
+    for rule in handbook_rules.rules_for_kind(kind):
         ov = by_id.get(rule["rule_id"])
         if ov is None:
             out.append(dict(rule))

@@ -61,6 +61,7 @@ import rules_store  # noqa: E402  (G2 — admin-configurable reviewer rules, saf
 import prompt_template_store  # noqa: E402  (S8 — admin-editable reviewer prompt template)
 from github_app import GitHubError  # noqa: E402  (genie_reviewer is on sys.path via app_logic)
 import handbook_rules  # noqa: E402  (G2 — the hardcoded rule_ids a plain override must reference)
+import resource_kind as resource_kind_mod  # noqa: E402  (the ONE registry of per-kind facts)
 import review_core  # noqa: E402  (S8 — DEFAULT_PERSONA, the editable reviewer prompt surface)
 import rules_config  # noqa: E402  (G2 — the pure hardcoded+overrides merge, for GET /admin/rules)
 
@@ -353,6 +354,56 @@ def spaces(
     return {"spaces": _engine_call("list_spaces", lambda: app_logic.list_spaces(user_token=token))}
 
 
+@api.get("/resources")
+def resources(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """EVERY promotable DEV resource the caller may access, across every resource kind, as the
+    discriminated DTO `{id, title, kind, env}`.
+
+    This is what lets "Meus espaços" be ONE list: the SPA's kind registry renders N kinds already, so
+    only the FETCH needed to become kind-aware. `/spaces` is retained unchanged for back-compat.
+
+    Gated exactly like `/spaces`: an OBO token is required, and each kind's listing is filtered
+    per-resource by the caller's platform-VERIFIED identity (fail-closed) inside
+    `app_logic.list_all_dev_resources`.
+    """
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    return {"resources": _engine_call(
+        "list_all_dev_resources", lambda: app_logic.list_all_dev_resources(user_token=token))}
+
+
+@api.get("/prod-resources")
+def prod_resources(
+    kind: str = "genie_space",
+    q: str = "",
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The id+title of every PROD-deployed resource of one kind — the kind-aware counterpart of
+    `/prod-spaces` (which is retained unchanged). `q` filters server-side on title."""
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+
+    def _run() -> dict:
+        try:
+            resolved = resource_kind_mod.get(kind)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        found = app_logic.list_prod_resources(resolved.kind)
+        needle = q.strip().lower()
+        if needle:
+            found = [r for r in found if needle in (r.get("title") or "").lower()]
+        return {"resources": [{"id": r["resource_id"], "title": r["title"],
+                               "kind": resolved.kind, "env": "prod"} for r in found]}
+
+    return _engine_call("list_prod_resources", _run)
+
+
 @api.get("/prod-spaces")
 def prod_spaces(
     q: str = "",
@@ -428,8 +479,42 @@ class AudienceSpecIn(BaseModel):
         return audience_spec_mod.AudienceSpec.from_dict(self.model_dump())
 
 
-class ReviewRequest(BaseModel):
-    space_id: str
+class _ResourceRef(BaseModel):
+    """The canonical way a request names the resource it acts on.
+
+    `resource_id` + `resource_kind` is the forward-looking shape; `space_id` remains accepted as a
+    DEPRECATED ALIAS so every existing client (and the legacy engine-API contract) keeps working
+    untouched. Exactly one of the two must be supplied. An absent `resource_kind` means Genie — the
+    only kind that existed when `space_id` was the sole spelling.
+    """
+
+    resource_id: str | None = None
+    resource_kind: str | None = None
+    space_id: str | None = None  # deprecated alias for resource_id
+
+    @model_validator(mode="after")
+    def _resolve_resource(self) -> "_ResourceRef":
+        if not (self.resource_id or self.space_id):
+            raise ValueError("resource_id (or the deprecated space_id) is required")
+        if self.resource_id and self.space_id and self.resource_id != self.space_id:
+            raise ValueError("resource_id and space_id disagree; send only one")
+        if not self.resource_id:
+            self.resource_id = self.space_id
+        # Validate the kind at the BOUNDARY so an unknown kind is a 422, never a 502 from deeper in.
+        resource_kind_mod.get(self.resource_kind)
+        return self
+
+    @property
+    def kind(self) -> str:
+        return resource_kind_mod.get(self.resource_kind).kind
+
+    @property
+    def target_id(self) -> str:
+        assert self.resource_id  # guaranteed by the validator
+        return self.resource_id
+
+
+class ReviewRequest(_ResourceRef):
     audience_spec: AudienceSpecIn
 
 
@@ -464,9 +549,9 @@ def review(
         pt_store = _prompt_template_store()
         custom_pt = pt_store.get() if pt_store is not None else None
         persona_template = custom_pt.template_text if custom_pt is not None else None
-        result = app_logic.review_space(body.space_id, user_token=token, audience_spec_=audience,
+        result = app_logic.review_space(body.target_id, user_token=token, audience_spec_=audience,
                                         rule_overrides=overrides, ka_endpoints=ka_endpoints,
-                                        persona_template=persona_template)
+                                        persona_template=persona_template, kind=body.kind)
         # result[k] (not .get): if the engine ever drops a field, surface it as a 502 here
         # rather than silently emitting null and breaking the UI with no server-side signal.
         return {k: result[k] for k in _REVIEW_FIELDS}
@@ -474,12 +559,10 @@ def review(
     return _engine_call("review_space", _run)
 
 
-class PromoteRequest(BaseModel):
-    space_id: str
-    # Display metadata the SPA already holds (from /api/spaces) — persisted with the Promotion so the
-    # history/recovery view (LB3/LB5) shows the resource without a second OBO lookup.
+class PromoteRequest(_ResourceRef):
+    # Display metadata the SPA already holds (from /api/resources) — persisted with the Promotion so
+    # the history/recovery view (LB3/LB5) shows the resource without a second OBO lookup.
     resource_title: str | None = None
-    resource_kind: str | None = None
     audience_spec: AudienceSpecIn
     # G7: the Requester's declared table de-para (source DEV ref -> desired prod ref overrides),
     # keyed exactly like `/promote/preview`'s `source` field — only entries actually changed away
@@ -515,7 +598,7 @@ def _persist_promotion(store, result: dict, body: PromoteRequest, requester_emai
     if existing is None:
         try:
             promotion = store.create_promotion(
-                resource_id=body.space_id, resource_kind=body.resource_kind or "genie_space",
+                resource_id=body.target_id, resource_kind=body.kind,
                 resource_title=body.resource_title, requester_email=requester_email,
                 branch=result.get("branch", ""),
                 current_phase="open", live_status=None,
@@ -605,10 +688,10 @@ def promote(
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
-            body.space_id, user_token=token, requester_email=x_forwarded_email,
+            body.target_id, user_token=token, requester_email=x_forwarded_email,
             resource_title=body.resource_title, audience_spec_=audience, rule_overrides=overrides,
             ka_endpoints=ka_endpoints, persona_template=persona_template,
-            table_mapping=body.table_mapping),
+            table_mapping=body.table_mapping, kind=body.kind),
     )
     store = getattr(app.state, "store", None)
     # No PR means either a pre-Change-Request content blocker or an already-identical no-op. The
@@ -620,7 +703,9 @@ def promote(
 
 @api.get("/promote/preview")
 def promote_preview(
-    space_id: str,
+    space_id: str = "",
+    resource_id: str = "",
+    kind: str = "genie_space",
     x_forwarded_access_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
@@ -634,14 +719,23 @@ def promote_preview(
     token = _user_token(x_forwarded_access_token, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="user token required (OBO)")
+    # `resource_id` is canonical; `space_id` is the retained deprecated alias.
+    target = resource_id or space_id
+    if not target:
+        raise HTTPException(status_code=400, detail="resource_id é obrigatório")
+    try:
+        resolved_kind = resource_kind_mod.get(kind).kind
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     def _run() -> dict:
-        return app_logic.preview_promotion(space_id, user_token=token)
+        return app_logic.preview_promotion(target, user_token=token, kind=resolved_kind)
 
     return _engine_call("promote_preview", _run)
 
 
-def _with_prod_space_id(status: dict | None, resource_title: str | None) -> dict | None:
+def _with_prod_space_id(status: dict | None, resource_title: str | None,
+                        resource_kind: str | None = None) -> dict | None:
     """W3: once a promotion has reached `deployed`, embed the resolved PROD Genie Space id so the
     SPA can render an "Abrir Genie em produção" deep-link. The promotion's own `resource_id` is the
     DEV Space id (a Promotion's identity is the Space AUTHORED in dev — Genie mints a brand-new id
@@ -660,11 +754,23 @@ def _with_prod_space_id(status: dict | None, resource_title: str | None) -> dict
     if not status or status.get("phase") != "deployed" or not resource_title:
         return status
     try:
-        matches = [s["space_id"] for s in app_logic.list_prod_spaces() if s.get("title") == resource_title]
+        kind = resource_kind_mod.get(resource_kind)
+        if kind.kind == resource_kind_mod.GENIE_SPACE:
+            # Deliberately still via `list_prod_spaces`: it IS the Genie listing, and keeping this
+            # call site unchanged means the Genie deep-link path is byte-identical to before the seam.
+            matches = [s["space_id"] for s in app_logic.list_prod_spaces()
+                       if s.get("title") == resource_title]
+        else:
+            matches = [r["resource_id"] for r in app_logic.list_prod_resources(kind.kind)
+                       if r.get("title") == resource_title]
     except Exception:  # noqa: BLE001 — a best-effort deep-link must never break the status read
-        matches = []
+        kind, matches = resource_kind_mod.GENIE_SPACE_KIND, []
     if len(matches) == 1:
-        status = {**status, "prod_space_id": matches[0]}
+        # `prod_resource_id` is the kind-neutral field; `prod_space_id` is kept as an alias for Genie
+        # so the SPA's existing "Abrir Genie em produção" deep link keeps working untouched.
+        status = {**status, "prod_resource_id": matches[0], "prod_resource_kind": kind.kind}
+        if kind.kind == resource_kind_mod.GENIE_SPACE:
+            status["prod_space_id"] = matches[0]
     return status
 
 
@@ -698,7 +804,11 @@ def promote_status(number: int, include_deployment_evidence: bool = False) -> di
             reconcile_mod.reconcile(store, promotion, status, app_logic.github_app_factory)
         except Exception:  # noqa: BLE001 — a reconcile hiccup must not break the status read
             logger.exception("reconcile failed for PR #%s", number)
-    return _with_prod_space_id(status, promotion.resource_title if promotion is not None else None)
+    return _with_prod_space_id(
+        status,
+        promotion.resource_title if promotion is not None else None,
+        promotion.resource_kind if promotion is not None else None,
+    )
 
 
 # --- A3/F1: prod->dev rehydrate (one-click reseed, no git PR) ---------------
@@ -945,7 +1055,7 @@ def get_promotion(
         # W3: re-resolved here too (not just the live poll) — the cache may predate this field, or
         # this promotion may never be polled again once terminal, so the deep-link is enriched at
         # READ time, not baked in only at the moment it was cached.
-        "live_status": _with_prod_space_id(p.live_status, p.resource_title),
+        "live_status": _with_prod_space_id(p.live_status, p.resource_title, p.resource_kind),
         "audit": [_audit_event(e) for e in store.list_audit_events(promotion_id)],
     }
 

@@ -9,8 +9,8 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com', is_admin: false } }),
   );
-  await page.route('**/api/spaces', (r) =>
-    r.fulfill({ json: { spaces: [{ space_id: 'sp1', title: 'Recebíveis' }] } }),
+  await page.route('**/api/resources', (r) =>
+    r.fulfill({ json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } }),
   );
   // Empty so recover-on-load is a no-op and the merged espaços page shows its empty-history state.
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));

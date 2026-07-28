@@ -67,7 +67,7 @@
     promotion.select(resource);
   }
 
-  // A space is picked but not yet requested — the grid locks (only "← Escolher outro espaço" in the
+  // A space is picked but not yet requested — the grid locks (only "← Escolher outro recurso" in the
   // confirmation panel can change the selection) while that step is on screen.
   const confirming = $derived(!!promotion.resource && promotion.phase === 'idle');
 
@@ -174,7 +174,7 @@
     <div class="process-head__intro">
       <p class="process-head__eyebrow">Fluxo governado · Dev → Prod</p>
       <h1>Preparar promoção</h1>
-      <p>Escolha o Space; o app prepara um rascunho com revisão automática. O Responsável Técnico revisa e promove no GitHub.</p>
+      <p>Escolha o recurso (Genie Space ou Painel AI/BI); o app prepara um rascunho com revisão automática. O Responsável Técnico revisa e promove no GitHub.</p>
     </div>
     <FlowSteps />
   </header>
@@ -193,8 +193,8 @@
     <div class="toolbar">
       <label class="toolbar__search">
         <span aria-hidden="true">⌕</span>
-        <span class="visually-hidden">Buscar Space</span>
-        <input bind:value={searchQuery} placeholder="Buscar por nome do Space" />
+        <span class="visually-hidden">Buscar recurso</span>
+        <input bind:value={searchQuery} placeholder="Buscar por nome" />
       </label>
       <label class="toolbar__status">
         <span class="visually-hidden">Filtrar por status</span>
@@ -204,7 +204,7 @@
           {/each}
         </select>
       </label>
-      <span class="toolbar__count"><strong>{resources.length}</strong> Spaces disponíveis em Dev</span>
+      <span class="toolbar__count"><strong>{resources.length}</strong> recursos disponíveis em Dev</span>
       {#if who?.is_admin}
         <div class="toolbar__scope" role="group" aria-label="Escopo do histórico">
           <Button variant={scope === 'mine' ? 'primary' : 'outline'} onclick={() => setScope('mine')}>Minhas</Button>
@@ -215,16 +215,16 @@
 
     {#if resources.length === 0 && allGroups.length === 0 && !who?.is_admin}
       <div class="empty">
-        <p class="empty__title">Nenhum Genie Space encontrado</p>
-        <p class="muted text-sm">Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção.</p>
+        <p class="empty__title">Nenhum recurso encontrado</p>
+        <p class="muted text-sm">Crie um Genie Space ou um Painel AI/BI no workspace de dev — depois ele aparece aqui para promoção.</p>
       </div>
     {:else}
       <div class="workspace">
-        <section class="space-list" aria-label="Spaces disponíveis">
+        <section class="space-list" aria-label="Recursos disponíveis">
           {#if shownGroups.length === 0}
             <div class="empty">
-              <p class="empty__title">Nenhum Genie Space encontrado</p>
-              <p class="muted text-sm">Nenhum espaço corresponde à busca e ao status selecionados.</p>
+              <p class="empty__title">Nenhum recurso encontrado</p>
+              <p class="muted text-sm">Nenhum recurso corresponde à busca e ao status selecionados.</p>
             </div>
           {:else}
             {#each shownGroups as group (group.resource.id)}
@@ -271,7 +271,7 @@
           {:else}
             <div class="working-panel__empty">
               <span aria-hidden="true">↖</span>
-              <h2>Escolha um Space</h2>
+              <h2>Escolha um recurso</h2>
               <p>O título, o público, as tabelas e o histórico aparecerão aqui sem tirar você do contexto.</p>
             </div>
           {/if}
@@ -282,7 +282,7 @@
     <div class="error-state" role="alert">
       <span class="error">
         {#if isAuthError(err)}Sessão expirada — recarregue a página para reautenticar.
-        {:else}Não foi possível listar os espaços: {err instanceof Error ? err.message : String(err)}{/if}
+        {:else}Não foi possível listar os recursos: {err instanceof Error ? err.message : String(err)}{/if}
       </span>
       {#if isAuthError(err)}<Button variant="outline" onclick={() => location.reload()}>Recarregar</Button>
       {:else}<Button variant="outline" onclick={reload}>Tentar novamente</Button>{/if}

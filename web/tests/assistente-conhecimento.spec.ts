@@ -8,8 +8,8 @@ function routes(page, { isAdmin = true } = {}) {
     r.fulfill({ json: { email: 'admin@databricks.com', steward: null, is_admin: isAdmin } }));
   page.route('**/api/admin/serving-endpoints', (r) =>
     r.fulfill({ json: { endpoints: [{ name: 'ka-handbook' }, { name: 'databricks-claude-opus-4-8' }] } }));
-  page.route('**/api/spaces', (r) =>
-    r.fulfill({ json: { spaces: [{ space_id: 's1', title: 'Recebíveis' }] } }));
+  page.route('**/api/resources', (r) =>
+    r.fulfill({ json: { resources: [{ id: 's1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }] } }));
   page.route('**/api/admin/roles', (r) => r.fulfill({ json: { roles: [], bootstrap_env: { admins: [], stewards: [] } } }));
   page.route('**/api/admin/drift', (r) => r.fulfill({ json: { has_drift: false, has_unknown: false, findings: [] } }));
   page.route('**/api/admin/rules', (r) => r.fulfill({ json: { effective: [], overrides: [], hardcoded: [] } }));

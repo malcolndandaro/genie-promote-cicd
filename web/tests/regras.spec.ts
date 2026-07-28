@@ -19,7 +19,7 @@ function mockAdminScreen(page: import('@playwright/test').Page, overridesInit: R
   page.route('**/api/whoami', (r) =>
     r.fulfill({ json: { email: 'admin@databricks.com', steward: 'pedro@databricks.com', is_admin: true } }),
   );
-  page.route('**/api/spaces', (r) => r.fulfill({ json: { spaces: [] } }));
+  page.route('**/api/resources', (r) => r.fulfill({ json: { resources: [] } }));
   page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   page.route('**/api/admin/roles', (r) =>
     r.fulfill({ json: { roles: [], bootstrap_env: { admins: ['admin@databricks.com'], stewards: [] } } }),

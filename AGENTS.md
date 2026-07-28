@@ -12,7 +12,8 @@ Use o código e a documentação locais do repositório como fonte de verdade.
 
 ## Entenda o produto antes de mudá-lo
 
-O Genie Promote é um caminho de entrega governado para Genie Spaces do Databricks. O **Autor** trabalha
+O Genie Promote é um caminho de entrega governado para recursos do Databricks — hoje **Genie Spaces** e
+**painéis AI/BI (Lakeview)**. O **Autor** trabalha
 em um workspace de DEV e clica em **"Preparar promoção"** no app (hospedado em PROD). O app, via service
 principal (SP), abre um **PR em rascunho** no repositório de conteúdo, onde os checks de CI rodam como
 um dry-run do Autor. O **Responsável Técnico** revisa o rascunho no GitHub, marca como pronto (*ready*)
@@ -47,7 +48,9 @@ Este é o **repositório do engine**. Ele é dono de:
 O **repositório de conteúdo** que o acompanha é dono de:
 
 - Genie Spaces serializados e seus sidecars de título, audiência e mapeamento;
-- conteúdo opcional de dashboards e setup;
+- painéis AI/BI (`.lvdash.json`) e seus sidecars (mesmo contrato: `.title` obrigatório e não vazio,
+  `.audience.json` obrigatório, `.mapping.json` opcional, `.revision.json`);
+- conteúdo opcional de setup;
 - o `engine.lock` e os workflows de promoção, checks e deploy.
 
 Coloque cada mudança no repositório que é dono dela. Não adicione conteúdo promovido ao repositório do
@@ -121,6 +124,37 @@ fixe o commit exato e revisado do engine no `engine.lock` do repositório de con
 - A configuração dos workflows deve falhar fechada (*fail closed*). Credenciais ausentes, IDs de Space
   não resolvidos ou inputs obrigatórios faltando devem fazer um job obrigatório falhar — nunca pular
   nem retornar um sucesso consultivo.
+
+## Tipos de recurso (o *kind seam*)
+
+O pipeline é agnóstico ao tipo de recurso. Tudo que varia entre um Genie Space e um painel AI/BI é um
+valor em `genie_reviewer/resource_kind.py` (diretórios, sufixo do artefato, prefixo de slug, tipo de
+objeto de permissão, entity type de tag, nível de audiência, `has_benchmarks`). As chamadas ao SDK que
+variam ficam em `genie_reviewer/workspace_resource.py`. Para adicionar um terceiro tipo: uma entrada no
+registry + seus adaptadores — **não** novos ramos espalhados por `app_logic`/`render.sh`/`deploy_attempt`.
+
+Regras que não são óbvias e já custaram caro:
+
+- **O scan de catálogo de um painel é ESTRUTURAL, não textual.** ENV-01 varre apenas
+  `datasets[].queryLines` (`pre_render.dashboard_sql_text`). Uma varredura do documento inteiro dá
+  falso positivo: um link markdown fez a gramática de referência de 3 partes casar `en.wikipedia.org` e
+  reportar o catálogo `en` como BLOCKER. Um catálogo citado em **prosa** é reescrito pelo rebind e
+  reportado como DASH-04 **consultivo** — prosa não é caminho de dados, nenhuma query roda de um widget
+  de texto.
+- **Um painel não tem benchmarks.** EVAL-01/eval-run não se aplicam e não devem ser degradados para
+  "advisory": o piso de qualidade é DASH-01..04 (estrutural, offline) + `check_dashboard_sql.py`
+  (`EXPLAIN` de cada dataset contra o warehouse de PRODUÇÃO).
+- **Valores da plataforma verificados ao vivo** (ADR-0007: um exemplo genérico de DABs não é evidência):
+  tipo de objeto de permissão `dashboards` (plural — o singular é rejeitado, e `dbsql-dashboards` é
+  outro objeto); entity type de tag `dashboards`; níveis `CAN_READ`/`CAN_RUN`/`CAN_EDIT`/`CAN_MANAGE`.
+- **`.title` é obrigatório e não vazio para os dois tipos** — vira `display_name` e é a única chave de
+  resolução do id no deploy (`bundle summary` não devolve id de Space nem de painel). Falta de título
+  falha no render, nunca no meio da mutação.
+- **Os nomes dos estágios de deploy são contrato persistido** (`deployment_attempts.completed_stages`).
+  Um novo tipo de recurso **itera dentro** dos estágios; não acrescenta estágio.
+- **Publicação de painel usa `embed_credentials=false`.** O painel publicado roda como quem o abre, então
+  o consumidor continua precisando do próprio SELECT no Unity Catalog. Mudar isso transformaria o
+  pipeline em mecanismo de acesso a dados — exatamente o que a ADR-0009 retirou.
 
 ## Dono da documentação
 
