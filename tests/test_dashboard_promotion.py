@@ -158,6 +158,72 @@ def test_dev_catalog_in_dataset_sql_still_blocks_after_rebind_is_skipped():
     assert "sbx_recebiveis" in pre_render.find_violations(scanned, "prod", "recebiveis")
 
 
+def test_foreign_catalog_hidden_in_a_dataset_parameter_default_still_blocks():
+    """REGRESSION: a dataset PARAMETER default is free text that reaches the engine via
+    `IDENTIFIER(:param)`, so a foreign catalog placed there must not escape ENV-01.
+
+    This is why the scan is a DENYLIST of prose rather than an allowlist of known query fields: the
+    first implementation concatenated only `datasets[].queryLines` and this evasion passed clean.
+    """
+    doc = json.loads(json.dumps(DASHBOARD))
+    doc["datasets"][0]["queryLines"] = ["SELECT * FROM IDENTIFIER(:`Tbl`)"]
+    doc["datasets"][0]["parameters"] = [{
+        "displayName": "Tbl", "keyword": "Tbl", "dataType": "STRING",
+        "defaultSelection": {"values": {"dataType": "STRING", "values": [
+            {"value": "sbx_recebiveis.diamond.segredos"}]}},
+    }]
+    scanned = pre_render.scan_text(json.dumps(doc), sql_only=True)
+    assert "sbx_recebiveis" in pre_render.find_violations(scanned, "prod", "recebiveis")
+
+
+def test_a_dataset_referencing_a_uc_table_via_asset_name_is_still_gated():
+    """A dataset can reference a Unity Catalog table/metric view through `asset_name` with NO SQL at
+    all. Such a dataset is parseable (so DASH-03 does not catch it) and carries no `queryLines`, so an
+    allowlist-of-query-fields scan would let its catalog reference through untouched — while the
+    whole-document rebind still retargets it. The denylist catches it for both ENV-01 and AUDIENCE-01.
+    """
+    doc = {
+        "datasets": [
+            {"name": "ds_asset", "asset_name": "sbx_recebiveis.diamond.segredos", "format": "AUTO"},
+            {"name": "ds_camel", "assetName": "dev_recebiveis.diamond.fato_recebiveis"},
+        ],
+        "pages": [{"name": "p", "layout": [
+            {"widget": {"name": "w", "queries": [{"query": {"datasetName": "ds_asset"}}]}}]}],
+    }
+    scanned = pre_render.scan_text(json.dumps(doc), sql_only=True)
+    violations = pre_render.find_violations(scanned, "prod", "recebiveis")
+    assert "sbx_recebiveis" in violations and "dev_recebiveis" in violations
+    # AUDIENCE-01 must also see them, or it would validate an empty table set.
+    assert set(audience_check.dashboard_tables(doc)) == {
+        "sbx_recebiveis.diamond.segredos", "dev_recebiveis.diamond.fato_recebiveis"}
+
+
+def test_an_unrecognized_query_carrying_field_is_scanned_by_default():
+    """The denylist must fail in the SAFE direction: a field this code has never seen (a future
+    `.lvdash.json` schema addition) is scanned, not silently exempt."""
+    doc = json.loads(json.dumps(DASHBOARD))
+    doc["datasets"][0]["someFutureQueryField"] = "SELECT 1 FROM sbx_recebiveis.diamond.f"
+    scanned = pre_render.scan_text(json.dumps(doc), sql_only=True)
+    assert "sbx_recebiveis" in pre_render.find_violations(scanned, "prod", "recebiveis")
+
+
+def test_an_unparseable_document_is_scanned_whole_rather_than_skipped():
+    """Fail closed: if the document cannot be parsed we must scan the raw text, never return an empty
+    scan that reports zero violations."""
+    scanned = pre_render.scan_text("{not valid json sbx_recebiveis.diamond.f", sql_only=True)
+    assert "sbx_recebiveis" in pre_render.find_violations(scanned, "prod", "recebiveis")
+
+
+def test_only_text_widget_prose_is_exempt_from_the_scan():
+    """The exemption must be exactly the prose construct — nothing more."""
+    doc = json.loads(json.dumps(DASHBOARD))
+    scanned = pre_render.scan_text(json.dumps(doc), sql_only=True)
+    # The markdown widget's URL host is gone from the scanned text...
+    assert "wikipedia" not in scanned
+    # ...while the dataset query it sits beside is still present.
+    assert "fato_recebiveis" in scanned
+
+
 def test_prose_catalog_is_rebound_and_reported_as_advisory_never_blocking():
     """A dev catalog written in PROSE is a documentation defect, not a data leak — no query runs from
     a text widget. It must be rebound by the whole-document rebind and surface as advisory DASH-04."""
@@ -298,6 +364,50 @@ def test_dashboard_export_denies_before_using_the_service_principal_reach(monkey
     else:
         raise AssertionError("a denied caller must not get an export")
     assert exported == [], "the export ran despite the guard denying"
+
+
+def _acl_with(levels):
+    """A transport whose ACL grants `levels` to ana@x.com."""
+    return NS(permissions=NS(get=lambda **kw: NS(access_control_list=[NS(
+        user_name="ana@x.com", group_name=None, service_principal_name=None,
+        all_permissions=[NS(permission_level=lv) for lv in levels])])))
+
+
+def _can_access(levels, object_type):
+    identity = authz.VerifiedIdentity("ana@x.com", frozenset())
+    try:
+        authz.assert_can_access(identity, "r1", transport=_acl_with(levels),
+                                object_type=object_type)
+        return True
+    except authz.AccessDenied:
+        return False
+
+
+def test_can_read_is_sufficient_for_a_dashboard_but_not_for_a_genie_space():
+    """REGRESSION: the sufficient-level set must be PER OBJECT TYPE.
+
+    `CAN_READ` IS assignable on object type `genie` (verified live), so a single shared set would
+    admit a Genie caller holding only CAN_READ — someone this guard denied before dashboards existed.
+    A dashboard genuinely needs CAN_READ (it is the level the app manages for a dashboard audience);
+    a Genie Space must not.
+    """
+    assert _can_access(["CAN_READ"], "dashboards") is True
+    assert _can_access(["CAN_READ"], "genie") is False
+
+
+def test_genie_sufficient_levels_are_unchanged_by_adding_a_resource_kind():
+    """The acceptance bar for the whole kind seam: Genie authorization decisions are identical to
+    before. These are exactly the levels the pre-seam flat set contained."""
+    for level in ("CAN_RUN", "CAN_EDIT", "CAN_MANAGE", "IS_OWNER"):
+        assert _can_access([level], "genie") is True, level
+    for level in ("CAN_READ", "CAN_VIEW_METADATA", ""):
+        assert _can_access([level], "genie") is False, level
+
+
+def test_an_unknown_object_type_falls_back_to_the_narrowest_level_set():
+    """A typo'd or future object type must never accidentally grant more than the strictest kind."""
+    assert _can_access(["CAN_READ"], "something_new_and_unknown") is False
+    assert _can_access(["CAN_RUN"], "something_new_and_unknown") is True
 
 
 def test_access_check_failure_denies_rather_than_allowing(monkeypatch):

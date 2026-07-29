@@ -49,18 +49,36 @@ GENIE_OBJECT_TYPE = "genie"
 # by the API, and `dbsql-dashboards` is a DIFFERENT object type (legacy Redash) this app never touches.
 DASHBOARD_OBJECT_TYPE = "dashboards"
 
-# Any of these permission levels means "may use the resource" for our purposes (read-export or
-# write-overwrite are both gated the same way today — the guard answers "can this identity touch
-# this resource at all", not which specific action). CAN_MANAGE/IS_OWNER/CAN_EDIT are the levels Genie
-# actually issues; CAN_RUN is the audience level this app manages for a Space.
+# Which permission levels mean "may use the resource" — PER OBJECT TYPE, deliberately not one shared
+# set. The guard answers "can this identity touch this resource at all", not which specific action.
 #
-# CAN_READ is included for AI/BI dashboards: it is the dashboard audience level this app manages
-# (`resource_kind.DASHBOARD_KIND.audience_level`) and the least level that lets someone open a
-# published dashboard. Genie has no CAN_READ-equivalent below CAN_RUN, so adding it here widens
-# nothing for Spaces — Genie's own levels are only CAN_RUN/CAN_EDIT/CAN_MANAGE.
-_ACCESS_LEVELS = frozenset({
-    "IS_OWNER", "CAN_MANAGE", "CAN_EDIT", "CAN_RUN", "CAN_READ",
-})
+# The per-kind split is load-bearing, not tidiness. `CAN_READ` IS assignable on object type `genie`
+# (verified live: `GET /api/2.0/permissions/genie/<id>/permissionLevels` returns
+# CAN_READ/CAN_RUN/CAN_EDIT/CAN_MANAGE), so putting it in a single shared set would ADMIT a Genie
+# caller who holds only CAN_READ — someone this guard denied before dashboards existed. A dashboard
+# genuinely needs CAN_READ (it is the level this app manages for a dashboard audience,
+# `resource_kind.DASHBOARD_KIND.audience_level`); a Genie Space does not. Widening one kind must never
+# silently widen the other.
+_GENIE_ACCESS_LEVELS = frozenset({"IS_OWNER", "CAN_MANAGE", "CAN_EDIT", "CAN_RUN"})
+_DASHBOARD_ACCESS_LEVELS = _GENIE_ACCESS_LEVELS | {"CAN_READ"}
+
+_ACCESS_LEVELS_BY_OBJECT_TYPE = {
+    GENIE_OBJECT_TYPE: _GENIE_ACCESS_LEVELS,
+    DASHBOARD_OBJECT_TYPE: _DASHBOARD_ACCESS_LEVELS,
+}
+
+# Back-compat alias for any caller/test that referenced the old flat set. Kept as GENIE's set so a
+# stale reference cannot accidentally be the WIDER one (fail closed on a naming mistake).
+_ACCESS_LEVELS = _GENIE_ACCESS_LEVELS
+
+
+def _access_levels_for(object_type: str) -> frozenset:
+    """The sufficient levels for one permissions object type.
+
+    An UNKNOWN object type falls back to the narrowest set (Genie's) rather than the widest — a typo
+    or a future object type must never accidentally grant more than the strictest kind allows.
+    """
+    return _ACCESS_LEVELS_BY_OBJECT_TYPE.get(object_type, _GENIE_ACCESS_LEVELS)
 
 
 class AccessDenied(Exception):
@@ -123,11 +141,17 @@ def _principal_names(entry) -> set[str]:
     return names
 
 
-def _grants_access(entry) -> bool:
+def _grants_access(entry, object_type: str = GENIE_OBJECT_TYPE) -> bool:
+    """Whether one ACL entry grants a level sufficient to use a resource of ``object_type``.
+
+    The sufficient set is per object type (see `_access_levels_for`) — a dashboard's CAN_READ must not
+    become sufficient for a Genie Space.
+    """
+    sufficient = _access_levels_for(object_type)
     for perm in (getattr(entry, "all_permissions", None) or []):
         level = getattr(perm, "permission_level", None)
         level_name = getattr(level, "value", level)  # enum -> str, or already a str
-        if level_name in _ACCESS_LEVELS:
+        if level_name in sufficient:
             return True
     return False
 
@@ -177,7 +201,7 @@ def assert_can_access(identity: VerifiedIdentity, space_id: str, *, transport: W
     acl = perms.access_control_list or []
     caller_names = {identity.user_name} | set(identity.group_names)
     for entry in acl:
-        if _principal_names(entry) & caller_names and _grants_access(entry):
+        if _principal_names(entry) & caller_names and _grants_access(entry, object_type):
             return  # explicit grant found for the user themself or one of their verified groups
 
     logger.info("assert_can_access: identity=%s denied on space=%s (no matching ACL grant)",

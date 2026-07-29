@@ -61,51 +61,63 @@ def find_refs(serialized: str) -> list[str]:
 
 
 def dashboard_sql_text(doc: "dict | str") -> str:
-    """Concatenate ONLY the data-carrying SQL of an AI/BI dashboard (`datasets[].queryLines`).
+    """Every part of an AI/BI dashboard that is NOT prose — i.e. everything ENV-01 must still gate.
 
-    This exists because the deterministic catalog allowlist must be STRUCTURAL for a dashboard, not
-    textual. `_REF3` is a whole-document regex, and a dashboard document legitimately contains prose:
-    probed against a real dev dashboard, `find_violations` over the raw file matched
-    **`en.wikipedia.org`** (from a markdown link in a `multilineTextboxSpec` widget) and reported
-    catalog `en` as a foreign-catalog ENV-01 BLOCKER. That is a false positive: a text widget is not
-    a data-access path — no query runs from it.
+    The deterministic catalog allowlist must be STRUCTURAL for a dashboard, not textual. `_REF3` is a
+    whole-document regex, and a dashboard legitimately contains prose: probed against a real dev
+    dashboard, `find_violations` over the raw file matched **`en.wikipedia.org`** (a markdown link in a
+    `multilineTextboxSpec` widget) and reported catalog `en` as a foreign-catalog ENV-01 BLOCKER — a
+    false positive, since no query runs from a text widget.
 
-    A dashboard's ONLY data-access path is a dataset's query, so scanning exactly that text keeps
-    ENV-01 strict where it matters (a `dev_`/`sbx_`/cross-domain catalog inside a dataset query is
-    still caught, including one buried mid-query) while it stops blocking on documentation.
+    IMPLEMENTED AS A DENYLIST OF PROSE, NOT AN ALLOWLIST OF QUERY FIELDS. The first version of this
+    function concatenated only `datasets[].queryLines`, which was a real hole: a dataset's
+    `parameters[].defaultSelection.values.values[].value` is FREE TEXT that reaches the query engine
+    via `IDENTIFIER(:param)` (verified live — `EXPLAIN SELECT * FROM IDENTIFIER('samples.nyctaxi.trips')`
+    resolves the foreign catalog), so a dev/foreign catalog placed there passed ENV-01 untouched. An
+    allowlist of known query fields keeps leaking as the `.lvdash.json` schema grows; a denylist of the
+    one construct that is genuinely non-data (text/markdown widgets) fails in the SAFE direction —
+    an unrecognized new field is scanned by default.
 
-    The converse case is handled separately and deliberately: a catalog name written in a text
-    widget's PROSE (the same probe found a heading reading
+    So: strip every `*TextboxSpec` subtree, then return the rest of the document as text. A
+    `dev_`/`sbx_`/cross-domain catalog anywhere that can influence a query — dataset SQL, a parameter
+    default, a widget-level override, any field added by a future schema version — is still caught.
+
+    A catalog name in a text widget's PROSE (the same probe found a heading reading
     `# cerc_mlops_dev_catalog.inference.inference_scores Monitoring`) is still REBOUND by the
     whole-document `rebind`, so the promoted dashboard reads correctly in prod, and is reported as an
-    advisory DASH-04 finding by `dashboard_check` — never as a BLOCKER.
+    advisory DASH-04 finding by `dashboard_check` — never a BLOCKER.
 
-    Accepts either a parsed dict or a raw JSON string. A shape this doesn't recognize yields '' —
-    which is the safe direction here: an empty scan finds no violations, and a dashboard with no
-    parseable datasets is independently caught as a DASH-03 structural BLOCKER.
+    Accepts a parsed dict or a raw JSON string. An UNPARSEABLE string is returned VERBATIM so it is
+    still scanned (fail closed) rather than silently yielding an empty scan.
     """
     if isinstance(doc, str):
         try:
-            doc = json.loads(doc)
+            parsed = json.loads(doc)
         except (ValueError, TypeError):
-            return ""
+            # Cannot understand the document -> scan it whole rather than scan nothing.
+            return doc
+        doc = parsed
     if not isinstance(doc, dict):
-        return ""
-    parts: list[str] = []
-    for dataset in doc.get("datasets") or []:
-        if not isinstance(dataset, dict):
-            continue
-        lines = dataset.get("queryLines")
-        if isinstance(lines, list):
-            parts.append("".join(str(line) for line in lines))
-        elif isinstance(lines, str):
-            parts.append(lines)
-        # Some exports carry a single `query` string instead of `queryLines`; include it so a
-        # foreign-catalog ref there is still gated rather than silently unscanned.
-        query = dataset.get("query")
-        if isinstance(query, str):
-            parts.append(query)
-    return "\n".join(parts)
+        return json.dumps(doc, ensure_ascii=False) if doc is not None else ""
+    return json.dumps(_strip_prose(doc), ensure_ascii=False)
+
+
+def _is_prose_key(key: object) -> bool:
+    """Whether a dict key holds a text/markdown widget spec (the one genuinely non-data construct).
+
+    Matches any `*TextboxSpec` (real exports use `multilineTextboxSpec`) so a renamed or additional
+    text widget type is still treated as prose.
+    """
+    return isinstance(key, str) and key.endswith("TextboxSpec")
+
+
+def _strip_prose(node):
+    """Deep-copy ``node`` with every text/markdown widget spec removed."""
+    if isinstance(node, dict):
+        return {k: _strip_prose(v) for k, v in node.items() if not _is_prose_key(k)}
+    if isinstance(node, list):
+        return [_strip_prose(item) for item in node]
+    return node
 
 
 def dashboard_prose_text(doc: "dict | str") -> str:
@@ -155,6 +167,35 @@ def scan_text(serialized: str, *, sql_only: bool) -> str:
     a registry fact rather than a branch at each call site.
     """
     return dashboard_sql_text(serialized) if sql_only else serialized
+
+
+def yaml_scalar(value: str) -> str:
+    """Quote an arbitrary string as a SAFE single-line YAML double-quoted scalar.
+
+    `render.sh` builds the generated bundle resources as text, and a resource's `display_name`/`title`
+    comes from an author-supplied `.title` sidecar. Escaping only `"` with `sed` was exploitable: a
+    title could close the quote and inject a SIBLING KEY into the resource. Confirmed reachable —
+    a crafted title produced `embed_credentials: true` in the resolved bundle, which would publish a
+    dashboard with the publisher's credentials embedded and turn promotion into data access (exactly
+    what ADR-0009 retired). A bare trailing backslash could also make the YAML unparseable.
+
+    So the sidecar text is never interpolated raw: every control character and every YAML-significant
+    character is escaped here, and newlines are collapsed, guaranteeing a single scalar on one line
+    that cannot terminate early.
+    """
+    out = []
+    for ch in value:
+        if ch in ("\n", "\r", "\t"):
+            out.append(" ")          # collapse to a space: a display name is single-line by nature
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(" ")          # drop other control characters entirely
+        else:
+            out.append(ch)
+    return '"' + "".join(out).strip() + '"'
 
 
 def _ref_pattern(ref: str) -> "re.Pattern[str]":
@@ -228,6 +269,10 @@ def main(argv: "list[str] | None" = None) -> int:
     m.add_argument("--to", dest="to_env", required=True)
     m.add_argument("--domain", required=True)
 
+    y = sub.add_parser("yaml-scalar",
+                       help="quote a sidecar's text as a safe single-line YAML scalar (render.sh)")
+    y.add_argument("infile", help="the sidecar file whose contents to quote")
+
     c = sub.add_parser("check", help="fail if any catalog ref isn't <to>_<domain>")
     c.add_argument("infile")
     c.add_argument("--to", dest="to_env", required=True)
@@ -248,6 +293,13 @@ def main(argv: "list[str] | None" = None) -> int:
             print(f"ERROR: post-render leaks remain: {leaks}", file=sys.stderr)
             return 2
         print(f"rendered {a.infile} -> {a.out} ({a.from_env}_{a.domain} -> {a.to_env}_{a.domain})")
+        return 0
+    if a.cmd == "yaml-scalar":
+        text = open(a.infile, encoding="utf-8").read()
+        if not text.strip():
+            print(f"ERROR: {a.infile} is empty — a display name is required", file=sys.stderr)
+            return 2
+        print(yaml_scalar(text))
         return 0
     if a.cmd == "apply-mapping":
         mapping = json.load(open(a.mapping, encoding="utf-8"))

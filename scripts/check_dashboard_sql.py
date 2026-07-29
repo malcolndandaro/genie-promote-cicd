@@ -43,6 +43,56 @@ from workflow_support import gh_escape  # noqa: E402
 # because the parameter's declared value lives in the dashboard's own `parameters` block, not in SQL.
 _PARAM_HINTS = (":`", ":")
 
+# A plan that begins with this is an analysis failure even though the STATEMENT succeeded — EXPLAIN
+# reports planning errors in its output rather than as a statement error. Matching the prefix (instead
+# of allowlisting individual error codes like TABLE_OR_VIEW_NOT_FOUND) is what makes a missing COLUMN,
+# a type mismatch, an ambiguous reference and every other planning failure fail the gate: allowlisting
+# codes meant `UNRESOLVED_COLUMN` passed green, which is exactly the dev/prod drift this gate exists
+# to catch.
+_PLAN_ERROR_PREFIX = "Error occurred during query planning"
+_PLAN_ERROR_TOKENS = ("AnalysisException", "TABLE_OR_VIEW_NOT_FOUND", "UNRESOLVED_COLUMN")
+
+
+def _strip_sql_noise(sql: str) -> str:
+    """Remove comments and string literals so parameter detection reads only real SQL.
+
+    Without this, `-- :x` appended to ANY query made `_is_parameterized` true and the dataset was
+    skipped — a one-character bypass of the whole gate. Deliberately simple: this is a heuristic for
+    deciding "does this query interpolate a dashboard parameter", not a SQL parser.
+    """
+    out = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+        if ch == "-" and nxt == "-":                     # line comment
+            i = sql.find("\n", i)
+            if i < 0:
+                break
+            continue
+        if ch == "/" and nxt == "*":                      # block comment
+            end = sql.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if ch in ("'", '"'):                              # string literal
+            # A parameter marker can be a QUOTED name (`:`Time Window Start``), so a preceding `:`
+            # must survive the strip — otherwise stripping the quotes destroys the very marker this
+            # function exists to find. Emit the `:` and drop only the quoted body.
+            prev = out[-1] if out else ""
+            end = sql.find(ch, i + 1)
+            i = n if end < 0 else end + 1
+            out.append("x" if prev == ":" else " ")         # ':' + name -> still reads as a parameter
+            continue
+        if ch == "`":                                      # quoted identifier — same reasoning
+            prev = out[-1] if out else ""
+            end = sql.find("`", i + 1)
+            i = n if end < 0 else end + 1
+            out.append("x" if prev == ":" else " ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
 
 def _datasets(doc: dict) -> "list[tuple[str, str]]":
     """``(dataset_name, sql)`` for every dataset that carries a query."""
@@ -68,11 +118,11 @@ def _datasets(doc: dict) -> "list[tuple[str, str]]":
 def _is_parameterized(sql: str) -> bool:
     """Whether the query interpolates a dashboard parameter (so it cannot be planned as written).
 
-    Conservative on purpose: a `::` cast (`x::int`) is NOT a parameter, and a bare `:` inside a string
-    literal would be a false positive we accept — over-skipping is visible in the summary, whereas a
-    spurious failure would block a valid dashboard.
+    Comments and string literals are stripped FIRST (`_strip_sql_noise`): scanning them let a trailing
+    `-- :x` mark any query "parameterized" and skip it, which turned an advisory convenience into a
+    one-character bypass of the gate. A `::` cast (`x::int`) is still not a parameter.
     """
-    stripped = sql.replace("::", "")
+    stripped = _strip_sql_noise(sql).replace("::", "")
     return ":`" in stripped or any(
         ch == ":" and nxt.isalpha() for ch, nxt in zip(stripped, stripped[1:]))
 
@@ -141,7 +191,7 @@ def main(argv: "list[str] | None" = None) -> int:
         result = getattr(response, "result", None)
         for row in (getattr(result, "data_array", None) or []):
             plan += " ".join(str(cell) for cell in row)
-        if "AnalysisException" in plan or "TABLE_OR_VIEW_NOT_FOUND" in plan:
+        if plan.lstrip().startswith(_PLAN_ERROR_PREFIX) or any(t in plan for t in _PLAN_ERROR_TOKENS):
             failed.append(name)
             print(f"::error title=DASH-SQL::dataset '{name}' não resolve em produção: "
                   f"{gh_escape(plan[:400])}")
@@ -153,6 +203,16 @@ def main(argv: "list[str] | None" = None) -> int:
     if failed:
         print(f"🔴 DASH-SQL — {len(failed)} dataset(s) inválido(s) em produção "
               f"({', '.join(failed)}). {summary}.")
+        return 1
+    if checked == 0 and skipped:
+        # Every dataset was skipped, so this gate validated NOTHING while reporting success. Reporting
+        # a green check for zero coverage is the fail-open shape this gate must not have: a dashboard
+        # whose every query is parameterized gets no SQL validation at all, and the reviewer needs to
+        # know that rather than read a ✅.
+        print(f"::error title=DASH-SQL::nenhum dataset pôde ser validado — todos os "
+              f"{len(skipped)} usam parâmetros do painel. Sem cobertura de SQL, a promoção não pode "
+              f"ser liberada por este gate.")
+        print(f"🔴 DASH-SQL — cobertura zero ({summary}).")
         return 1
     print(f"✅ DASH-SQL — {summary}.")
     return 0

@@ -43,11 +43,24 @@ MUTATION_STAGES = (
     "certify_space",
     "complete",
 )
-# Levels that count as "this principal can use the resource". CAN_READ is the dashboard audience
-# level (`resource_kind.DASHBOARD_KIND.audience_level`); Genie has no level below CAN_RUN, so
-# including it widens nothing for Spaces.
-_SUFFICIENT = {"CAN_READ", "CAN_RUN", "CAN_EDIT", "CAN_MANAGE", "IS_OWNER"}
+# Levels that count as "this principal can use the resource" — PER KIND, deliberately not one shared
+# set. `CAN_READ` IS assignable on object type `genie` (verified live), so a shared set would make a
+# Genie readback ACCEPT a principal holding only CAN_READ — weaker than before dashboards existed.
+# The readback must hold each kind to the level THAT kind's audience actually derives.
+_GENIE_SUFFICIENT = {"CAN_RUN", "CAN_EDIT", "CAN_MANAGE", "IS_OWNER"}
+_DASHBOARD_SUFFICIENT = _GENIE_SUFFICIENT | {"CAN_READ"}
+_SUFFICIENT_BY_KIND = {
+    resource_kind.GENIE_SPACE: _GENIE_SUFFICIENT,
+    resource_kind.DASHBOARD: _DASHBOARD_SUFFICIENT,
+}
+# Back-compat alias, pinned to the NARROWEST set so a stale reference fails closed.
+_SUFFICIENT = _GENIE_SUFFICIENT
 _TECHNICAL_SUFFICIENT = {"CAN_MANAGE", "IS_OWNER"}
+
+
+def _sufficient_for(kind) -> set:
+    """The levels that satisfy an audience readback for one kind (narrowest set on an unknown kind)."""
+    return _SUFFICIENT_BY_KIND.get(getattr(kind, "kind", kind), _GENIE_SUFFICIENT)
 _EVIDENCE_PREFIX = "DEPLOY_ATTEMPT:"
 _CERTIFICATION_TAG_KEY = "system.certification_status"
 _CERTIFICATION_TAG_VALUE = "certified"
@@ -224,8 +237,21 @@ class ProductionOperations:
         because for a bundle it reads as "delete the managed content".
         """
         out: list[tuple[object, str, Path, Path, Path]] = []
+        seen: dict[str, str] = {}
         for kind in resource_kind.all_kinds():
             for slug, rendered, title, audience in self._artifacts_of(kind):
+                # A slug must identify exactly ONE resource across ALL kinds. `resource_kind.slug_for`
+                # guarantees disjoint namespaces (`s_*`/`d_*`) only for GENERATED slugs — a PINNED
+                # friendly slug carries no prefix, so a collision is reachable via configuration. It
+                # would be silently harmful: `resolve_space` builds one dict keyed by slug (the later
+                # kind wins the id) while `_kind_of` returns the FIRST matching kind, so a stage would
+                # apply Genie's permissions object type / tag entity type to a dashboard's id. Fail
+                # loud instead, exactly as a duplicate live title already does.
+                if slug in seen:
+                    raise ValueError(
+                        f"slug {slug!r} is used by both {seen[slug]} and {kind.kind} artifacts; "
+                        f"slugs must be unique across resource kinds (refusing to guess)")
+                seen[slug] = kind.kind
                 out.append((kind, slug, rendered, title, audience))
         if not out:
             raise ValueError("no rendered promotable artifacts found")
@@ -385,7 +411,8 @@ class ProductionOperations:
             }
             if by_name.get(app_sp) not in _TECHNICAL_SUFFICIENT:
                 raise RuntimeError(f"{slug}: app service principal CAN_MANAGE readback failed")
-            missing = [p.name for p in desired.principals if by_name.get(p.name) not in _SUFFICIENT]
+            sufficient = _sufficient_for(kind)
+            missing = [p.name for p in desired.principals if by_name.get(p.name) not in sufficient]
             if missing:
                 raise RuntimeError(f"{slug}: audience readback failed for {', '.join(missing)}")
 

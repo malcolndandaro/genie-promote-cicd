@@ -155,6 +155,25 @@ def test_an_entirely_empty_content_tree_still_fails_closed(tmp_path):
         raise AssertionError("an empty content tree must fail closed")
 
 
+def test_a_slug_shared_across_kinds_is_refused(tmp_path):
+    """REGRESSION: a slug must identify exactly one resource across ALL kinds.
+
+    Prefixes (`s_*`/`d_*`) only make GENERATED slugs disjoint — a PINNED friendly slug carries none, so
+    a collision is reachable by configuration. It would be silently harmful: `resolve_space` keys one
+    dict by slug (the later kind wins the id) while `_kind_of` returns the FIRST match, so a stage
+    would apply Genie's permissions object type / tag entity type to a dashboard's id.
+    """
+    repo = _build(tmp_path, spaces=(("recebiveis", "Espaço"),),
+                  dashboards=(("recebiveis", "Painel"),))
+    ops, _p, _t = _operations(repo)
+    try:
+        ops._all_artifacts()
+    except ValueError as e:
+        assert "unique across resource kinds" in str(e)
+    else:
+        raise AssertionError("a slug shared by two kinds must fail loud")
+
+
 def test_a_dashboard_without_a_title_sidecar_fails(tmp_path):
     repo = _build(tmp_path)
     (repo / "build" / "dashboards" / "recebiveis.title").unlink()
@@ -198,6 +217,32 @@ def test_verify_live_state_reads_back_through_each_kind_object_type(tmp_path):
     ops.verify_live_state({"receivables": "space-1", "recebiveis": "dash-1"})
     assert ("dashboards", "dash-1") in permissions.gets
     assert ("genie", "space-1") in permissions.gets
+
+
+def test_a_genie_readback_of_can_read_still_fails(tmp_path):
+    """REGRESSION: the audience readback's sufficient set must be PER KIND.
+
+    `CAN_READ` IS assignable on object type `genie` (verified live), so a shared set would make a Genie
+    readback ACCEPT a principal holding only CAN_READ — weaker than before dashboards existed. The
+    dashboard readback must accept it; the Genie one must not.
+    """
+    both_can_read = _Permissions(level_by_object={"genie": "CAN_READ", "dashboards": "CAN_READ"})
+    ops, _p, _t = _operations(_build(tmp_path), permissions=both_can_read)
+    try:
+        ops.verify_live_state({"receivables": "space-1", "recebiveis": "dash-1"})
+    except RuntimeError as e:
+        assert "audience readback failed" in str(e)
+        assert "receivables" in str(e), "the GENIE slug must be the one that fails"
+    else:
+        raise AssertionError("a Genie principal holding only CAN_READ must fail the readback")
+
+
+def test_a_dashboard_readback_of_can_read_passes(tmp_path):
+    """The other half: CAN_READ is exactly what a dashboard audience derives, so it must satisfy."""
+    ops, _p, _t = _operations(
+        _build(tmp_path, spaces=()),
+        permissions=_Permissions(level_by_object={"genie": "CAN_RUN", "dashboards": "CAN_READ"}))
+    ops.verify_live_state({"recebiveis": "dash-1"})  # must not raise
 
 
 def test_verify_live_state_fails_when_the_audience_is_absent(tmp_path):

@@ -29,14 +29,19 @@ def genie_tables(space: dict) -> list[str]:
 
 
 def dashboard_tables(doc: dict) -> list[str]:
-    """The table refs an AI/BI dashboard reads, parsed out of its DATASET SQL.
+    """The table refs an AI/BI dashboard reads.
 
-    A dashboard has no structural table declaration — its tables exist only inside
-    `datasets[].queryLines` — so the refs are recovered with the same 3-part-ref grammar the ENV-01
-    allowlist uses (`pre_render.find_refs` over `pre_render.dashboard_sql_text`). Scanning ONLY the
-    dataset SQL is deliberate: a whole-document scan picks up hostnames from markdown widgets (probed
-    live: `en.wikipedia.org`), which would then be reported as a nonexistent prod table — turning a
-    documentation link into an AUDIENCE-01 BLOCKER.
+    A dashboard has no single structural table declaration: a ref can live in a dataset's
+    `queryLines` SQL, in a parameter default reached via `IDENTIFIER(:param)`, or in an `asset_name`
+    (a Unity Catalog table/metric view referenced with no SQL at all). So the refs are recovered with
+    the same 3-part-ref grammar ENV-01 uses, over the same text ENV-01 scans
+    (`pre_render.find_refs` over `pre_render.dashboard_sql_text`) — which is every part of the document
+    EXCEPT text/markdown widget prose.
+
+    Excluding prose is deliberate: including it picks up hostnames from markdown links (probed live:
+    `en.wikipedia.org`), which would then be reported as a nonexistent prod table — turning a
+    documentation link into an AUDIENCE-01 BLOCKER. Excluding prose rather than including only known
+    query fields is what keeps a new ref-carrying field gated by default.
     """
     import json as _json
 

@@ -116,23 +116,33 @@ def _load(path: str | None) -> audience_spec.AudienceSpec | None:
         return audience_spec.parse_sidecar(json.load(handle))
 
 
-def main() -> int:
-    if len(sys.argv) < 3:
-        print("usage: reconcile_audience.py <audience.json> <resource_id> [previous-audience.json] "
-              "[--kind genie_space|dashboard]", file=sys.stderr)
-        return 2
-    argv = [a for a in sys.argv[1:] if not a.startswith("--kind")]
-    kind_args = [a for a in sys.argv[1:] if a.startswith("--kind=")]
-    kind_name = kind_args[-1].split("=", 1)[1] if kind_args else None
+def main(argv: "list[str] | None" = None) -> int:
+    """CLI entry point.
+
+    Uses argparse deliberately: a hand-rolled filter previously mis-parsed the SPACE-SEPARATED
+    `--kind dashboard` form its own usage string documented — the value survived as a positional and
+    was read as the previous-audience path, while the kind silently fell back to Genie. That failed
+    SILENTLY and with the WRONG object type, which is the worst possible outcome for the code that
+    replaces a live ACL.
+    """
+    parser = argparse.ArgumentParser(description="Reconcile one resource's app-managed audience")
+    parser.add_argument("audience", help="the desired AudienceSpec sidecar")
+    parser.add_argument("resource_id", help="the live resource id to reconcile")
+    parser.add_argument("previous", nargs="?", default=None,
+                        help="the PREVIOUS AudienceSpec sidecar (what this app had granted)")
+    parser.add_argument("--kind", dest="kind", default=None,
+                        help="genie_space (default) | dashboard")
+    args = parser.parse_args(argv)
+
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "genie_reviewer"))
     import resource_kind  # noqa: PLC0415 — CLI-only import, keeps the library half dependency-free
 
-    kind = resource_kind.get(kind_name)
-    desired = _load(argv[0])
+    kind = resource_kind.get(args.kind)  # raises on an unknown kind — never a silent Genie fallback
+    desired = _load(args.audience)
     if desired is None:
         raise ValueError("AudienceSpec sidecar is required")
-    previous = _load(argv[2]) if len(argv) > 2 else None
-    result = reconcile(WorkspaceClient(), argv[1], desired, previous,
+    previous = _load(args.previous)
+    result = reconcile(WorkspaceClient(), args.resource_id, desired, previous,
                        object_type=kind.permissions_object_type, level=kind.audience_level)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

@@ -249,6 +249,14 @@ def test_sql_gate_detects_parameterized_queries():
     assert not gate._is_parameterized("SELECT x::int FROM t")
     assert not gate._is_parameterized("SELECT a.b AS c FROM prod_x.y.z AS a")
 
+    # REGRESSION: a "parameterized" query is SKIPPED by the gate, so anything that trivially fakes a
+    # parameter marker is a one-character bypass of SQL validation. Comments and string literals are
+    # stripped before the scan; a marker inside a QUOTED name must still be detected (above).
+    assert not gate._is_parameterized("SELECT * FROM prod.t -- :x")
+    assert not gate._is_parameterized("SELECT * FROM prod.t /* :y */")
+    assert not gate._is_parameterized("SELECT 'a:b' AS z FROM prod.t")
+    assert not gate._is_parameterized('SELECT 1 AS "a:b" FROM prod.t')
+
 
 def test_sql_gate_extracts_every_dataset_query():
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -260,3 +268,58 @@ def test_sql_gate_extracts_every_dataset_query():
         {"name": "empty", "queryLines": ["   "]},
     ]}
     assert [name for name, _sql in gate._datasets(doc)] == ["a", "b"]
+
+
+# --- the .title sidecar is author-supplied text that lands in generated YAML ------------------------
+
+
+def test_a_crafted_title_cannot_inject_a_sibling_yaml_key(tmp_path):
+    """REGRESSION: a `.title` is author-supplied and is interpolated into the generated bundle YAML.
+
+    With only a `sed` quote-escape (and `printf '%b'`, which interprets escapes in the DATA), a crafted
+    title could close the quote and inject a SIBLING KEY — confirmed reachable: it produced
+    `embed_credentials: true` in the resolved bundle, which would publish the dashboard with the
+    publisher's credentials embedded and turn promotion into DATA access (ADR-0009 retired exactly
+    that). The title must always resolve to ONE scalar.
+    """
+    import yaml
+
+    repo = _repo(tmp_path, title='A"\n          embed_credentials: true\n#')
+    _render(repo)
+    resolved = yaml.safe_load((repo / "build" / "resources.gen.yml").read_text(encoding="utf-8"))
+    resource = resolved["targets"]["prod"]["resources"]["dashboards"]["recebiveis"]
+
+    assert set(resource) == {"display_name", "warehouse_id", "file_path"}
+    assert "embed_credentials" not in resource
+    assert "embed_credentials" in resource["display_name"]  # inert, inside the scalar
+
+
+def test_a_title_with_a_trailing_backslash_still_parses(tmp_path):
+    """A bare trailing backslash previously produced unparseable YAML — a DoS on the deploy."""
+    import yaml
+
+    repo = _repo(tmp_path, title="Painel\\")
+    _render(repo)
+    resolved = yaml.safe_load((repo / "build" / "resources.gen.yml").read_text(encoding="utf-8"))
+    assert resolved["targets"]["prod"]["resources"]["dashboards"]["recebiveis"]["display_name"]
+
+
+def test_a_whitespace_only_title_is_rejected_at_render(tmp_path):
+    """`-s` only tests BYTE SIZE, so a whitespace-only title passed render and produced
+    `display_name: "   "`, deferring the failure to mid-deploy — the opposite of fail-closed."""
+    repo = _repo(tmp_path, title="   \n  ")
+    result = _render(repo, check=False)
+
+    assert result.returncode != 0
+    assert "title" in (result.stdout + result.stderr)
+
+
+def test_a_legitimate_title_with_non_ascii_is_preserved_exactly(tmp_path):
+    """The real prod title carries an em dash — hardening must not mangle it."""
+    import yaml
+
+    repo = _repo(tmp_path, title="Painel de Recebíveis — Volume por Bandeira")
+    _render(repo)
+    resolved = yaml.safe_load((repo / "build" / "resources.gen.yml").read_text(encoding="utf-8"))
+    assert (resolved["targets"]["prod"]["resources"]["dashboards"]["recebiveis"]["display_name"]
+            == "Painel de Recebíveis — Volume por Bandeira")
