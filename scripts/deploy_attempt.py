@@ -184,7 +184,7 @@ class ProductionOperations:
     """Thin production adapter; domain ordering stays in ``run_attempt`` and is fully fakeable."""
 
     def __init__(self, root: Path, warehouse_id: str, previous_content_root: Path | None = None,
-                 client=None, *,
+                 client=None, *, allow_destructive: bool = False,
                  certification_readback_max_attempts: int = _CERTIFICATION_READBACK_MAX_ATTEMPTS,
                  certification_readback_retry_seconds: float = _CERTIFICATION_READBACK_RETRY_SECONDS,
                  certification_readback_sleep: Callable[[float], None] = time.sleep):
@@ -193,6 +193,7 @@ class ProductionOperations:
         self.root = root
         self.warehouse_id = warehouse_id
         self.previous_content_root = previous_content_root
+        self.allow_destructive = allow_destructive
         self.certification_readback_max_attempts = certification_readback_max_attempts
         self.certification_readback_retry_seconds = certification_readback_retry_seconds
         self.certification_readback_sleep = certification_readback_sleep
@@ -323,8 +324,26 @@ class ProductionOperations:
                           "--warehouse-id", self.warehouse_id)
 
     def bundle_deploy(self) -> None:
-        self._run("databricks", "bundle", "deploy", "-t", "prod", "--var",
-                  f"warehouse_id={self.warehouse_id}")
+        """Deploy the rendered bundle.
+
+        By DEFAULT this runs WITHOUT `--auto-approve`, so a deploy that would delete or recreate a
+        managed resource fails closed with the CLI's plan in the log rather than silently destroying
+        it. Recreating a dashboard changes its id and its permanent URL, so that refusal is the
+        desired behaviour, not an obstacle.
+
+        `allow_destructive` (opt-in, per run) passes `--auto-approve`. It exists because a legitimate
+        destructive change does occur — renaming a resource KEY, e.g. moving a dashboard into the
+        area-based layout, reads to DABs as delete+create — and it must then be an explicit,
+        logged decision by whoever authorized it, never a standing default.
+        """
+        argv = ["databricks", "bundle", "deploy", "-t", "prod", "--var",
+                f"warehouse_id={self.warehouse_id}"]
+        if self.allow_destructive:
+            print("::warning title=deploy-destructive::--auto-approve enabled for this run: the "
+                  "deploy may DELETE or RECREATE managed resources (a recreated dashboard gets a new "
+                  "id and permanent URL). This must be an explicitly authorized, one-off run.")
+            argv.append("--auto-approve")
+        self._run(*argv)
 
     def _kind_of(self, slug: str):
         """Which kind a slug in ``target_ids`` belongs to.
@@ -513,10 +532,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the fixed ADR-0007 production state machine")
     parser.add_argument("--warehouse-id", required=True)
     parser.add_argument("--previous-content-root")
+    parser.add_argument(
+        "--allow-destructive", action="store_true",
+        default=os.environ.get("ALLOW_DESTRUCTIVE_DEPLOY") == "1",
+        help=("pass --auto-approve to `bundle deploy`, permitting DELETION/RECREATION of managed "
+              "resources (a recreated dashboard changes id + permanent URL). Off by default; set "
+              "only for a run a human has explicitly authorized."))
     args = parser.parse_args(argv)
     previous = Path(args.previous_content_root).resolve() if args.previous_content_root else None
     evidence = _evidence(ROOT)
-    operations = ProductionOperations(ROOT, args.warehouse_id, previous)
+    operations = ProductionOperations(ROOT, args.warehouse_id, previous,
+                                      allow_destructive=args.allow_destructive)
     return run_attempt(operations, evidence)
 
 

@@ -329,3 +329,30 @@ def test_stage_names_are_unchanged_by_adding_a_resource_kind():
         "bundle_deploy", "resolve_space", "assert_app_manage", "reconcile_audience",
         "verify_live_state", "certify_space", "complete",
     )
+
+
+# --- destructive deploys are opt-in, never a standing default --------------------------------------
+
+
+def _captured_deploy(tmp_path: Path, **kwargs):
+    ops = deploy_attempt.ProductionOperations(tmp_path, "wh-1", client=NS(), **kwargs)
+    calls = []
+    ops._run = lambda *a: calls.append(a)
+    ops.bundle_deploy()
+    return calls[0]
+
+
+def test_bundle_deploy_never_auto_approves_by_default(tmp_path):
+    """A deploy that would DELETE or RECREATE a managed resource must fail closed with the CLI's plan
+    in the log. Recreating a dashboard changes its id and permanent URL, so the refusal is the desired
+    behaviour — observed live in run 30572177435, where a resource-key rename read as delete+create."""
+    argv = _captured_deploy(tmp_path)
+    assert "--auto-approve" not in argv
+    assert argv[:4] == ("databricks", "bundle", "deploy", "-t")
+
+
+def test_bundle_deploy_auto_approves_only_when_explicitly_allowed(tmp_path):
+    """A legitimate destructive change (renaming a resource key) needs an escape hatch — but it must be
+    an explicit, per-run decision by whoever authorized it."""
+    argv = _captured_deploy(tmp_path, allow_destructive=True)
+    assert "--auto-approve" in argv
