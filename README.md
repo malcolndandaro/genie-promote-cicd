@@ -1,12 +1,17 @@
 # Genie Promote
 
-O Genie Promote é um fluxo governado de entrega DEV→PROD para Genie Spaces do Databricks.
+O Genie Promote é um fluxo governado de entrega DEV→PROD para recursos do Databricks — hoje **Genie
+Spaces** e **painéis AI/BI (Lakeview)**.
 
-O **Autor** continua trabalhando na interface nativa do Genie, em um workspace de desenvolvimento.
-Quando um Genie Space está pronto, ele usa um Databricks App para revisá-lo e **preparar a
-promoção**. O acelerador transforma esse pedido em uma mudança de conteúdo versionada, roda
+O **Autor** continua trabalhando na interface nativa do Databricks, em um workspace de
+desenvolvimento. Quando o recurso está pronto, ele usa um Databricks App para revisá-lo e **preparar
+a promoção**. O acelerador transforma esse pedido em uma mudança de conteúdo versionada, roda
 checagens determinísticas e assistidas por IA, aguarda uma aprovação de produção separada e implanta
-o Space com um service principal (SP) dedicado.
+o recurso com um service principal (SP) dedicado.
+
+O pipeline é **agnóstico ao tipo de recurso**: a mesma Promotion, o mesmo PR em rascunho, os mesmos
+gates de separação de funções. O que varia por tipo é um valor em `genie_reviewer/resource_kind.py`
+(ver [ADR-0010](docs/adr/0010-second-resource-kind-via-registry-seam.md)).
 
 Este repositório é um **acelerador portável e reutilizável**: contém a aplicação e o engine do
 pipeline (o "repositório do engine"). As definições de Genie promovidas e os artefatos relacionados
@@ -20,9 +25,11 @@ vivem em um repositório de conteúdo separado (por exemplo, `genie-spaces-conte
 ## O que oferece
 
 - Um Databricks App hospedado em PROD, com backend FastAPI e frontend Svelte.
-- Autoria nativa no Genie em DEV e deploy governado para PROD.
-- Checagens determinísticas de ambiente, público (audience) e avaliação (eval).
-- Certificação pós-verificação dos Spaces implantados, pelo tag governado
+- Autoria nativa (Genie ou AI/BI) em DEV e deploy governado para PROD.
+- Checagens determinísticas de ambiente, público (audience) e qualidade — por tipo de recurso: um
+  Space é medido por perguntas de benchmark e pelo eval-run; um painel, pela integridade estrutural
+  (datasets↔widgets↔páginas) e pela validação do SQL contra o warehouse de produção.
+- Certificação pós-verificação de todo recurso implantado, pelo tag governado
   `system.certification_status=certified`.
 - Revisão automática por LLM (revisor), com contrato de resposta protegido e persona editável.
 - Um Knowledge Assistant (KA) fixo — o handbook de CI/CD, global a todos os spaces — consultado pela
@@ -59,9 +66,9 @@ Os dois repositórios têm responsabilidades intencionalmente diferentes:
 | Local | Responsável por |
 |---|---|
 | **Repositório do engine** | Código do app, revisor, checks, lógica de render/deploy, testes e `databricks.yml`. |
-| **Repositório de conteúdo** | Spaces serializados, títulos, públicos (audiences), mapeamentos, dashboards/dados de setup opcionais, `engine.lock` e os workflows de promoção. |
-| **Workspace DEV** | Spaces autorados por pessoas, perguntas de benchmark, dados de DEV e avaliações ao vivo. |
-| **Workspace PROD** | O app, o Lakebase, endpoints de modelo, Spaces governados e dados de PROD. |
+| **Repositório de conteúdo** | Spaces serializados (layout flat) e painéis AI/BI (layout aninhado por área de negócio), com títulos, públicos (audiences) e mapeamentos; dados de setup opcionais; `engine.lock` e os workflows de promoção. |
+| **Workspace DEV** | Spaces e painéis autorados por pessoas, perguntas de benchmark, dados de DEV e avaliações ao vivo. |
+| **Workspace PROD** | O app, o Lakebase, endpoints de modelo, recursos governados e dados de PROD. |
 
 Toda checagem de conteúdo e todo deploy resolvem o commit exato do engine registrado em
 `engine.lock`. Uma mudança no engine só chega à produção após uma atualização revisada do lock no
@@ -253,7 +260,7 @@ a Plataforma são pessoas diferentes. Mantenha essa atribuição de papéis expl
 Mantenha cada mudança no repositório que a possui:
 
 - Lógica de aplicação, revisor, política, setup ou deploy → repositório do engine.
-- Spaces serializados, públicos (audiences), mapeamentos, dashboards e dados de seed → repositório de
+- Spaces serializados, painéis AI/BI, públicos (audiences), mapeamentos e dados de seed → repositório de
   conteúdo.
 
 Antes de abrir um PR no engine:

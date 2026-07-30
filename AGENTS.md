@@ -163,6 +163,34 @@ Regras que não são óbvias e já custaram caro:
 - **Publicação de painel usa `embed_credentials=false`.** O painel publicado roda como quem o abre, então
   o consumidor continua precisando do próprio SELECT no Unity Catalog. Mudar isso transformaria o
   pipeline em mecanismo de acesso a dados — exatamente o que a ADR-0009 retirou.
+- **Um slug identifica UM recurso entre TODOS os tipos.** Os prefixos (`s_`/`d_`) garantem isso apenas
+  para slugs GERADOS — um slug amigável fixado não tem prefixo, então uma colisão é alcançável por
+  configuração. `_all_artifacts` recusa alto: sem isso, `resolve_space` e `_kind_of` discordam e um
+  estágio aplica o objeto/tag de Genie ao id de um painel.
+
+Ver a [ADR-0010](docs/adr/0010-second-resource-kind-via-registry-seam.md) para o desenho completo.
+
+## Deploy: o que o primeiro deploy real ensinou (leia antes de mexer no pipeline)
+
+Três defeitos passaram por 750 testes verdes e só apareceram em produção. O padrão vale mais que os
+bugs, então está aqui e não só no histórico do git:
+
+- **Um passo de CI que MONTA um caminho de arquivo merece teste como lógica.** O gate de painéis
+  montava o caminho flat antigo; com slug aninhado o arquivo não existia, todo gate caía no `skip`, e o
+  required check ficava **verde validando zero**. Os testes cobriam o *conteúdo* do gate, nunca que ele
+  **encontra o arquivo**. Um gate que não acha seu input deve FALHAR, nunca continuar.
+- **Renomear uma chave de recurso DABs lê como delete+create.** O `bundle deploy` recusa sem
+  `--auto-approve`, e a recusa está CORRETA: recriar um painel muda seu id e sua URL permanente. Existe
+  `--allow-destructive` (também `ALLOW_DESTRUCTIVE_DEPLOY=1`), **desligado por padrão** e pensado como
+  opt-in por execução. Nunca o torne default nem o deixe fixo num workflow — habilite, rode, desabilite.
+- **Resolução por título pode devolver um recurso recém-deletado.** A listagem é eventualmente
+  consistente, então após um recreate o tombstone aparece como um match único e limpo e os estágios
+  seguintes miram um objeto morto. `resolve_by_title` SONDA o candidato com um get antes de aceitá-lo;
+  não remova essa sonda.
+
+Corolário para verificação: **suíte verde não é evidência de que algo funciona ponta a ponta**. Ao
+tocar render, gates ou deploy, confirme o estado vivo pela API — não pelo status do run, que já ficou
+verde escondendo um painel que nunca foi implantado.
 
 ## Dono da documentação
 
