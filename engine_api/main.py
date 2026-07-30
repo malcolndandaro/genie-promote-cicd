@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.join(_REPO, "app"))
 import app_logic  # noqa: E402  (puts genie_reviewer/ on sys.path)
 import audience_spec as audience_spec_mod  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity; the ONLY legitimate authz input)
+import business_area  # noqa: E402  (controlled vocabulary for the nested content layout)
 import promotion_store  # noqa: E402  (Lakebase durable store — LB2)
 import reconcile as reconcile_mod  # noqa: E402  (GitHub->audit reconcile — LB4)
 import rehydrate as rehydrate_mod  # noqa: E402  (A3/F1 — prod->dev rehydrate, no git PR)
@@ -376,6 +377,26 @@ def resources(
         "list_all_dev_resources", lambda: app_logic.list_all_dev_resources(user_token=token))}
 
 
+@api.get("/business-areas")
+def business_areas(
+    x_forwarded_access_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """The CONTROLLED vocabulary of business areas a promoted resource can be filed under.
+
+    This is what the promote form's area picker renders. It is a closed set on purpose: the area
+    becomes a directory in the content repo (`src/dashboards/<area>/<name>/`), and a free-text field
+    would produce `risco`/`Risco`/`risk` as three separate places nobody can find anything in. The
+    same validation runs again server-side on `/promote`, so a hand-crafted request cannot invent one.
+
+    Gated like `/resources` (any authenticated OBO caller): the list is configuration, not data.
+    """
+    token = _user_token(x_forwarded_access_token, authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="user token required (OBO)")
+    return {"areas": [{"key": a.key, "label": a.label} for a in business_area.all_areas()]}
+
+
 @api.get("/prod-resources")
 def prod_resources(
     kind: str = "genie_space",
@@ -563,6 +584,10 @@ class PromoteRequest(_ResourceRef):
     # Display metadata the SPA already holds (from /api/resources) — persisted with the Promotion so
     # the history/recovery view (LB3/LB5) shows the resource without a second OBO lookup.
     resource_title: str | None = None
+    # The business area this resource is filed under in the content repo. REQUIRED for a kind with the
+    # nested layout (dashboards) and ignored for a flat one (Genie). Validated against the controlled
+    # vocabulary in the engine, so an invented area is a 400 rather than a stray directory.
+    area: str | None = None
     audience_spec: AudienceSpecIn
     # G7: the Requester's declared table de-para (source DEV ref -> desired prod ref overrides),
     # keyed exactly like `/promote/preview`'s `source` field — only entries actually changed away
@@ -691,7 +716,7 @@ def promote(
             body.target_id, user_token=token, requester_email=x_forwarded_email,
             resource_title=body.resource_title, audience_spec_=audience, rule_overrides=overrides,
             ka_endpoints=ka_endpoints, persona_template=persona_template,
-            table_mapping=body.table_mapping, kind=body.kind),
+            table_mapping=body.table_mapping, kind=body.kind, area=body.area),
     )
     store = getattr(app.state, "store", None)
     # No PR means either a pre-Change-Request content blocker or an already-identical no-op. The

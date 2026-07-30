@@ -43,18 +43,25 @@ DASHBOARD = {
 }
 
 
+# The NESTED content layout: one directory per dashboard, filed under its business area, with fixed
+# sidecar names inside. `SLUG` is `<area>/<name>`; `KEY` is the flattened DABs resource key.
+SLUG = "risco/volume_por_bandeira"
+KEY = "risco__volume_por_bandeira"
+
+
 def _repo(tmp_path: Path, *, title: str | None = "Painel de Recebíveis", audience=True,
-          doc=None, slug="recebiveis") -> Path:
+          doc=None, slug=SLUG) -> Path:
     (tmp_path / "scripts").mkdir()
-    (tmp_path / "src" / "dashboards").mkdir(parents=True)
+    resource_dir = tmp_path / "src" / "dashboards" / slug
+    resource_dir.mkdir(parents=True)
     for script in ("render.sh", "pre_render.py"):
         shutil.copy2(ROOT / "scripts" / script, tmp_path / "scripts" / script)
-    (tmp_path / "src" / "dashboards" / f"{slug}.lvdash.json").write_text(
+    (resource_dir / "dashboard.lvdash.json").write_text(
         json.dumps(doc if doc is not None else DASHBOARD, ensure_ascii=False), encoding="utf-8")
     if title is not None:
-        (tmp_path / "src" / "dashboards" / f"{slug}.title").write_text(title + "\n", encoding="utf-8")
+        (resource_dir / "title").write_text(title + "\n", encoding="utf-8")
     if audience:
-        (tmp_path / "src" / "dashboards" / f"{slug}.audience.json").write_text(
+        (resource_dir / "audience.json").write_text(
             json.dumps({"principals": [{"principal": "users", "is_group": True}]}), encoding="utf-8")
     return tmp_path
 
@@ -76,12 +83,12 @@ def test_render_emits_one_dashboard_resource_per_slug_under_the_prod_target(tmp_
     assert "targets:" in generated and "  prod:" in generated
     # The dashboards block must be INSIDE targets.prod.resources (6-space indent), like genie_spaces.
     assert "      dashboards:\n" in generated
-    assert "        recebiveis:\n" in generated
+    assert f"        {KEY}:\n" in generated
     # display_name comes from the .title sidecar; the warehouse stays a bundle variable.
     assert 'display_name: "Painel de Recebíveis"' in generated
     assert "warehouse_id: ${var.warehouse_id}" in generated
     # file_path is relative to the GENERATED file's dir (build/), not the repo root.
-    assert "file_path: ./dashboards/recebiveis.lvdash.json" in generated
+    assert f"file_path: ./dashboards/{SLUG}/dashboard.lvdash.json" in generated
     assert "./build/dashboards" not in generated
 
 
@@ -90,17 +97,17 @@ def test_render_copies_the_sidecars_the_deploy_reads(tmp_path):
     out of build/ — so render must carry them forward."""
     repo = _repo(tmp_path)
     _render(repo)
-    built = repo / "build" / "dashboards"
+    built = repo / "build" / "dashboards" / SLUG
 
-    assert (built / "recebiveis.title").read_text(encoding="utf-8").strip() == "Painel de Recebíveis"
-    assert json.loads((built / "recebiveis.audience.json").read_text(encoding="utf-8")) == {
+    assert (built / "title").read_text(encoding="utf-8").strip() == "Painel de Recebíveis"
+    assert json.loads((built / "audience.json").read_text(encoding="utf-8")) == {
         "principals": [{"principal": "users", "is_group": True}]}
 
 
 def test_render_rebinds_the_dashboard_to_the_target_catalog(tmp_path):
     repo = _repo(tmp_path)
     _render(repo)
-    rendered = (repo / "build" / "dashboards" / "recebiveis.lvdash.json").read_text(encoding="utf-8")
+    rendered = (repo / "build" / "dashboards" / SLUG / "dashboard.lvdash.json").read_text(encoding="utf-8")
 
     assert "prod_recebiveis.diamond.fato_recebiveis" in rendered
     assert "dev_recebiveis" not in rendered  # including inside the markdown prose
@@ -150,19 +157,35 @@ def test_render_is_a_clean_noop_with_no_dashboard_content(tmp_path):
     assert "dashboards:" not in generated
 
 
-def test_render_emits_two_dashboards_without_engine_changes(tmp_path):
-    """The whole point of the loop: a second dashboard needs no engine edit."""
+def test_render_emits_dashboards_from_several_areas_without_engine_changes(tmp_path):
+    """The whole point of the loop: another dashboard — in another AREA — needs no engine edit."""
     repo = _repo(tmp_path)
-    (repo / "src" / "dashboards" / "segundo.lvdash.json").write_text(
+    second = repo / "src" / "dashboards" / "compliance" / "registro_diario"
+    second.mkdir(parents=True)
+    (second / "dashboard.lvdash.json").write_text(
         json.dumps(DASHBOARD, ensure_ascii=False), encoding="utf-8")
-    (repo / "src" / "dashboards" / "segundo.title").write_text("Segundo Painel\n", encoding="utf-8")
-    (repo / "src" / "dashboards" / "segundo.audience.json").write_text(
+    (second / "title").write_text("Registro Diário\n", encoding="utf-8")
+    (second / "audience.json").write_text(
         json.dumps({"principals": [{"principal": "users", "is_group": True}]}), encoding="utf-8")
     result = _render(repo)
 
     generated = (repo / "build" / "resources.gen.yml").read_text(encoding="utf-8")
-    assert "        recebiveis:\n" in generated and "        segundo:\n" in generated
+    assert f"        {KEY}:\n" in generated
+    assert "        compliance__registro_diario:\n" in generated
     assert "2 dashboard(s)" in result.stdout
+
+
+def test_the_resource_key_is_flattened_but_the_file_path_stays_nested(tmp_path):
+    """The DABs key cannot read as a path (it shows up in `bundle summary` and the app's deploy
+    panel), so `<area>/<name>` flattens to `<area>__<name>` — while `file_path` keeps the real
+    directory. A mismatch between the two is what would break the deploy."""
+    repo = _repo(tmp_path)
+    _render(repo)
+    generated = (repo / "build" / "resources.gen.yml").read_text(encoding="utf-8")
+
+    assert f"        {KEY}:\n" in generated          # flattened key
+    assert f"./dashboards/{SLUG}/dashboard.lvdash.json" in generated  # nested path
+    assert f"        {SLUG}:\n" not in generated     # the key is never the raw path
 
 
 # --- the offline structural CI gate ---------------------------------------------------------------
@@ -287,7 +310,7 @@ def test_a_crafted_title_cannot_inject_a_sibling_yaml_key(tmp_path):
     repo = _repo(tmp_path, title='A"\n          embed_credentials: true\n#')
     _render(repo)
     resolved = yaml.safe_load((repo / "build" / "resources.gen.yml").read_text(encoding="utf-8"))
-    resource = resolved["targets"]["prod"]["resources"]["dashboards"]["recebiveis"]
+    resource = resolved["targets"]["prod"]["resources"]["dashboards"][KEY]
 
     assert set(resource) == {"display_name", "warehouse_id", "file_path"}
     assert "embed_credentials" not in resource
@@ -301,7 +324,7 @@ def test_a_title_with_a_trailing_backslash_still_parses(tmp_path):
     repo = _repo(tmp_path, title="Painel\\")
     _render(repo)
     resolved = yaml.safe_load((repo / "build" / "resources.gen.yml").read_text(encoding="utf-8"))
-    assert resolved["targets"]["prod"]["resources"]["dashboards"]["recebiveis"]["display_name"]
+    assert resolved["targets"]["prod"]["resources"]["dashboards"][KEY]["display_name"]
 
 
 def test_a_whitespace_only_title_is_rejected_at_render(tmp_path):
@@ -321,5 +344,5 @@ def test_a_legitimate_title_with_non_ascii_is_preserved_exactly(tmp_path):
     repo = _repo(tmp_path, title="Painel de Recebíveis — Volume por Bandeira")
     _render(repo)
     resolved = yaml.safe_load((repo / "build" / "resources.gen.yml").read_text(encoding="utf-8"))
-    assert (resolved["targets"]["prod"]["resources"]["dashboards"]["recebiveis"]["display_name"]
+    assert (resolved["targets"]["prod"]["resources"]["dashboards"][KEY]["display_name"]
             == "Painel de Recebíveis — Volume por Bandeira")

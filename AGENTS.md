@@ -48,8 +48,10 @@ Este é o **repositório do engine**. Ele é dono de:
 O **repositório de conteúdo** que o acompanha é dono de:
 
 - Genie Spaces serializados e seus sidecars de título, audiência e mapeamento;
-- painéis AI/BI (`.lvdash.json`) e seus sidecars (mesmo contrato: `.title` obrigatório e não vazio,
-  `.audience.json` obrigatório, `.mapping.json` opcional, `.revision.json`);
+- painéis AI/BI em layout ANINHADO por área de negócio — `src/dashboards/<área>/<nome>/` com
+  `dashboard.lvdash.json` + sidecars de nome FIXO (`title` obrigatório e não vazio, `audience.json`
+  obrigatório, `mapping.json` opcional, `revision.json`). Sem diretório de versão: o git já guarda o
+  histórico, então uma revisão nova SUBSTITUI os mesmos arquivos e o diff mostra o que mudou;
 - conteúdo opcional de setup;
 - o `engine.lock` e os workflows de promoção, checks e deploy.
 
@@ -152,6 +154,12 @@ Regras que não são óbvias e já custaram caro:
   falha no render, nunca no meio da mutação.
 - **Os nomes dos estágios de deploy são contrato persistido** (`deployment_attempts.completed_stages`).
   Um novo tipo de recurso **itera dentro** dos estágios; não acrescenta estágio.
+- **A área de negócio é vocabulário CONTROLADO** (`genie_reviewer/business_area.py`, configurável via
+  `APP_BUSINESS_AREAS`). Ela vira diretório, segmento de branch e parte da chave de recurso DABs, então
+  é validada no app, no engine e no CI — texto livre fragmentaria a mesma área em `risco`/`Risco`/`risk`
+  e também abriria path traversal. Uma área desconhecida é REFUSA, nunca um bucket "outros".
+- **A chave DABs de um painel é achatada** (`<área>__<nome>`), mas o `file_path` mantém o diretório
+  real. As duas coisas divergirem quebra o deploy — `resource_kind.resource_key` é a única fonte.
 - **Publicação de painel usa `embed_credentials=false`.** O painel publicado roda como quem o abre, então
   o consumidor continua precisando do próprio SELECT no Unity Catalog. Mudar isso transformaria o
   pipeline em mecanismo de acesso a dados — exatamente o que a ADR-0009 retirou.

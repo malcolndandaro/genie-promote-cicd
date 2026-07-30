@@ -16,8 +16,13 @@ import sys
 _SIDECARS = r"title|mapping\.json|audience\.json|revision\.json|access\.json"
 
 _PATHS = {
+    # FLAT: src/genie/<slug>.<sidecar>
     "genie_space": re.compile(rf"^src/genie/(?P<slug>.+?)\.(?:serialized_space\.json|{_SIDECARS})$"),
-    "dashboard": re.compile(rf"^src/dashboards/(?P<slug>.+?)\.(?:lvdash\.json|{_SIDECARS})$"),
+    # NESTED: src/dashboards/<area>/<name>/<file> — the slug is `<area>/<name>` and every sidecar has
+    # a FIXED name inside that directory. Anchored on the known filenames so an unrelated file dropped
+    # in the directory doesn't silently register as a changed resource.
+    "dashboard": re.compile(
+        rf"^src/dashboards/(?P<slug>[^/]+/[^/]+)/(?:dashboard\.lvdash\.json|{_SIDECARS})$"),
 }
 
 

@@ -3,6 +3,7 @@
   import type { NavSection } from './lib/components/Sidebar.svelte';
   import Topbar from './lib/components/Topbar.svelte';
   import MeusEspacos from './screens/MeusEspacos.svelte';
+  import Paineis from './screens/Paineis.svelte';
   import PromotionDetail from './screens/PromotionDetail.svelte';
   import RevisaoPromocoes from './screens/RevisaoPromocoes.svelte';
   import Auditoria from './screens/Auditoria.svelte';
@@ -34,7 +35,9 @@
   // re-run. ONLY on the "Meus espaços" screen, where the review renders in place. On the home the
   // in-flight promotion shows in "Promoções recentes"; on a #/promocoes/:id deep-link openById loads
   // the exact target — running recover there would race it and could surface the WRONG promotion.
-  if (router.route.id === 'espacos') promotion.recover().catch(() => {});
+  if (router.route.id === 'espacos' || router.route.id === 'paineis') {
+    promotion.recover().catch(() => {});
+  }
 
   // Two sections — "Meu trabalho" (all users) + "Administração" (admin only). All SoD is enforced
   // by GitHub, not the app (R1). "Aguardando ação no GitHub" (RevisaoPromocoes) is a universal
@@ -46,6 +49,7 @@
       title: 'Meu trabalho',
       items: [
         { id: 'espacos', label: 'Meus espaços', icon: 'grid' },
+        { id: 'paineis' as const, label: 'Painéis AI/BI', icon: 'chart' as const },
         { id: 'revisao' as const, label: 'Aguardando ação no GitHub', icon: 'git-branch' as const },
       ],
     },
@@ -62,6 +66,7 @@
 
   const SECTION_TITLE: Record<RouteId, string> = {
     espacos: 'Meus espaços',
+    paineis: 'Painéis AI/BI',
     promocoes: 'Detalhe da promoção',
     revisao: 'Aguardando ação no GitHub',
     auditoria: 'Auditoria',
@@ -83,6 +88,14 @@
 
   {#if router.route.id === 'espacos'}
     <MeusEspacos
+      {promotion}
+      {who}
+      devHost={who?.dev_host ?? null}
+      prodHost={who?.prod_host ?? null}
+      onOpenPromotion={openPromotion}
+    />
+  {:else if router.route.id === 'paineis'}
+    <Paineis
       {promotion}
       {who}
       devHost={who?.dev_host ?? null}

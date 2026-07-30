@@ -35,6 +35,7 @@ import base64  # noqa: E402
 import audience_check  # noqa: E402  (pilot AudienceSpec deterministic validation)
 import audience_spec  # noqa: E402  (pilot Público do Space contract)
 import authz  # noqa: E402  (A2 — verified identity + the live fail-closed access guard)
+import business_area  # noqa: E402  (controlled vocabulary for the nested content layout)
 import change_request  # noqa: E402  (provider-neutral revision + observation contract)
 import dashboard_check  # noqa: E402  (DASH-01..04 — the dashboard structural gate)
 import eval_gate  # noqa: E402
@@ -92,15 +93,31 @@ def _pinned_slugs(kind: str) -> dict:
     return _SPACE_SLUGS
 
 
-def resource_slug(resource_id: str, kind: str | None = None) -> str:
+def resource_slug(resource_id: str, kind: str | None = None, *,
+                  area: str | None = None, title: str | None = None) -> str:
     """Stable, branch/path/identifier-safe slug for one resource of any kind.
 
-    A pinned slug wins (`APP_SPACE_SLUGS` / `APP_DASHBOARD_SLUGS`); otherwise the id is sanitized and
-    given the kind's prefix, which keeps the two kinds' slug namespaces disjoint. Genie's behaviour is
-    byte-identical to the pre-kind-seam `space_slug`.
+    A pinned slug wins (`APP_SPACE_SLUGS` / `APP_DASHBOARD_SLUGS`). Otherwise:
+
+    - a FLAT kind (Genie) sanitizes the resource id and prefixes it — byte-identical to the
+      pre-kind-seam `space_slug`;
+    - a NESTED kind (dashboards) builds `<area>/<name>`, where `area` is a controlled-vocabulary key
+      the author picked and `name` is derived from the declared production `title`. Both are author
+      DECLARATIONS: a dashboard is filed where a human will look for it, not under an opaque id.
+
+    Raises `ValueError` for a nested kind with no area, or with an area outside the controlled set —
+    filing a resource in the wrong place is a governance problem, so there is no silent default.
     """
     rkind = resource_kind.get(kind)
-    return rkind.slug_for(resource_id, _pinned_slugs(rkind.kind))
+    pinned = _pinned_slugs(rkind.kind)
+    if pinned.get(resource_id):
+        return pinned[resource_id]
+    if not rkind.nested_layout:
+        return rkind.slug_for(resource_id, pinned)
+    # Validate the area against the controlled set (raises on unknown/blank) before deriving a path.
+    resolved_area = business_area.get(area).key
+    return rkind.slug_for(resource_id, pinned, area=resolved_area,
+                          name=business_area.resource_name(title or ""))
 
 
 def space_slug(space_id: str) -> str:
@@ -463,7 +480,20 @@ def preview_promotion(space_id: str, *, user_token: str, domain: str = DOMAIN,
 
     tables = [{"source": ref, "default_target": pre_render.rebind(ref, "dev", "prod", domain)}
              for ref in pre_render.find_refs(scanned)]
-    return {"title": workspace_resource.get_title(dev, rkind, space_id), "tables": tables}
+    result = {"title": workspace_resource.get_title(dev, rkind, space_id), "tables": tables}
+    if not rkind.has_benchmarks:
+        # A dashboard's own shape, so the confirm step can show WHAT is being promoted (datasets,
+        # widgets, pages) instead of only its title. Purely descriptive — the gate is DASH-01..04 in
+        # the review, not this. Computed from the SAME parsed document the review reads.
+        ctx = review_core.build_dashboard_context(doc)
+        pages = doc.get("pages") or []
+        result["structure"] = {
+            "datasets": [t["identifier"] for t in ctx.get("tables", [])],
+            "n_widgets": sum(len(p.get("layout") or []) for p in pages if isinstance(p, dict)),
+            "pages": [str((p.get("displayName") or p.get("name") or "")) for p in pages
+                      if isinstance(p, dict)],
+        }
+    return result
 
 
 def _claude(system: str, user: str, profile: str, client: WorkspaceClient | None = None) -> str:
@@ -916,7 +946,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                       ka_endpoints: list[dict] | None = None,
                       persona_template: str | None = None,
                       table_mapping: "dict[str, str] | None" = None,
-                      kind: str | None = None) -> dict:
+                      kind: str | None = None,
+                      area: str | None = None) -> dict:
     """GH2 (+ F2 + G7): open (or update) a real promotion PR for a space and post the attributed
     review comment.
 
@@ -965,12 +996,15 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     gh = github or _github_app(profile)  # the bot (app SP reads the scope)
     who = requester_email or "usuário autenticado"
     safe_id = "".join(c for c in space_id if c.isalnum() or c in "-_")  # title can't carry markup
-    # per-resource: this resource's own branch + committed file
-    slug = resource_slug(space_id, rkind.kind)
-    branch, path = branch_for(slug), src_path_for(slug, rkind.kind)
     # G7: the prod display name is now a Requester DECLARATION (pre-filled with the dev title by the
     # UI, editable) rather than a silent copy. The `.title` sidecar carries it into rendering.
+    #
+    # Resolved BEFORE the slug because a nested kind DERIVES its path from this title — the dashboard
+    # is filed at `<area>/<name>` where `<name>` comes from the production name a human chose.
     prod_title = resource_title or safe_id
+    # per-resource: this resource's own branch + committed files
+    slug = resource_slug(space_id, rkind.kind, area=area, title=prod_title)
+    branch, path = branch_for(slug), src_path_for(slug, rkind.kind)
     # A per-resource title sidecar so render.sh can name the generated prod resource (and so the prod
     # resource keeps a friendly title). Committed next to the artifact; no shared manifest, so
     # concurrent per-resource PRs never conflict.

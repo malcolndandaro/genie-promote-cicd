@@ -110,20 +110,47 @@ def test_unknown_kind_is_refused_not_defaulted():
     assert rk.get(None).kind == "genie_space"
 
 
-def test_slug_namespaces_are_disjoint_between_kinds():
-    """A dashboard slug must never be mistakable for a Space slug — that disjointness is what lets
-    the CI diff and `deployment_attempts.target_ids` hold both kinds without collision."""
+def test_a_dashboard_slug_is_the_declared_area_and_name_not_the_resource_id():
+    """A dashboard is filed where a HUMAN will look for it: `<area>/<name>`, both author declarations.
+
+    The area comes from the controlled vocabulary; the name is derived from the production title. This
+    is the point of the nested layout — browsing the content repo by business area, not by opaque id.
+    """
+    slug = app_logic.resource_slug("01f18061774a1b90bc424bd3c1078591", "dashboard",
+                                   area="risco", title="Painel de Recebíveis — Volume por Bandeira")
+    assert slug == "risco/painel_de_recebiveis_volume_por_bandeira"
+
+
+def test_a_dashboard_promotion_refuses_an_unknown_or_missing_area():
+    """Filing a resource in the wrong place is a governance problem, so there is no silent default."""
+    for bad in (None, "", "Risco", "risk", "../escape"):
+        try:
+            app_logic.resource_slug("01f18", "dashboard", area=bad, title="Painel")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"area {bad!r} must be refused")
+
+
+def test_a_genie_slug_is_still_the_id_derived_flat_slug():
+    """Genie stays FLAT and byte-identical to the pre-kind-seam behaviour: 7 Spaces are already
+    committed and promoted that way, and moving them would rewrite live promotion branches."""
     same_id = "01f18061774a1b90bc424bd3c1078591"
     assert app_logic.resource_slug(same_id, "genie_space") == f"s_{same_id}"
-    assert app_logic.resource_slug(same_id, "dashboard") == f"d_{same_id}"
-    # Genie's pre-seam behaviour is preserved exactly, including the bare-alpha case.
     assert app_logic.space_slug(same_id) == app_logic.resource_slug(same_id, "genie_space")
 
 
 def test_sidecar_paths_are_per_kind():
-    assert app_logic.src_path_for("d_x", "dashboard") == "src/dashboards/d_x.lvdash.json"
-    assert app_logic.title_path_for("d_x", "dashboard") == "src/dashboards/d_x.title"
-    assert app_logic.audience_path_for("d_x", "dashboard") == "src/dashboards/d_x.audience.json"
+    """A dashboard gets its OWN DIRECTORY with fixed sidecar names; Genie keeps flat `<slug>.` files."""
+    slug = "risco/volume"
+    assert app_logic.src_path_for(slug, "dashboard") == (
+        "src/dashboards/risco/volume/dashboard.lvdash.json")
+    assert app_logic.title_path_for(slug, "dashboard") == "src/dashboards/risco/volume/title"
+    assert app_logic.audience_path_for(slug, "dashboard") == (
+        "src/dashboards/risco/volume/audience.json")
+    assert app_logic.mapping_path_for(slug, "dashboard") == "src/dashboards/risco/volume/mapping.json"
+    assert app_logic.revision_path_for(slug, "dashboard") == (
+        "src/dashboards/risco/volume/revision.json")
     # Genie paths unchanged.
     assert app_logic.src_path_for("s_x") == "src/genie/s_x.serialized_space.json"
     assert app_logic.title_path_for("s_x") == "src/genie/s_x.title"
@@ -498,21 +525,21 @@ def test_dashboard_promotion_commits_the_lvdash_sidecar_set(monkeypatch):
     out = app_logic.request_promotion(
         "01f1806177", user_token="tok", requester_email="ana@x.com",
         resource_title="Painel de Recebíveis", audience_spec_=_audience(), github=gh,
-        kind="dashboard")
+        kind="dashboard", area="risco")
 
     assert out["pr"] == {"number": 42, "url": "https://github.com/o/r/pull/42"}
-    slug = "d_01f1806177"
+    slug = "risco/painel_de_recebiveis"
     assert gh.promo["branch"] == f"promote/{slug}"
-    assert gh.promo["path"] == f"src/dashboards/{slug}.lvdash.json"
+    assert gh.promo["path"] == f"src/dashboards/{slug}/dashboard.lvdash.json"
     committed = set(gh.promo["extra_files"]) | {gh.promo["path"]}
     assert committed == {
-        f"src/dashboards/{slug}.lvdash.json",
-        f"src/dashboards/{slug}.title",
-        f"src/dashboards/{slug}.audience.json",
-        f"src/dashboards/{slug}.revision.json",
+        f"src/dashboards/{slug}/dashboard.lvdash.json",
+        f"src/dashboards/{slug}/title",
+        f"src/dashboards/{slug}/audience.json",
+        f"src/dashboards/{slug}/revision.json",
     }
     # The title sidecar carries the DECLARED prod name — it is the deploy's id-resolution key.
-    assert gh.promo["extra_files"][f"src/dashboards/{slug}.title"] == "Painel de Recebíveis\n"
+    assert gh.promo["extra_files"][f"src/dashboards/{slug}/title"] == "Painel de Recebíveis\n"
     # The artifact committed is the DEV-shaped export (CI rebinds it), byte-for-byte what was reviewed.
     assert json.loads(gh.promo["path"] and gh.promo["content"]) == DASHBOARD
     # The PR is worded for a dashboard so the reviewer knows what they are merging.
@@ -524,7 +551,7 @@ def test_dashboard_promotion_is_a_draft_and_never_marked_ready(monkeypatch):
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_DASH_REVIEW))
     gh = _FakeGitHubApp()
     app_logic.request_promotion("d1", user_token="tok", audience_spec_=_audience(), github=gh,
-                                kind="dashboard")
+                                kind="dashboard", area="risco", resource_title="Painel X")
     assert not hasattr(gh, "marked_ready")
     assert "rascunho" in gh.promo["body"].lower()
 
@@ -533,8 +560,8 @@ def test_stale_mapping_sidecar_is_removed_when_no_mapping_is_declared(monkeypatc
     monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_DASH_REVIEW))
     gh = _FakeGitHubApp()
     app_logic.request_promotion("d1", user_token="tok", audience_spec_=_audience(), github=gh,
-                                kind="dashboard")
-    assert gh.promo["remove_files"] == ["src/dashboards/d_d1.mapping.json"]
+                                kind="dashboard", area="risco", resource_title="Painel X")
+    assert gh.promo["remove_files"] == ["src/dashboards/risco/painel_x/mapping.json"]
 
 
 def test_dashboard_review_runs_structural_checks_and_no_eval_run(monkeypatch):
@@ -628,3 +655,106 @@ def test_one_kind_failing_does_not_blank_the_whole_resource_list(monkeypatch):
 
     monkeypatch.setattr(app_logic, "list_dev_resources", _list)
     assert [r["kind"] for r in app_logic.list_all_dev_resources()] == ["genie_space"]
+
+
+# --- the controlled business-area vocabulary + the nested layout it produces -----------------------
+
+
+def test_business_areas_are_a_closed_set_with_safe_keys():
+    """The area becomes a real DIRECTORY in the content repo, so every key must be path/branch-safe.
+
+    A free-text field would fragment the same area into `risco`/`Risco`/`risk` — three places nobody
+    can find anything in — which is why this is a closed set validated at every boundary.
+    """
+    import re
+
+    import business_area
+
+    areas = business_area.all_areas()
+    assert areas, "at least one area must be configured"
+    for area in areas:
+        assert re.fullmatch(r"[a-z][a-z0-9_]{1,31}", area.key), area.key
+        assert area.label.strip()
+
+
+def test_an_area_override_that_is_malformed_falls_back_instead_of_breaking_promotion(monkeypatch):
+    """This is read on every request, so a typo in deployment config must not take the whole promotion
+    surface down — and a partially-valid override must not apply HALF a list."""
+    import business_area
+
+    default_keys = business_area.keys()
+    for bad in ("not json", "[]", '[{"key": "Risco", "label": "x"}]', '[{"label": "no key"}]'):
+        monkeypatch.setenv("APP_BUSINESS_AREAS", bad)
+        assert business_area.keys() == default_keys, bad
+
+    # A WELL-FORMED override replaces the set wholesale.
+    monkeypatch.setenv("APP_BUSINESS_AREAS", '[{"key": "tesouraria", "label": "Tesouraria"}]')
+    assert business_area.keys() == {"tesouraria"}
+
+
+def test_an_unknown_area_is_refused_at_the_engine_boundary():
+    """Filing a resource in the wrong place is a governance problem — no silent 'other' bucket."""
+    import business_area
+
+    for bad in (None, "", "   ", "Risco", "risk", "../etc", "risco/../compliance"):
+        try:
+            business_area.get(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"area {bad!r} must be refused")
+    assert business_area.get("risco").key == "risco"
+
+
+def test_a_path_traversal_area_can_never_escape_the_dashboards_directory():
+    """The area is interpolated into a path, so the closed set is also the traversal defence."""
+    for hostile in ("../../etc", "..", "a/../../b", "/absolute"):
+        try:
+            app_logic.resource_slug("d1", "dashboard", area=hostile, title="Painel")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"area {hostile!r} must be refused")
+
+
+def test_the_derived_name_is_stable_and_readable_for_a_portuguese_title():
+    """The layout exists so a HUMAN can browse the repo by area — the name has to read like the title."""
+    import business_area
+
+    assert business_area.resource_name("Painel de Recebíveis — Volume por Bandeira") == (
+        "painel_de_recebiveis_volume_por_bandeira")
+    # Deriving twice is idempotent (a re-promotion must land on the SAME directory, not a new one).
+    once = business_area.resource_name("Ação & Risco")
+    assert business_area.resource_name(once) == once
+
+
+def test_a_title_that_yields_no_usable_name_is_refused():
+    import business_area
+
+    for bad in ("", "   ", "123", "!!!"):
+        try:
+            business_area.resource_name(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"title {bad!r} must be refused")
+
+
+def test_the_preview_reports_the_dashboard_structure_for_the_confirm_step():
+    """The dedicated painel page shows datasets/widgets/pages BEFORE promoting, so the author confirms
+    they picked the right painel. Descriptive only — the gate is DASH-01..04 in the review."""
+    client = _dashboard_client()
+    out = app_logic.preview_promotion("d1", user_token="tok", dev_client=client, kind="dashboard")
+
+    assert out["structure"]["datasets"] == ["ds_volume"]
+    assert out["structure"]["n_widgets"] == 2          # the bar widget + the markdown widget
+    assert out["structure"]["pages"] == ["Painel Recebíveis"]
+
+
+def test_a_genie_preview_carries_no_dashboard_structure(monkeypatch):
+    """`structure` is dashboard-only — a Genie preview must not grow a field its screen ignores."""
+    space = {"data_sources": {"tables": []}, "instructions": {}, "benchmarks": {"questions": []}}
+    client = NS(genie=NS(get_space=lambda *a, **k: NS(serialized_space=json.dumps(space),
+                                                      title="Recebíveis")))
+    out = app_logic.preview_promotion("s1", user_token="tok", dev_client=client)
+    assert "structure" not in out

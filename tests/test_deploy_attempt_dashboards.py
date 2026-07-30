@@ -31,19 +31,33 @@ DASHBOARD = {
 SPACE = {"data_sources": {"tables": []}}
 
 
+# The dashboard slug is `<area>/<name>` (the NESTED layout); a Genie slug stays flat.
+DASH_SLUG = "risco/volume_por_bandeira"
+
+
 def _build(tmp_path: Path, *, spaces=(("receivables", "Recebíveis"),),
-           dashboards=(("recebiveis", "Painel de Recebíveis"),)) -> Path:
-    """A rendered build/ tree containing artifacts of both kinds."""
-    for subdir, items, doc, suffix in (
-        ("genie", spaces, SPACE, ".serialized_space.json"),
-        ("dashboards", dashboards, DASHBOARD, ".lvdash.json"),
-    ):
-        base = tmp_path / "build" / subdir
-        base.mkdir(parents=True, exist_ok=True)
-        for slug, title in items:
-            (base / f"{slug}{suffix}").write_text(json.dumps(doc), encoding="utf-8")
-            (base / f"{slug}.title").write_text(title + "\n", encoding="utf-8")
-            (base / f"{slug}.audience.json").write_text(json.dumps(AUDIENCE), encoding="utf-8")
+           dashboards=((DASH_SLUG, "Painel de Recebíveis"),)) -> Path:
+    """A rendered build/ tree containing artifacts of both kinds, each in ITS OWN layout.
+
+    Genie is FLAT (`build/genie/<slug>.serialized_space.json` + `<slug>.`-prefixed sidecars); a
+    dashboard is NESTED (`build/dashboards/<area>/<name>/dashboard.lvdash.json` + fixed sidecar
+    names). Building both shapes here is what makes the per-kind discovery genuinely exercised.
+    """
+    genie_base = tmp_path / "build" / "genie"
+    genie_base.mkdir(parents=True, exist_ok=True)
+    for slug, title in spaces:
+        (genie_base / f"{slug}.serialized_space.json").write_text(json.dumps(SPACE), encoding="utf-8")
+        (genie_base / f"{slug}.title").write_text(title + "\n", encoding="utf-8")
+        (genie_base / f"{slug}.audience.json").write_text(json.dumps(AUDIENCE), encoding="utf-8")
+
+    dash_base = tmp_path / "build" / "dashboards"
+    dash_base.mkdir(parents=True, exist_ok=True)
+    for slug, title in dashboards:
+        resource_dir = dash_base / slug
+        resource_dir.mkdir(parents=True, exist_ok=True)
+        (resource_dir / "dashboard.lvdash.json").write_text(json.dumps(DASHBOARD), encoding="utf-8")
+        (resource_dir / "title").write_text(title + "\n", encoding="utf-8")
+        (resource_dir / "audience.json").write_text(json.dumps(AUDIENCE), encoding="utf-8")
     return tmp_path
 
 
@@ -131,7 +145,7 @@ def _operations(tmp_path: Path, *, permissions=None, tags=None):
 def test_artifacts_are_discovered_for_both_kinds(tmp_path):
     ops, _p, _t = _operations(_build(tmp_path))
     found = {(kind.kind, slug) for kind, slug, _r, _ti, _a in ops._all_artifacts()}
-    assert found == {("genie_space", "receivables"), ("dashboard", "recebiveis")}
+    assert found == {("genie_space", "receivables"), ("dashboard", DASH_SLUG)}
 
 
 def test_a_dashboard_only_promotion_is_valid(tmp_path):
@@ -163,6 +177,8 @@ def test_a_slug_shared_across_kinds_is_refused(tmp_path):
     dict by slug (the later kind wins the id) while `_kind_of` returns the FIRST match, so a stage
     would apply Genie's permissions object type / tag entity type to a dashboard's id.
     """
+    # A PINNED friendly slug carries no `<area>/<name>` shape, so a Genie slug and a dashboard slug
+    # can collide by configuration — that is the case this must refuse.
     repo = _build(tmp_path, spaces=(("recebiveis", "Espaço"),),
                   dashboards=(("recebiveis", "Painel"),))
     ops, _p, _t = _operations(repo)
@@ -176,7 +192,7 @@ def test_a_slug_shared_across_kinds_is_refused(tmp_path):
 
 def test_a_dashboard_without_a_title_sidecar_fails(tmp_path):
     repo = _build(tmp_path)
-    (repo / "build" / "dashboards" / "recebiveis.title").unlink()
+    (repo / "build" / "dashboards" / DASH_SLUG / "title").unlink()
     ops, _p, _t = _operations(repo)
     try:
         ops._all_artifacts()
@@ -191,14 +207,14 @@ def test_a_dashboard_without_a_title_sidecar_fails(tmp_path):
 
 def test_resolve_space_resolves_both_kinds_by_title(tmp_path):
     ops, _p, _t = _operations(_build(tmp_path))
-    assert ops.resolve_space() == {"receivables": "space-1", "recebiveis": "dash-1"}
+    assert ops.resolve_space() == {"receivables": "space-1", DASH_SLUG: "dash-1"}
 
 
 def test_app_manage_uses_each_kind_permissions_object_type(tmp_path):
     """`genie` vs `dashboards` — the plural is required for dashboards; the singular is rejected by
     the API, so a regression here is invisible offline and fatal in production."""
     ops, permissions, _t = _operations(_build(tmp_path))
-    ops.assert_app_manage({"receivables": "space-1", "recebiveis": "dash-1"})
+    ops.assert_app_manage({"receivables": "space-1", DASH_SLUG: "dash-1"})
     assert set(permissions.updates) == {("genie", "space-1"), ("dashboards", "dash-1")}
 
 
@@ -206,7 +222,7 @@ def test_reconcile_audience_derives_the_level_of_each_kind(tmp_path):
     """A Space audience derives CAN_RUN; a dashboard audience derives CAN_READ — the least level that
     lets a business user open a published dashboard."""
     ops, permissions, _t = _operations(_build(tmp_path))
-    ops.reconcile_audience({"receivables": "space-1", "recebiveis": "dash-1"})
+    ops.reconcile_audience({"receivables": "space-1", DASH_SLUG: "dash-1"})
     by_object = {(obj, rid): levels for obj, rid, levels in permissions.sets}
     assert "CAN_RUN" in by_object[("genie", "space-1")]
     assert "CAN_READ" in by_object[("dashboards", "dash-1")]
@@ -214,7 +230,7 @@ def test_reconcile_audience_derives_the_level_of_each_kind(tmp_path):
 
 def test_verify_live_state_reads_back_through_each_kind_object_type(tmp_path):
     ops, permissions, _t = _operations(_build(tmp_path))
-    ops.verify_live_state({"receivables": "space-1", "recebiveis": "dash-1"})
+    ops.verify_live_state({"receivables": "space-1", DASH_SLUG: "dash-1"})
     assert ("dashboards", "dash-1") in permissions.gets
     assert ("genie", "space-1") in permissions.gets
 
@@ -229,7 +245,7 @@ def test_a_genie_readback_of_can_read_still_fails(tmp_path):
     both_can_read = _Permissions(level_by_object={"genie": "CAN_READ", "dashboards": "CAN_READ"})
     ops, _p, _t = _operations(_build(tmp_path), permissions=both_can_read)
     try:
-        ops.verify_live_state({"receivables": "space-1", "recebiveis": "dash-1"})
+        ops.verify_live_state({"receivables": "space-1", DASH_SLUG: "dash-1"})
     except RuntimeError as e:
         assert "audience readback failed" in str(e)
         assert "receivables" in str(e), "the GENIE slug must be the one that fails"
@@ -242,7 +258,7 @@ def test_a_dashboard_readback_of_can_read_passes(tmp_path):
     ops, _p, _t = _operations(
         _build(tmp_path, spaces=()),
         permissions=_Permissions(level_by_object={"genie": "CAN_RUN", "dashboards": "CAN_READ"}))
-    ops.verify_live_state({"recebiveis": "dash-1"})  # must not raise
+    ops.verify_live_state({DASH_SLUG: "dash-1"})  # must not raise
 
 
 def test_verify_live_state_fails_when_the_audience_is_absent(tmp_path):
@@ -253,7 +269,7 @@ def test_verify_live_state_fails_when_the_audience_is_absent(tmp_path):
            all_permissions=[NS(permission_level="CAN_MANAGE", inherited=False)])])
     ops, _p, _t = _operations(_build(tmp_path), permissions=permissions)
     try:
-        ops.verify_live_state({"receivables": "space-1", "recebiveis": "dash-1"})
+        ops.verify_live_state({"receivables": "space-1", DASH_SLUG: "dash-1"})
     except RuntimeError as e:
         assert "audience readback failed" in str(e)
     else:
@@ -263,7 +279,7 @@ def test_verify_live_state_fails_when_the_audience_is_absent(tmp_path):
 def test_certification_uses_each_kind_tag_entity_type(tmp_path):
     """`geniespaces` vs `dashboards` — the other spellings are rejected outright by the tag API."""
     ops, _p, tags = _operations(_build(tmp_path))
-    ops.certify_space({"receivables": "space-1", "recebiveis": "dash-1"})
+    ops.certify_space({"receivables": "space-1", DASH_SLUG: "dash-1"})
 
     assert tags.store[("geniespaces", "space-1", "system.certification_status")] == "certified"
     assert tags.store[("dashboards", "dash-1", "system.certification_status")] == "certified"
@@ -285,7 +301,7 @@ def test_certification_readback_tolerates_eventual_consistency(tmp_path):
 
     tags = _FlakyTags()
     ops, _p, _t = _operations(_build(tmp_path, spaces=()), tags=tags)
-    ops.certify_space({"recebiveis": "dash-1"})
+    ops.certify_space({DASH_SLUG: "dash-1"})
     assert tags.store[("dashboards", "dash-1", "system.certification_status")] == "certified"
 
 
@@ -294,13 +310,13 @@ def test_previous_audience_is_read_from_the_right_source_dir(tmp_path):
     src/dashboards, not src/genie."""
     repo = _build(tmp_path)
     previous = tmp_path / "previous"
-    (previous / "src" / "dashboards").mkdir(parents=True)
-    (previous / "src" / "dashboards" / "recebiveis.audience.json").write_text(
+    (previous / "src" / "dashboards" / DASH_SLUG).mkdir(parents=True)
+    (previous / "src" / "dashboards" / DASH_SLUG / "audience.json").write_text(
         json.dumps({"principals": [{"principal": "antigo", "is_group": False}]}), encoding="utf-8")
     ops, _p, _t = _operations(repo)
     ops.previous_content_root = previous
 
-    spec = ops._previous("recebiveis", rk.DASHBOARD_KIND)
+    spec = ops._previous(DASH_SLUG, rk.DASHBOARD_KIND)
     assert spec is not None and spec.names() == ("antigo",)
     # And a Genie slug still reads from src/genie (absent here -> None, not a crash).
     assert ops._previous("receivables", rk.GENIE_SPACE_KIND) is None

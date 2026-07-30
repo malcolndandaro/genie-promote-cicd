@@ -94,6 +94,20 @@ export async function getProdSpaces(q = ''): Promise<PromotableResource[]> {
   return (data.spaces ?? []).map(spaceToResource);
 }
 
+/** One business area a resource can be filed under, from the CONTROLLED vocabulary. */
+export interface BusinessArea {
+  key: string;
+  label: string;
+}
+
+/** The areas the promote form's picker offers. A closed set on purpose: the area becomes a directory
+ * in the content repo, so free text would fragment it into `risco`/`Risco`/`risk`. The engine
+ * re-validates on submit, so this list is convenience, not the control. */
+export async function getBusinessAreas(): Promise<BusinessArea[]> {
+  const data = await getJSON<{ areas?: BusinessArea[] }>('/api/business-areas');
+  return data.areas ?? [];
+}
+
 /** Users + groups of the workspace directory (SCIM), for every principal picker (F2 access
  * audience declarations and role assignment). `q` is a search query, server-filtered;
  * blank returns a prefilled first page. */
@@ -143,7 +157,10 @@ export async function postPromote(
   resource: PromotableResource,
   audienceSpec: AudienceSpec,
   prodTitle?: string,
-  tableMapping?: Record<string, string>
+  tableMapping?: Record<string, string>,
+  /** The business area to file the resource under. Required for a dashboard (it becomes the
+   * `src/dashboards/<area>/<name>/` directory); ignored for a Genie Space, which stays flat. */
+  area?: string
 ): Promise<PromoteResult> {
   const r = await fetch('/api/promote', {
     method: 'POST',
@@ -153,6 +170,7 @@ export async function postPromote(
       resource_title: prodTitle?.trim() || resource.title,
       resource_kind: resource.kind,
       audience_spec: audienceSpec,
+      ...(area ? { area } : {}),
       ...(tableMapping && Object.keys(tableMapping).length > 0 ? { table_mapping: tableMapping } : {}),
     }),
   });
@@ -227,10 +245,19 @@ export interface PromotePreviewTable {
   default_target: string;
 }
 
+/** A dashboard's own shape, for the confirm step's summary. Present only for a dashboard preview —
+ * descriptive, never a gate (the gate is DASH-01..04 in the review). */
+export interface DashboardStructure {
+  datasets: string[];
+  n_widgets: number;
+  pages: string[];
+}
+
 export interface PromotePreview {
   /** The dev Space's title — the default the editable prod-name field is pre-filled with. */
   title: string | null;
   tables: PromotePreviewTable[];
+  structure?: DashboardStructure;
 }
 
 /** G7: preview a promotion's table de-para BEFORE requesting it — read-only, persists nothing.

@@ -89,7 +89,7 @@ test('the open promotion on a space is visible on its row before expanding (D7)'
   await page.getByRole('link', { name: 'Meus espaços' }).click();
 
   // The resumed run's live phase (not its older list snapshot) is visible on the collapsed row.
-  await expect(page.getByLabel('Recursos disponíveis').getByText('Checagens em execução')).toBeVisible();
+  await expect(page.getByLabel('Spaces disponíveis').getByText('Checagens em execução')).toBeVisible();
   await expect(page.getByText('— ana@databricks.com')).toBeVisible();
 });
 
@@ -135,7 +135,7 @@ test('a stale merged summary is reconciled to the live deployed status before th
   await page.goto('/#/espacos');
   await statusStarted;
 
-  const spaces = page.getByLabel('Recursos disponíveis');
+  const spaces = page.getByLabel('Spaces disponíveis');
   await expect(spaces.getByText('Atualizando status…')).toBeVisible();
   await expect(spaces.getByText('Merge concluído')).toHaveCount(0);
   await expect(page.getByLabel('Atualizando status no GitHub')).toBeVisible();
@@ -192,7 +192,7 @@ test('expanding support details shows progress while GitHub evidence is loading'
   });
 
   await page.goto('/#/espacos');
-  await expect(page.getByLabel('Recursos disponíveis').getByText('Implantando…')).toBeVisible();
+  await expect(page.getByLabel('Spaces disponíveis').getByText('Implantando…')).toBeVisible();
   await page.getByText('Detalhes para suporte e auditoria', { exact: true }).click();
   await evidenceStarted;
 

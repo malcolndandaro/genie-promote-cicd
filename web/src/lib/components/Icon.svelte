@@ -14,12 +14,15 @@
     | 'menu'
     | 'close'
     | 'external'
-    | 'download';
+    | 'download'
+    | 'chart';
 
   // Stroke icons share the svg stroke attributes; only their inner geometry differs.
   const STROKE: Record<Exclude<IconName, 'github'>, string> = {
     home: '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>',
     grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',
+    // A bar chart — the AI/BI dashboards destination.
+    chart: '<path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6" rx="0.5"/><rect x="12" y="8" width="3" height="10" rx="0.5"/><rect x="17" y="5" width="3" height="13" rx="0.5"/>',
     'git-branch':
       '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
     'plus-circle':

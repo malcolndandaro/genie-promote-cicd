@@ -215,10 +215,24 @@ class ProductionOperations:
         """
         out = []
         build_dir = self.root / "build" / kind.build_subdir
-        for rendered in sorted(build_dir.glob(f"*{kind.artifact_suffix}")):
-            slug = rendered.name.removesuffix(kind.artifact_suffix)
-            title = rendered.with_name(f"{slug}.title")
-            audience = rendered.with_name(f"{slug}.audience.json")
+        if kind.nested_layout:
+            # NESTED: build/dashboards/<area>/<name>/dashboard.lvdash.json, sidecars beside it with
+            # fixed names. The slug is the path between the build dir and the artifact.
+            # `as_posix()` so the slug uses `/` on every platform — it is a git path and a
+            # `target_ids` key, never an OS-local path.
+            found = [(p.parent.relative_to(build_dir).as_posix(), p)
+                     for p in sorted(build_dir.glob(f"**/dashboard{kind.artifact_suffix}"))]
+        else:
+            # FLAT: build/genie/<slug>.serialized_space.json with `<slug>.`-prefixed sidecars.
+            found = [(p.name.removesuffix(kind.artifact_suffix), p)
+                     for p in sorted(build_dir.glob(f"*{kind.artifact_suffix}"))]
+        for slug, rendered in found:
+            if kind.nested_layout:
+                title = rendered.with_name("title")
+                audience = rendered.with_name("audience.json")
+            else:
+                title = rendered.with_name(f"{slug}.title")
+                audience = rendered.with_name(f"{slug}.audience.json")
             if not title.exists() or not title.read_text(encoding="utf-8").strip():
                 raise ValueError(f"{slug}: required non-empty title sidecar is missing")
             if not audience.exists():
@@ -375,8 +389,9 @@ class ProductionOperations:
         """
         if self.previous_content_root is None:
             return None
-        src_dir = (kind or resource_kind.GENIE_SPACE_KIND).src_dir
-        path = self.previous_content_root / src_dir / f"{slug}.audience.json"
+        rkind = kind or resource_kind.GENIE_SPACE_KIND
+        # Reuse the registry's own path builder so the two layouts can never drift apart here.
+        path = self.previous_content_root / rkind.audience_path(slug)
         if path.exists():
             with path.open(encoding="utf-8") as handle:
                 return audience_spec.parse_sidecar(json.load(handle))

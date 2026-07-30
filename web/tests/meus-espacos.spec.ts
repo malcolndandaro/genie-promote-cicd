@@ -228,8 +228,8 @@ test('shows the empty state pointing to the dev workspace when there are no spac
   await page.route('**/api/resources', (route) => route.fulfill({ json: { resources: [] } }));
   await page.goto('/#/espacos');
 
-  await expect(page.getByText('Nenhum recurso encontrado')).toBeVisible();
-  await expect(page.getByText('Painel AI/BI no workspace de dev', { exact: false })).toBeVisible();
+  await expect(page.getByText('Nenhum Genie Space encontrado')).toBeVisible();
+  await expect(page.getByText('Genie nativo do workspace de dev', { exact: false })).toBeVisible();
 });
 
 test('shows an error state with retry when /api/resources fails', async ({ page }) => {
@@ -238,7 +238,7 @@ test('shows an error state with retry when /api/resources fails', async ({ page 
   );
   await page.goto('/#/espacos');
 
-  await expect(page.getByText(/Não foi possível listar os recursos/)).toBeVisible();
+  await expect(page.getByText(/Não foi possível listar os espaços/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tentar novamente' })).toBeVisible();
 });
 
@@ -253,11 +253,11 @@ test('search and status filter narrow the Space list without losing context', as
   }] } }));
   await page.goto('/');
 
-  await page.getByRole('textbox', { name: 'Buscar recurso' }).fill('arr');
+  await page.getByRole('textbox', { name: 'Buscar Space' }).fill('arr');
   await expect(page.getByRole('heading', { name: 'Arranjos', level: 3 })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toHaveCount(0);
 
-  await page.getByRole('textbox', { name: 'Buscar recurso' }).fill('');
+  await page.getByRole('textbox', { name: 'Buscar Space' }).fill('');
   await page.getByRole('combobox', { name: 'Filtrar por status' }).selectOption('open');
   await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Arranjos', level: 3 })).toHaveCount(0);

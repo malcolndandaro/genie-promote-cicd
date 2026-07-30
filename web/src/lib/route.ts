@@ -8,6 +8,7 @@
  */
 export type RouteId =
   | 'espacos'
+  | 'paineis'
   | 'promocoes'
   | 'revisao'
   | 'auditoria'
@@ -21,6 +22,7 @@ export interface Route {
 
 export const ROUTE_IDS: readonly RouteId[] = [
   'espacos',
+  'paineis',
   'promocoes',
   'revisao',
   'auditoria',

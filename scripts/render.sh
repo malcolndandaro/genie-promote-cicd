@@ -77,11 +77,24 @@ done
 mkdir -p build/dashboards
 dash_entries=""
 dash_count=0
-for src in src/dashboards/*.lvdash.json; do
-  slug="$(basename "$src" .lvdash.json)"
+# NESTED layout: each dashboard lives in its own directory under a business area,
+# `src/dashboards/<area>/<name>/dashboard.lvdash.json`, so the slug is the two path segments between
+# `src/dashboards/` and the artifact. There is no version directory — git holds the history and a new
+# revision replaces the same files, so the diff shows what changed.
+#
+# `find` rather than `shopt -s globstar`: the self-hosted runner is macOS, whose /bin/bash is 3.2 and
+# has no globstar (it fails with "invalid shell option name"). `-print0`/`read -d ''` so a path with
+# spaces or non-ASCII survives.
+while IFS= read -r -d '' src; do
+  slug="${src#src/dashboards/}"; slug="${slug%/dashboard.lvdash.json}"
+  # The DABs resource key cannot read as a path, so `<area>/<name>` flattens to `<area>__<name>`
+  # (mirrors resource_kind.resource_key).
+  key="${slug//\//__}"
   dash_count=$((dash_count + 1))
-  render_one "$src" "build/dashboards/${slug}.lvdash.json" "src/dashboards/${slug}.mapping.json" "dashboard-sql"
-  title_file="src/dashboards/${slug}.title"
+  mkdir -p "build/dashboards/${slug}"
+  render_one "$src" "build/dashboards/${slug}/dashboard.lvdash.json" \
+             "src/dashboards/${slug}/mapping.json" "dashboard-sql"
+  title_file="src/dashboards/${slug}/title"
   # `-z "$(tr -d [:space:])"`, not `! -s`: `-s` only tests BYTE SIZE, so a whitespace-only title passed
   # render and produced `display_name: "   "`, deferring the real failure to mid-deploy — the opposite
   # of what this guard is for.
@@ -93,17 +106,17 @@ for src in src/dashboards/*.lvdash.json; do
   title="$(python3 scripts/pre_render.py yaml-scalar "$title_file")"
   # file_path is resolved relative to THIS generated file's dir (build/), so ./dashboards/... not
   # ./build/dashboards/...
-  dash_entries+="        ${slug}:${NL}"
+  dash_entries+="        ${key}:${NL}"
   dash_entries+="          display_name: ${title}${NL}"
   dash_entries+="          warehouse_id: \${var.warehouse_id}${NL}"
-  dash_entries+="          file_path: ./dashboards/${slug}.lvdash.json${NL}"
+  dash_entries+="          file_path: ./dashboards/${slug}/dashboard.lvdash.json${NL}"
   # Copy the sidecars forward so the deploy resolves the live id + reconciles the audience without
   # reaching back into src/ (mirrors the Genie loop exactly).
-  cp "$title_file" "build/dashboards/${slug}.title"
-  if [ -f "src/dashboards/${slug}.audience.json" ]; then
-    cp "src/dashboards/${slug}.audience.json" "build/dashboards/${slug}.audience.json"
+  cp "$title_file" "build/dashboards/${slug}/title"
+  if [ -f "src/dashboards/${slug}/audience.json" ]; then
+    cp "src/dashboards/${slug}/audience.json" "build/dashboards/${slug}/audience.json"
   fi
-done
+done < <(find src/dashboards -type f -name 'dashboard.lvdash.json' -print0 2>/dev/null | sort -z)
 
 # ONE generated file, both collections, BOTH written under `targets: prod:` in a single pass.
 # Promoted content is prod-only — dev is human-authored.

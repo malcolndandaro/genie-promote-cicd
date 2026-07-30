@@ -80,6 +80,10 @@ class ResourceKind:
     # always prefix, which is what guarantees the two kinds' slug namespaces stay disjoint even for
     # an id shape that happens to start with a letter.
     bare_slug_if_alpha: bool
+    # Whether this kind files each resource in its OWN directory under a business area
+    # (`<area>/<name>/`) with fixed sidecar names, instead of flat `<slug>.<sidecar>` files. See the
+    # path-builder block below for the two shapes and why Genie stays flat.
+    nested_layout: bool = False
 
     # --- committed sidecar paths (the content repo's per-resource contract) -------------------
     #
@@ -88,39 +92,92 @@ class ResourceKind:
     # `bundle summary` nor the DABs deploy reports it back), so a missing/blank title fails render
     # rather than deploying something unresolvable.
 
+    # --- how a slug maps onto a committed path ------------------------------------------------
+    #
+    # Two layouts exist, and which one a kind uses is `nested_layout`:
+    #
+    #   FLAT (Genie, historical):   src/genie/<slug>.serialized_space.json
+    #                               src/genie/<slug>.title
+    #   NESTED (dashboards):        src/dashboards/<area>/<name>/dashboard.lvdash.json
+    #                               src/dashboards/<area>/<name>/title
+    #
+    # The nested layout files a dashboard under its owning BUSINESS AREA, which is how a business
+    # author looks for it, and gives each resource its own directory so its sidecars sit together
+    # instead of being interleaved with every other resource's in one flat listing. There is no
+    # version directory: git already holds the history, so a new revision REPLACES the content of the
+    # same directory and the diff shows what changed.
+    #
+    # Genie stays flat deliberately — 7 Spaces are already committed and promoted that way, and moving
+    # them would rewrite live promotion branches for no user-visible gain.
+
+    def _base(self, slug: str) -> str:
+        """The path prefix a resource's files share, and the sidecar naming that follows from it."""
+        return f"{self.src_dir}/{slug}"
+
     def artifact_path(self, slug: str) -> str:
         """The promoted definition itself (serialized_space JSON / .lvdash.json)."""
-        return f"{self.src_dir}/{slug}{self.artifact_suffix}"
+        if self.nested_layout:
+            return f"{self._base(slug)}/dashboard{self.artifact_suffix}"
+        return f"{self._base(slug)}{self.artifact_suffix}"
 
     def title_path(self, slug: str) -> str:
         """The declared production display name — also the deploy's id-resolution key."""
-        return f"{self.src_dir}/{slug}.title"
+        return f"{self._base(slug)}/title" if self.nested_layout else f"{self._base(slug)}.title"
 
     def audience_path(self, slug: str) -> str:
         """The required canonical AudienceSpec sidecar (ADR-0009)."""
-        return f"{self.src_dir}/{slug}.audience.json"
+        if self.nested_layout:
+            return f"{self._base(slug)}/audience.json"
+        return f"{self._base(slug)}.audience.json"
 
     def mapping_path(self, slug: str) -> str:
         """The optional table de-para, applied by CI AFTER the rebind and BEFORE the allowlist."""
-        return f"{self.src_dir}/{slug}.mapping.json"
+        if self.nested_layout:
+            return f"{self._base(slug)}/mapping.json"
+        return f"{self._base(slug)}.mapping.json"
 
     def revision_path(self, slug: str) -> str:
         """The immutable content/engine revision pair reviewed and deployed (ADR-0008)."""
-        return f"{self.src_dir}/{slug}.revision.json"
+        if self.nested_layout:
+            return f"{self._base(slug)}/revision.json"
+        return f"{self._base(slug)}.revision.json"
 
-    def slug_for(self, resource_id: str, pinned: "dict[str, str] | None" = None) -> str:
+    def resource_key(self, slug: str) -> str:
+        """The DABs resource key for this slug.
+
+        A nested slug carries a `/`, which DABs accepts in a key (probed) but which reads badly in
+        `bundle summary` and in the app's deploy panel — so it is flattened to `<area>__<name>`. The
+        mapping is total and reversible enough to trace back, and stays disjoint from Genie's keys
+        because a Genie slug never contains `__` from this path (its ids are hex).
+        """
+        return slug.replace("/", "__") if self.nested_layout else slug
+
+    def slug_for(self, resource_id: str, pinned: "dict[str, str] | None" = None, *,
+                 area: "str | None" = None, name: "str | None" = None) -> str:
         """A stable, branch/path/DABs-identifier-safe slug for one resource.
 
-        A pinned slug wins (so an already-promoted resource keeps its committed file, branch and
-        generated bundle resource); otherwise the id is sanitized to alnum/underscore and given this
-        kind's prefix. The prefix is what keeps the two kinds' slug namespaces DISJOINT, so a
-        dashboard slug can never be mistaken for a Space slug by the CI diff, and
-        `deployment_attempts.target_ids` can hold both kinds keyed by slug with no collision.
+        A pinned slug always wins (so an already-promoted resource keeps its committed files, branch
+        and generated bundle resource across a layout change).
+
+        For a NESTED kind the slug is `<area>/<name>`, both declared by the author at promotion time:
+        the area from the controlled vocabulary (`business_area`) and the name derived from the prod
+        title. The slug is therefore MEANINGFUL rather than an opaque id — which is the point of the
+        layout, since a human browses the content repo by area.
+
+        For a FLAT kind the id is sanitized to alnum/underscore and given this kind's prefix. That
+        prefix keeps the kinds' slug namespaces disjoint so a slug can never be mistaken for the other
+        kind's by the CI diff or by `deployment_attempts.target_ids`.
         """
         if pinned:
             existing = pinned.get(resource_id)
             if existing:
                 return existing
+        if self.nested_layout:
+            if not (area and name):
+                raise ValueError(
+                    f"{self.label_pt} requires a business area and a name to build its slug "
+                    "(both are author declarations, not derivable from the resource id)")
+            return f"{area}/{name}"
         safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in resource_id)
         # A leading letter is required for a DABs resource key / git branch segment.
         if self.bare_slug_if_alpha and safe[:1].isalpha():
@@ -158,6 +215,7 @@ DASHBOARD_KIND = ResourceKind(
     sql_only_ref_scan=True,
     label_pt="Painel AI/BI",
     bare_slug_if_alpha=False,
+    nested_layout=True,
 )
 
 KINDS: "dict[str, ResourceKind]" = {

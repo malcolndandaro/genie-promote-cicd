@@ -141,6 +141,7 @@ export class Promotion {
     this.pendingAudienceSpec = undefined;
     this.pendingProdTitle = undefined;
     this.pendingTableMapping = undefined;
+    this.pendingArea = undefined;
     this.selectionSeq += 1;
   }
 
@@ -231,6 +232,11 @@ export class Promotion {
    * dev_->prod_ defaults", exactly as before G7. */
   pendingTableMapping = $state<Record<string, string> | undefined>(undefined);
 
+  /** The business area this resource will be filed under in the content repo — mirrors the other
+   * pending declarations. REQUIRED for a kind with the nested layout (a dashboard becomes
+   * `src/dashboards/<area>/<name>/`); unused for Genie, which stays flat. */
+  pendingArea = $state<string | undefined>(undefined);
+
   /**
    * Request a promotion for the selected resource: review it (OBO export + app-SP reviewer) AND
    * open/update a real GitHub PR with the attributed review comment (bot). One action, one review.
@@ -238,7 +244,14 @@ export class Promotion {
   async requestPromotion(): Promise<void> {
     if (!this.resource || this.phase === 'reviewing') return; // no double-submit
     if (!this.pendingAudienceSpec) {
-      this.error = 'Selecione ao menos uma pessoa ou grupo para o Público do Space.';
+      this.error = 'Selecione ao menos uma pessoa ou grupo para o público do recurso.';
+      this.phase = 'error';
+      return;
+    }
+    // A dashboard is filed under a business area, so refuse BEFORE the request rather than let the
+    // engine 400 — the author gets the message next to the field they have to fill.
+    if (this.resource.kind === 'dashboard' && !this.pendingArea) {
+      this.error = 'Escolha a área de negócio onde este painel será versionado.';
       this.phase = 'error';
       return;
     }
@@ -262,7 +275,8 @@ export class Promotion {
         resource,
         this.pendingAudienceSpec,
         this.pendingProdTitle,
-        this.pendingTableMapping
+        this.pendingTableMapping,
+        this.pendingArea
       );
       if (this.resource?.id !== id) return; // selection changed mid-flight — drop the stale result
       this.review = res.review;
