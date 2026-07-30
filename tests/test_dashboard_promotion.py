@@ -6,6 +6,7 @@ interaction is a `SimpleNamespace` duck-typed fake, matching `test_app_logic.py`
 These tests pin the BEHAVIOURS that make a dashboard promotion trustworthy, and — just as important —
 that adding it changed nothing for Genie Spaces.
 """
+import datetime
 import json
 import os
 import sys
@@ -823,3 +824,96 @@ def test_resolution_waits_through_the_tombstone_then_returns_the_replacement():
     client = NS(lakeview=NS(list=_list, get=_get))
     assert wr.resolve_by_title(client, rk.DASHBOARD_KIND, "Painel", max_attempts=5,
                                retry_seconds=0, sleep=lambda _s: None) == "new-id"
+
+
+# --- re-promotion keeps the slug it was first promoted under ---------------------------------------
+#
+# The regression this pins: a nested slug is derived from author DECLARATIONS (area + prod title), so
+# re-promoting the same resource with either one changed derived a DIFFERENT slug and forked a SECOND
+# governed directory for one resource. Both then carried the same `title`, and since the title is the
+# deploy's only id-resolution key, `bundle deploy` tried to CREATE a dashboard whose display name was
+# already taken -> 409 ALREADY_EXISTS, mid-mutation.
+
+
+def _promotion(resource_id, branch, *, kind="dashboard", updated_at=None):
+    return NS(resource_id=resource_id, resource_kind=kind, branch=branch,
+              updated_at=updated_at or datetime.datetime(2026, 7, 30))
+
+
+def test_prior_slug_is_reused_when_the_author_picks_a_different_area(monkeypatch):
+    """An area change must NOT fork a second directory: the slug is the resource's identity."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_DASH_REVIEW))
+    gh = _FakeGitHubApp()
+    prior = [_promotion("d1", "promote/risco/painel_x")]
+
+    out = app_logic.request_promotion(
+        "d1", user_token="tok", audience_spec_=_audience(), github=gh, kind="dashboard",
+        area="compliance", resource_title="Painel X", prior_promotions=prior)
+
+    # Still filed under risco/, NOT the newly picked compliance/.
+    assert gh.promo["branch"] == "promote/risco/painel_x"
+    assert gh.promo["path"] == "src/dashboards/risco/painel_x/dashboard.lvdash.json"
+    assert out["reused_slug"] == "risco/painel_x"
+    # And the divergence is stated in the PR, so the diff doesn't look like the picker was ignored.
+    assert "risco/painel_x" in gh.promo["body"] and "compliance" in gh.promo["body"]
+
+
+def test_prior_slug_is_reused_when_the_title_is_renamed(monkeypatch):
+    """A rename stays non-destructive: the sidecar changes, the slug (and DABs key) does not."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_DASH_REVIEW))
+    gh = _FakeGitHubApp()
+    prior = [_promotion("d1", "promote/risco/painel_x")]
+
+    app_logic.request_promotion(
+        "d1", user_token="tok", audience_spec_=_audience(), github=gh, kind="dashboard",
+        area="risco", resource_title="Painel X Renomeado", prior_promotions=prior)
+
+    assert gh.promo["path"] == "src/dashboards/risco/painel_x/dashboard.lvdash.json"
+    # The DECLARED new name still reaches prod — via the sidecar, which is presentation, not identity.
+    assert gh.promo["extra_files"]["src/dashboards/risco/painel_x/title"] == "Painel X Renomeado\n"
+    # Same area + same slug => nothing to explain, so no relocation note.
+    assert "continua lá" not in gh.promo["body"]
+
+
+def test_a_first_promotion_still_derives_its_slug_from_the_declarations(monkeypatch):
+    """No prior promotion => the declared area/title decide the path, exactly as before."""
+    monkeypatch.setattr(app_logic, "review_space", lambda *a, **k: dict(_DASH_REVIEW))
+    gh = _FakeGitHubApp()
+
+    out = app_logic.request_promotion(
+        "d-new", user_token="tok", audience_spec_=_audience(), github=gh, kind="dashboard",
+        area="compliance", resource_title="Painel Novo",
+        prior_promotions=[_promotion("d-other", "promote/risco/painel_x")])
+
+    assert gh.promo["path"] == "src/dashboards/compliance/painel_novo/dashboard.lvdash.json"
+    assert out["reused_slug"] is None
+
+
+def test_prior_slug_lookup_is_scoped_by_kind_and_takes_the_newest(monkeypatch):
+    """Slug namespaces are per-kind, and re-promotions accumulate — the latest one wins."""
+    prior = [
+        _promotion("x1", "promote/risco/antigo", updated_at=datetime.datetime(2026, 7, 1)),
+        _promotion("x1", "promote/risco/atual", updated_at=datetime.datetime(2026, 7, 20)),
+        _promotion("x1", "promote/s_x1", kind="genie_space",
+                   updated_at=datetime.datetime(2026, 7, 29)),
+    ]
+    assert app_logic.prior_slug_for(prior, "x1", "dashboard") == "risco/atual"
+    assert app_logic.prior_slug_for(prior, "x1", "genie_space") == "s_x1"
+    assert app_logic.prior_slug_for(prior, "never-promoted", "dashboard") is None
+
+
+def test_a_promotion_row_with_an_unrecognized_kind_is_ignored_not_fatal():
+    """A stored kind is DATA. One legacy/typo'd row must not raise and break every promotion."""
+    prior = [
+        NS(resource_id="d1", resource_kind="retired_kind", branch="promote/risco/x",
+           updated_at=datetime.datetime(2026, 7, 29)),
+        _promotion("d1", "promote/risco/bom", updated_at=datetime.datetime(2026, 7, 20)),
+    ]
+    assert app_logic.prior_slug_for(prior, "d1", "dashboard") == "risco/bom"
+
+
+def test_a_promotion_row_with_no_timestamp_is_ignored():
+    """`updated_at` orders the candidates; a null one would crash `max`."""
+    prior = [NS(resource_id="d1", resource_kind="dashboard", branch="promote/risco/x",
+                updated_at=None)]
+    assert app_logic.prior_slug_for(prior, "d1", "dashboard") is None

@@ -303,8 +303,27 @@ class ProductionOperations:
             kind.kind: workspace_resource.list_resources(self.w, kind)
             for kind in resource_kind.all_kinds()
         }
-        for kind, slug, rendered, title_path, audience_path in self._all_artifacts():
-            title = title_path.read_text(encoding="utf-8").strip()
+        # A title must be unique within its kind across the DESIRED set too, not just the live one.
+        # The live check below only catches an already-duplicated workspace; two committed slugs
+        # claiming ONE title is a different failure and reaches further: the title is the deploy's
+        # only id-resolution key, so `resolve_by_title` cannot tell the two apart, and the bundle
+        # tries to CREATE a second resource whose display name is taken (409 ALREADY_EXISTS) — which
+        # surfaces mid-`bundle_deploy`, after `mutation_started`. It happens whenever the same
+        # resource is promoted twice under different slugs (an area change, or a hand-migrated
+        # directory whose name the engine would not derive), so refuse it here, before any mutation.
+        artifacts = [(kind, slug, rendered, title_path.read_text(encoding="utf-8").strip(),
+                      audience_path)
+                     for kind, slug, rendered, title_path, audience_path in self._all_artifacts()]
+        titles_by_kind: dict[str, dict[str, str]] = {}
+        for kind, slug, _rendered, title, _audience_path in artifacts:
+            claimed = titles_by_kind.setdefault(kind.kind, {})
+            if title in claimed:
+                raise ValueError(
+                    f"{kind.kind} title {title!r} is claimed by both {claimed[title]!r} and "
+                    f"{slug!r}; a title identifies exactly one resource (it is the deploy's only "
+                    f"id-resolution key) — keep one slug and delete the other")
+            claimed[title] = slug
+        for kind, slug, rendered, title, audience_path in artifacts:
             matches = [r for r in live_by_kind[kind.kind] if r["title"] == title]
             if len(matches) > 1:
                 raise ValueError(f"{slug}: duplicate live title {title!r}")

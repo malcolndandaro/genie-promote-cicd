@@ -119,16 +119,54 @@ def scan_retired_literals(root: Path, relative_paths: tuple[str, ...]) -> list[s
     return findings
 
 
+def _lock_lag_is_documentation_only(engine_root: Path, locked_revision: str,
+                                    engine_revision: str) -> bool:
+    """True when every commit between the lock and engine HEAD touches ONLY documentation.
+
+    The lock exists so unreviewed engine CODE cannot reach production. Documentation carries no
+    behaviour, and bumping the lock is not free: `engine.lock` is deliberately absent from
+    `deploy.yml`'s `paths-ignore` (the bump IS how new engine code reaches prod), so a docs-only bump
+    fires a full production deploy — behind a human Environment approval — to change nothing. So a
+    docs-only lag is the CORRECT state to sit in, and reporting it as NO-GO trains the operator to
+    ignore the check that also reports the real thing.
+
+    Returns False on any git failure (an unfetched or shallow engine checkout cannot list the range),
+    so an unverifiable lag stays a NO-GO rather than being assumed benign.
+    """
+    try:
+        changed = _git(engine_root, "diff", "--name-only", f"{locked_revision}..{engine_revision}")
+    except subprocess.CalledProcessError:
+        return False
+    paths = [line.strip() for line in changed.splitlines() if line.strip()]
+    if not paths:
+        return False  # nothing to compare -> not a lag this function can vouch for
+    return all(path.endswith(".md") or path.startswith("docs/") for path in paths)
+
+
 def check_lock(engine_root: Path, content_root: Path) -> tuple[bool, dict[str, str]]:
+    """Whether the content repository's engine lock pins the engine code that is running.
+
+    An EXACT match is the steady state. A lag whose whole range is documentation is also OK — see
+    `_lock_lag_is_documentation_only` — and is reported as such rather than as a bare pass, so the
+    operator can see the lock is behind and why that is deliberate.
+    """
     engine_revision = _git(engine_root, "rev-parse", "HEAD")
     content_revision = _git(content_root, "rev-parse", "HEAD")
     locked_revision = (content_root / "engine.lock").read_text(encoding="utf-8").strip()
     valid = bool(re.fullmatch(r"[0-9a-f]{40}", locked_revision))
-    return valid and locked_revision == engine_revision, {
+    revisions = {
         "engine_revision": engine_revision,
         "content_revision": content_revision,
         "content_engine_lock": locked_revision,
     }
+    if not valid:
+        return False, revisions
+    if locked_revision == engine_revision:
+        return True, revisions
+    if _lock_lag_is_documentation_only(engine_root, locked_revision, engine_revision):
+        revisions["lock_lag"] = "documentation-only (no engine code change to promote)"
+        return True, revisions
+    return False, revisions
 
 
 def check_schema_contract() -> list[str]:
@@ -298,7 +336,10 @@ def build_manifest(
         dirty_worktrees.append("content worktree is dirty")
     static_checks = [
         _check("legacy-absence", engine_retired + content_retired),
-        _check("engine-content-lock", [] if lock_ok else ["content engine.lock != engine HEAD"]),
+        _check("engine-content-lock", [] if lock_ok else [
+            "content engine.lock does not pin the running engine code "
+            f"(lock={revisions['content_engine_lock'] or 'invalid'}, "
+            f"engine HEAD={revisions['engine_revision']}); bump the lock by a reviewed content PR"]),
         _check("schema-migrations", check_schema_contract()),
         _check("workflow-guardrails", check_workflow_guardrails(engine_root, content_root)),
         _check("scenario-coverage", check_scenario_tests_exist(engine_root)),

@@ -313,8 +313,12 @@ git -C /caminho/para/genie-spaces-content rev-parse HEAD
 ```
 
 O `engine.lock` deve conter exatamente 40 caracteres hexadecimais minúsculos. O verificador de
-prontidão espera que ele seja igual ao checkout do engine em teste. Os workflows validam o formato,
-não a procedência — então verifique a alcançabilidade antes de aceitar uma mudança de lock:
+prontidão espera que ele seja igual ao checkout do engine em teste, com UMA exceção: se todos os
+commits entre o lock e o `HEAD` do engine forem de documentação (`*.md`, `docs/`), ele passa e reporta
+`lock_lag: documentation-only`. Subir o lock dispara um deploy de produção, então não vale gastar uma
+aprovação de Environment por uma mudança que não altera comportamento — suba junto com a próxima
+mudança de código. Os workflows validam o formato, não a procedência — então verifique a
+alcançabilidade antes de aceitar uma mudança de lock:
 
 ```bash
 ENGINE_SHA="$(tr -d '[:space:]' < /caminho/para/genie-spaces-content/engine.lock)"

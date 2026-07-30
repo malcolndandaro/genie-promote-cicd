@@ -137,12 +137,17 @@ registry + seus adaptadores — **não** novos ramos espalhados por `app_logic`/
 
 Regras que não são óbvias e já custaram caro:
 
-- **O scan de catálogo de um painel é ESTRUTURAL, não textual.** ENV-01 varre apenas
-  `datasets[].queryLines` (`pre_render.dashboard_sql_text`). Uma varredura do documento inteiro dá
-  falso positivo: um link markdown fez a gramática de referência de 3 partes casar `en.wikipedia.org` e
-  reportar o catálogo `en` como BLOCKER. Um catálogo citado em **prosa** é reescrito pelo rebind e
-  reportado como DASH-04 **consultivo** — prosa não é caminho de dados, nenhuma query roda de um widget
-  de texto.
+- **O scan de catálogo de um painel é ESTRUTURAL, e implementado como DENYLIST de prosa.**
+  `pre_render.dashboard_sql_text` remove as subárvores `*TextboxSpec` e devolve TODO o resto do
+  documento para o ENV-01 varrer. Uma varredura do documento inteiro dá falso positivo: um link
+  markdown fez a gramática de referência de 3 partes casar `en.wikipedia.org` e reportar o catálogo
+  `en` como BLOCKER. Um catálogo citado em **prosa** é reescrito pelo rebind e reportado como DASH-04
+  **consultivo** — prosa não é caminho de dados, nenhuma query roda de um widget de texto.
+  **Não troque por allowlist.** A primeira versão concatenava apenas `datasets[].queryLines` e era um
+  buraco real: `parameters[].defaultSelection` é texto livre que alcança o engine via
+  `IDENTIFIER(:param)` (verificado ao vivo) e `asset_name` referencia tabela do UC sem SQL algum. Uma
+  allowlist volta a vazar a cada campo novo do schema; a denylist falha na direção segura, porque um
+  campo desconhecido é varrido por padrão.
 - **Um painel não tem benchmarks.** EVAL-01/eval-run não se aplicam e não devem ser degradados para
   "advisory": o piso de qualidade é DASH-01..04 (estrutural, offline) + `check_dashboard_sql.py`
   (`EXPLAIN` de cada dataset contra o warehouse de PRODUÇÃO).
@@ -167,6 +172,16 @@ Regras que não são óbvias e já custaram caro:
   para slugs GERADOS — um slug amigável fixado não tem prefixo, então uma colisão é alcançável por
   configuração. `_all_artifacts` recusa alto: sem isso, `resolve_space` e `_kind_of` discordam e um
   estágio aplica o objeto/tag de Genie ao id de um painel.
+- **O slug é IDENTIDADE; a área e o título são DECLARAÇÕES.** O slug aninhado é derivado de (área,
+  título), então re-promover o mesmo recurso com um dos dois alterado derivaria um slug DIFERENTE e
+  bifurcaria um SEGUNDO diretório governado para um único recurso. Um recurso já promovido mantém o
+  slug da primeira promoção (`app_logic.prior_slug_for`, recuperado do branch persistido); o título
+  novo continua chegando à produção pelo sidecar, que é apresentação. Mover de área de verdade é um PR
+  deliberado, porque a chave DABs vem do slug e renomeá-la lê como delete+create.
+- **Um título identifica UM recurso dentro do seu tipo, no estado DESEJADO também.** O título é a única
+  chave de resolução de id, então dois slugs com o mesmo título fazem o `bundle deploy` tentar CRIAR um
+  recurso cujo display name já existe (409 `ALREADY_EXISTS`) — no meio da mutação. O `preflight` recusa
+  antes de qualquer mutação. Tipos diferentes PODEM compartilhar título: são objetos distintos.
 
 Ver a [ADR-0010](docs/adr/0010-second-resource-kind-via-registry-seam.md) para o desenho completo.
 
