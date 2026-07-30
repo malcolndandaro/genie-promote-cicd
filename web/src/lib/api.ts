@@ -137,6 +137,12 @@ export interface PromoteResult {
   no_change?: boolean;
   /** Review stopped on content blockers before any Change Request or production mutation. */
   blocked?: boolean;
+  /** Set when this resource was ALREADY promoted and therefore keeps the slug it was first promoted
+   * under, rather than one re-derived from the area/title declared now. The slug is the resource's
+   * identity in the content repo (directory, branch, bundle resource key), so re-deriving it would
+   * fork a second governed copy of one resource. Null on a first promotion. The PR body explains the
+   * divergence whenever the declared area disagrees with where the resource already lives. */
+  reused_slug?: string | null;
 }
 
 /**

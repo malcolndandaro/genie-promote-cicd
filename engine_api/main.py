@@ -710,15 +710,22 @@ def promote(
     pt_store_ = _prompt_template_store()
     custom_pt_ = pt_store_.get() if pt_store_ is not None else None
     persona_template = custom_pt_.template_text if custom_pt_ is not None else None
+    store = getattr(app.state, "store", None)
+    # Prior promotions of ANY resource, so `request_promotion` can keep an already-promoted resource
+    # under the slug it was first promoted under instead of forking a second governed directory when
+    # the author revises the area or the title. Read BEFORE the promotion, since it decides the path
+    # this promotion writes to. Not role-scoped on purpose: this is a content-layout lookup, not a
+    # listing surface, and a re-promotion by a DIFFERENT author must land on the same slug.
+    prior_promotions = store.list_promotions(None) if store is not None else []
     result = _engine_call(
         "request_promotion",
         lambda: app_logic.request_promotion(
             body.target_id, user_token=token, requester_email=x_forwarded_email,
             resource_title=body.resource_title, audience_spec_=audience, rule_overrides=overrides,
             ka_endpoints=ka_endpoints, persona_template=persona_template,
-            table_mapping=body.table_mapping, kind=body.kind, area=body.area),
+            table_mapping=body.table_mapping, kind=body.kind, area=body.area,
+            prior_promotions=prior_promotions),
     )
-    store = getattr(app.state, "store", None)
     # No PR means either a pre-Change-Request content blocker or an already-identical no-op. The
     # Promotion row is 1:1 with a Change Request, so neither case is persisted as a Promotion.
     if store is not None and result.get("pr") is not None:  # deployed app always has the store

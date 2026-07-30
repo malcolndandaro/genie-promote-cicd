@@ -51,8 +51,13 @@ jobs:
       - name: Unit tests (engine + engine API)
         run: |
           python -m venv .venv
+          # pyyaml is a TEST dependency only: the render emits YAML by hand (no yaml import in
+          # product code), and `test_render_dashboards.py` parses the generated bundle to prove a
+          # crafted dashboard title cannot inject a sibling key such as `embed_credentials: true`.
+          # Without it those three tests ERROR on import, so the YAML-injection floor was not being
+          # verified on the runner at all — a green-looking suite validating less than it appears to.
           .venv/bin/python -m pip install -q \
-            'databricks-sdk>=0.111.0' fastapi uvicorn httpx pytest
+            'databricks-sdk>=0.111.0' fastapi uvicorn httpx pytest pyyaml
           .venv/bin/python -m pytest tests/ -q
       - name: Pre-render + identifier allowlist (standalone — no content, emits empty resources)
         run: bash scripts/render.sh prod

@@ -120,6 +120,45 @@ def resource_slug(resource_id: str, kind: str | None = None, *,
                           name=business_area.resource_name(title or ""))
 
 
+def prior_slug_for(promotions, resource_id: str, kind: str | None = None) -> str | None:
+    """The slug this resource was ALREADY promoted under, or None if it never was.
+
+    A nested slug is derived from author DECLARATIONS (area + prod title), so a second promotion of
+    the same resource with either one changed derives a DIFFERENT slug — which silently forks a
+    second governed directory for one resource instead of updating the first. The deploy then tries
+    to CREATE a resource whose display name is taken and fails with 409 ALREADY_EXISTS mid-mutation.
+
+    The slug is IDENTITY, so it is pinned by the first promotion; the title is PRESENTATION and stays
+    free to change (its sidecar is rewritten in place, which also keeps a rename NON-destructive —
+    the DABs resource key is derived from the slug, and renaming a key reads as delete+create).
+
+    Recovered from the promotion's own branch (`<prefix>/<slug>`), which is durable Lakebase state
+    and outlives the PR. Scoped by kind, since slug namespaces are per-kind. The most recently
+    updated promotion wins — re-promotions accumulate history, exactly as
+    `_find_promotion_id_for_resource` treats them.
+    """
+    rkind = resource_kind.get(kind)
+    prefix = f"{GH_PROMOTION_BRANCH_PREFIX}/"
+
+    def _same_kind(promotion) -> bool:
+        # A stored kind is data, not a boundary input: one unrecognized legacy value must not raise
+        # and take down the whole promotion. An unresolvable row simply is not a match.
+        try:
+            return resource_kind.get(getattr(promotion, "resource_kind", None)).kind == rkind.kind
+        except ValueError:
+            return False
+
+    candidates = [p for p in promotions
+                  if getattr(p, "resource_id", None) == resource_id
+                  and (getattr(p, "branch", None) or "").startswith(prefix)
+                  and getattr(p, "updated_at", None) is not None
+                  and _same_kind(p)]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda p: p.updated_at)
+    return newest.branch[len(prefix):] or None
+
+
 def space_slug(space_id: str) -> str:
     """Back-compat alias for `resource_slug(space_id, "genie_space")`."""
     return resource_slug(space_id, resource_kind.GENIE_SPACE)
@@ -947,7 +986,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                       persona_template: str | None = None,
                       table_mapping: "dict[str, str] | None" = None,
                       kind: str | None = None,
-                      area: str | None = None) -> dict:
+                      area: str | None = None,
+                      prior_promotions: list | None = None) -> dict:
     """GH2 (+ F2 + G7): open (or update) a real promotion PR for a space and post the attributed
     review comment.
 
@@ -1003,7 +1043,13 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
     # is filed at `<area>/<name>` where `<name>` comes from the production name a human chose.
     prod_title = resource_title or safe_id
     # per-resource: this resource's own branch + committed files
-    slug = resource_slug(space_id, rkind.kind, area=area, title=prod_title)
+    #
+    # An ALREADY-promoted resource keeps the slug it was first promoted under, because the slug is
+    # this resource's identity in the content repo (directory, branch, DABs resource key) while the
+    # area and title are declarations the author may revise. Re-deriving the slug from a revised
+    # declaration would fork a SECOND governed directory for one resource — see `prior_slug_for`.
+    reused_slug = prior_slug_for(prior_promotions or [], space_id, rkind.kind)
+    slug = reused_slug or resource_slug(space_id, rkind.kind, area=area, title=prod_title)
     branch, path = branch_for(slug), src_path_for(slug, rkind.kind)
     # A per-resource title sidecar so render.sh can name the generated prod resource (and so the prod
     # resource keeps a friendly title). Committed next to the artifact; no shared manifest, so
@@ -1035,6 +1081,17 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
         sort_keys=True,
     ) + "\n"
     resource_word = "Espaço" if rkind.has_benchmarks else "Painel"
+    # Reusing a pinned slug is NOT silent: when the author picked an area that disagrees with where
+    # this resource already lives, the PR must say so, or the diff looks like the picker was ignored.
+    relocation_note = ""
+    if reused_slug and rkind.nested_layout and area and not reused_slug.startswith(f"{area}/"):
+        relocation_note = (
+            f"\n\n> ℹ️ Este {resource_word.lower()} já foi promovido em "
+            f"`{rkind.src_dir}/{reused_slug}/` e **continua lá**. A área escolhida agora "
+            f"(`{area}`) não move o recurso: o caminho é a identidade dele no repositório "
+            f"(diretório, branch e chave do recurso no bundle), e renomear essa chave seria "
+            f"delete+create — o painel perderia id e URL permanente. Para realmente movê-lo, "
+            f"faça-o em um PR próprio e deliberado.")
     pr = gh.open_or_update_promotion(
         branch=branch, path=path, content=content, extra_files=extra, remove_files=remove,
         title=f"Rascunho de promoção — {rkind.label_pt} ({safe_id})",
@@ -1043,14 +1100,16 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
               f"o conteúdo, mas o merge está bloqueado até o **Responsável Técnico** marcar o PR "
               f"como pronto (*mark as ready*) manualmente no GitHub. A **Plataforma** aprova o "
               f"deploy de produção pelo gate de Environment.\n\n"
-              f"{resource_word} `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo."),
+              f"{resource_word} `{safe_id}` → `{path}`. Achados da revisão no comentário abaixo."
+              f"{relocation_note}"),
     )
     # No-op promotion: the space is already in prod byte-identical (nothing to promote). No PR was
     # opened — surface it so the app tells the user instead of showing an empty pipeline. The review
     # still ran (it's informative), so we return it; there's just no PR to track.
     if pr.get("no_change"):
         return {"review": review, "pr": None, "branch": branch, "no_change": True,
-                "blocked": blocked, "revisions": revisions.to_dict()}
+                "blocked": blocked, "revisions": revisions.to_dict(),
+                "reused_slug": reused_slug}
     # R2: apply/clear the BLOCKER label so the Technical Owner sees at a glance whether the
     # review found blockers. A failing gate → label applied; a passing re-review → cleared.
     # Best-effort: a label API hiccup must never break the PR itself.
@@ -1067,7 +1126,8 @@ def request_promotion(space_id: str, profile: str | None = None, *, user_token: 
                                                     table_mapping=table_mapping,
                                                     revisions=revisions.to_dict()))
     return {"review": review, "pr": {"number": pr["number"], "url": pr["html_url"]}, "branch": branch,
-            "no_change": False, "blocked": blocked, "change_request": {
+            "no_change": False, "blocked": blocked, "reused_slug": reused_slug,
+            "change_request": {
                 "provider": "github", "external_id": str(pr["number"]),
                 "external_url": pr["html_url"], **revisions.to_dict(),
             }}

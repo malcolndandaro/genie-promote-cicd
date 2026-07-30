@@ -210,8 +210,15 @@ python3 scripts/pilot_readiness.py \
   --offline-only
 ```
 
-Uma divergência de lock é um `NO-GO` intencional. Atualize o `engine.lock` por um PR de conteúdo
-revisado; não contorne a checagem silenciosamente.
+Uma divergência de lock com mudança de CÓDIGO do engine é um `NO-GO` intencional. Atualize o
+`engine.lock` por um PR de conteúdo revisado; não contorne a checagem silenciosamente.
+
+Uma defasagem cujo intervalo inteiro é **documentação** (`*.md`, `docs/`) PASSA e é reportada como
+`lock_lag: documentation-only`. Isso é deliberado: subir o lock é o mecanismo pelo qual código novo do
+engine chega à produção, e o `engine.lock` **não** está no `paths-ignore` do `deploy.yml`, então um bump
+só-de-documentação dispararia um deploy de produção inteiro — com aprovação humana de Environment —
+para não mudar comportamento nenhum. Suba o lock junto com a próxima mudança real de código. Se o
+intervalo não puder ser listado (checkout raso ou sem fetch), a checagem falha FECHADA.
 
 ## Checks obrigatórios do GitHub
 

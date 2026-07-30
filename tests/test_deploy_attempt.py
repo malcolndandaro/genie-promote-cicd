@@ -517,3 +517,85 @@ def test_post_deploy_resolver_retries_a_stale_genie_listing_until_the_title_appe
         workspace, title, max_attempts=2, sleep=waits.append,
     ) == "new-space"
     assert waits == [2]
+
+
+# --- a title identifies exactly ONE resource, in the DESIRED set too ------------------------------
+#
+# The live check (`duplicate live title`) only catches an already-duplicated WORKSPACE. Two committed
+# slugs claiming ONE title is a different failure and reaches further: the bundle tries to CREATE a
+# resource whose display name is taken, so it fails 409 ALREADY_EXISTS inside `bundle_deploy` — after
+# `mutation_started`. Preflight must refuse it while production is still untouched.
+
+
+def _operations_with_desired_titles(titles_by_slug, *, kind=None):
+    """Preflight wired to a fake artifact set: `{slug: title}`, all of one kind, nothing live."""
+    import resource_kind
+
+    resolved = kind or resource_kind.DASHBOARD_KIND
+    client = NS(
+        current_user=NS(me=lambda: NS(id="ci-sp")),
+        apps=NS(get=lambda _name: NS(service_principal_client_id="app-sp")),
+        tag_policies=NS(get_tag_policy=lambda _key: TagPolicy(
+            tag_key=_key, values=[Value(name="certified")])),
+        genie=NS(list_spaces=lambda: NS(spaces=[])),
+        lakeview=NS(list=lambda: []),
+        permissions=NS(get=lambda **_kw: None),
+    )
+    operations = deploy_attempt.ProductionOperations(
+        deploy_attempt.ROOT, "warehouse-1", client=client)
+    operations._run = lambda *args: None
+    operations._all_artifacts = lambda: [
+        (resolved, slug, deploy_attempt.ROOT / "rendered.json",
+         _TitleFile(title), deploy_attempt.ROOT / "audience.json")
+        for slug, title in titles_by_slug.items()
+    ]
+    return operations
+
+
+class _TitleFile:
+    """A stand-in for the title sidecar path — preflight only ever reads its text."""
+
+    def __init__(self, title):
+        self.title = title
+
+    def read_text(self, encoding="utf-8"):
+        return self.title + "\n"
+
+
+def test_preflight_refuses_two_slugs_claiming_one_title_before_any_mutation():
+    operations = _operations_with_desired_titles({
+        "risco/painel": "Painel de Recebíveis",
+        "compliance/painel": "Painel de Recebíveis",
+    })
+    evidence = _evidence()
+
+    assert deploy_attempt.run_attempt(operations, evidence, _Emitter(evidence)) == 1
+    assert evidence.failed_stage == "preflight"
+    # The whole point: production was never touched, so this is recoverable by editing content.
+    assert evidence.mutation_started is False
+    assert "risco/painel" in evidence.reason and "compliance/painel" in evidence.reason
+
+
+def test_preflight_accepts_distinct_titles_within_a_kind():
+    operations = _operations_with_desired_titles({
+        "risco/painel_a": "Painel A",
+        "compliance/painel_b": "Painel B",
+    })
+
+    operations.preflight()  # does not raise
+
+
+def test_the_same_title_in_two_different_kinds_is_allowed():
+    """Titles are unique per KIND: a Space and a dashboard may share a display name — they are
+    distinct objects with distinct id resolution, and nothing collides."""
+    import resource_kind
+
+    operations = _operations_with_desired_titles({})
+    operations._all_artifacts = lambda: [
+        (resource_kind.GENIE_SPACE_KIND, "s_1", deploy_attempt.ROOT / "r.json",
+         _TitleFile("Recebíveis"), deploy_attempt.ROOT / "a.json"),
+        (resource_kind.DASHBOARD_KIND, "risco/recebiveis", deploy_attempt.ROOT / "r.json",
+         _TitleFile("Recebíveis"), deploy_attempt.ROOT / "a.json"),
+    ]
+
+    operations.preflight()  # does not raise
