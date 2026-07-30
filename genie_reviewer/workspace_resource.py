@@ -102,22 +102,54 @@ def resolve_by_title(
     disambiguate, and picking one could reconcile ACLs onto the wrong object). A title that never
     appears raises after the full budget. Both are `ValueError` — a deploy must fail closed here, not
     proceed against an unresolved target.
+
+    A unique match is CONFIRMED to still exist before it is accepted. The listing is eventually
+    consistent, and a deploy that RECREATED a resource (a DABs resource-key rename reads as
+    delete+create) can list the DELETED id for a while: it looks like a perfectly unique match, and
+    every later stage then targets a tombstone. Observed live in run 30573544213, where
+    `assert_app_manage` failed with `ResourceDoesNotExist: Node ID ... does not exist` on the
+    just-deleted dashboard. Probing the candidate turns that into "keep waiting for the real one".
     """
     if not title:
         raise ValueError(f"no title provided; cannot resolve the deployed {kind.label_pt}")
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
+    stale: str | None = None
     for attempt in range(max_attempts):
         matches = [r["resource_id"] for r in list_resources(client, kind) if r["title"] == title]
-        if len(matches) == 1:
-            return matches[0]
         if len(matches) > 1:
             raise ValueError(
                 f"{len(matches)} deployed {kind.label_pt} share title {title!r} "
                 f"(ids={matches}); refusing to guess")
+        if len(matches) == 1:
+            if _still_exists(client, kind, matches[0]):
+                return matches[0]
+            # A tombstone from a recreate — keep retrying for the replacement rather than handing a
+            # dead id to the ACL/tag stages.
+            stale = matches[0]
         if attempt + 1 < max_attempts:
             sleep(retry_seconds)
+    if stale is not None:
+        raise ValueError(
+            f"{kind.label_pt} {title!r} still resolves to {stale}, which no longer exists — the "
+            "listing has not caught up with a recreate; re-run the deploy")
     raise ValueError(f"no deployed {kind.label_pt} found with title {title!r}")
+
+
+def _still_exists(client, kind: rk.ResourceKind, resource_id: str) -> bool:
+    """Whether `resource_id` is really there, via a cheap read-only get.
+
+    Any failure is treated as "not there": the point is to avoid handing a dead id to the mutation
+    stages, and a resource we cannot even read is not one we can reconcile.
+    """
+    try:
+        if kind.kind == rk.GENIE_SPACE:
+            client.genie.get_space(resource_id)
+        else:
+            client.lakeview.get(resource_id)
+        return True
+    except Exception:  # noqa: BLE001 — unreadable is indistinguishable from gone, and equally unusable
+        return False
 
 
 def create(client, kind: rk.ResourceKind, *, serialized: dict, title: str | None,

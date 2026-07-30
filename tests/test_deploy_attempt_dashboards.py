@@ -129,9 +129,14 @@ def _operations(tmp_path: Path, *, permissions=None, tags=None):
         apps=NS(get=lambda _n: NS(service_principal_client_id="app-sp")),
         permissions=permissions,
         workspace_entity_tag_assignments=tags,
-        genie=NS(list_spaces=lambda: NS(spaces=[NS(space_id="space-1", title="Recebíveis")])),
+        # `get_space`/`get` are needed because resolution PROBES a unique match before accepting it:
+        # after a recreate the listing can serve a deleted id, and handing that tombstone to the ACL
+        # and tag stages is what broke deploy run 30573544213.
+        genie=NS(list_spaces=lambda: NS(spaces=[NS(space_id="space-1", title="Recebíveis")]),
+                 get_space=lambda sid, **k: NS(space_id=sid, title="Recebíveis")),
         lakeview=NS(list=lambda: [NS(dashboard_id="dash-1", display_name="Painel de Recebíveis",
-                                     lifecycle_state="ACTIVE")]),
+                                     lifecycle_state="ACTIVE")],
+                    get=lambda did: NS(dashboard_id=did, display_name="Painel de Recebíveis")),
     )
     ops = deploy_attempt.ProductionOperations(
         tmp_path, "wh-1", client=client, certification_readback_retry_seconds=0,

@@ -758,3 +758,68 @@ def test_a_genie_preview_carries_no_dashboard_structure(monkeypatch):
                                                       title="Recebíveis")))
     out = app_logic.preview_promotion("s1", user_token="tok", dev_client=client)
     assert "structure" not in out
+
+
+# --- resolution must never hand a tombstone to the mutation stages ---------------------------------
+
+
+def test_resolution_rejects_a_listed_but_deleted_resource():
+    """REGRESSION: the listing is eventually consistent, so after a recreate it can serve the DELETED
+    id — a perfectly unique match pointing at a tombstone.
+
+    Observed live in deploy run 30573544213: a DABs resource-key rename read as delete+create,
+    `resolve_by_title` returned the old id, and `assert_app_manage` failed with
+    `ResourceDoesNotExist: Node ID ... does not exist`. Every later stage would have targeted a dead
+    object. Resolution now probes the candidate before accepting it.
+    """
+    listed = ["dead-id"]
+    alive = {"new-id"}
+
+    def _get(dashboard_id):
+        if dashboard_id not in alive:
+            raise RuntimeError("Node ID does not exist")
+        return NS(dashboard_id=dashboard_id, display_name="Painel", serialized_dashboard="{}")
+
+    client = NS(
+        lakeview=NS(
+            list=lambda: [NS(dashboard_id=i, display_name="Painel", lifecycle_state="ACTIVE")
+                          for i in listed],
+            get=_get,
+        ),
+    )
+
+    # While the listing still serves only the tombstone, resolution must NOT return it.
+    try:
+        wr.resolve_by_title(client, rk.DASHBOARD_KIND, "Painel", max_attempts=2,
+                            retry_seconds=0, sleep=lambda _s: None)
+    except ValueError as e:
+        assert "no longer exists" in str(e)
+    else:
+        raise AssertionError("a listed-but-deleted id must never be returned")
+
+    # Once the listing catches up with the replacement, the real id resolves.
+    listed[:] = ["new-id"]
+    assert wr.resolve_by_title(client, rk.DASHBOARD_KIND, "Painel", max_attempts=2,
+                               retry_seconds=0, sleep=lambda _s: None) == "new-id"
+
+
+def test_resolution_waits_through_the_tombstone_then_returns_the_replacement():
+    """The realistic sequence: the tombstone is listed first, the replacement appears on a later poll.
+    Resolution must ride that out rather than failing or returning the dead id."""
+    polls = [["dead-id"], ["dead-id"], ["new-id"]]
+    seen = {"n": 0}
+
+    def _list():
+        idx = min(seen["n"], len(polls) - 1)
+        seen["n"] += 1
+        return [NS(dashboard_id=i, display_name="Painel", lifecycle_state="ACTIVE")
+                for i in polls[idx]]
+
+    def _get(dashboard_id):
+        if dashboard_id == "dead-id":
+            raise RuntimeError("Node ID does not exist")
+        return NS(dashboard_id=dashboard_id)
+
+    client = NS(lakeview=NS(list=_list, get=_get))
+    assert wr.resolve_by_title(client, rk.DASHBOARD_KIND, "Painel", max_attempts=5,
+                               retry_seconds=0, sleep=lambda _s: None) == "new-id"
