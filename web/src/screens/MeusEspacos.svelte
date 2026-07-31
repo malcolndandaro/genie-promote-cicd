@@ -1,10 +1,23 @@
 <script lang="ts">
-  // S3 (D3/GR3): merges the old "Meus espaços" (promote grid) and "Minhas promoções" (history
-  // list) into one space-grouped page — a space's own promotion history lives inline with it,
-  // instead of two separate nav destinations.
+  // The Genie Space promotion surface, built as a DOSSIER INDEX (see the direction contract in
+  // App.svelte).
+  //
+  // S3 (D3/GR3) merged the old "Meus espaços" grid and "Minhas promoções" list into one
+  // space-grouped page. This redesign keeps that merge and changes the STRUCTURE: instead of a grid
+  // of same-size cards that reveal nothing until clicked, every Space is a register entry whose
+  // standing — in flight, who holds it, how many prior promotions, when it last moved — is readable
+  // on the index itself.
+  //
+  // The register grammar (DossierIndex / DossierRow / DossierToolbar / DossierEmpty) is SHARED with
+  // the painéis page, so an author learns the flow once. Only the vocabulary and the per-kind
+  // evidence differ: a Space is described by its audience and benchmarks, never by datasets/widgets.
   import Button from '../lib/components/Button.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
-  import EspacoRow from '../lib/components/EspacoRow.svelte';
+  import DossierIndex from '../lib/components/DossierIndex.svelte';
+  import DossierRow from '../lib/components/DossierRow.svelte';
+  import DossierToolbar from '../lib/components/DossierToolbar.svelte';
+  import DossierEmpty from '../lib/components/DossierEmpty.svelte';
+  import PromotionList from '../lib/components/PromotionList.svelte';
   import PromotionConfirm from '../lib/components/PromotionConfirm.svelte';
   import PromotionReview from '../lib/components/PromotionReview.svelte';
   import FlowSteps from '../lib/components/FlowSteps.svelte';
@@ -27,18 +40,14 @@
 
   // The user's promotable GENIE SPACES (OBO). In $state so an error is retryable.
   //
-  // Filtered to one kind on purpose: AI/BI dashboards moved to their own destination
-  // (`#/paineis`, screens/Paineis.svelte) because the two resources are authored, described and
-  // reviewed differently — a shared list forced Genie vocabulary onto a painel and left no room for
-  // datasets/widgets/pages or the business area it is filed under.
+  // Filtered to one kind on purpose: AI/BI dashboards have their own destination (`#/paineis`).
   let resourcesP = $state(loadSpaces());
   function loadSpaces(): Promise<PromotableResource[]> {
     return getResources().then((all) => all.filter((r) => r.kind === 'genie_space'));
   }
 
-  // History is best-effort — a fetch failure here must never block the primary "start a
-  // promotion" flow (the space grid still needs to render). Admins may load ALL promotions
-  // (LB5's existing scope toggle, carried over from "Minhas promoções").
+  // History is best-effort — a fetch failure here must never block the primary "start a promotion"
+  // flow (the register still needs to render). Admins may load ALL promotions (LB5's scope toggle).
   let scope = $state<'mine' | 'all'>('mine');
   function loadPromotions(s: 'mine' | 'all'): Promise<PromotionSummary[]> {
     return getPromotions(s).catch(() => []);
@@ -65,18 +74,17 @@
     promotion.select(null); // a fresh list invalidates any prior (possibly gone) selection
   };
 
-  // G3: choosing a card only SELECTS the space (select() resets prior verdict state) — it does NOT
-  // fire the request. The next step is the confirmation panel below, bound to the chosen space,
-  // where the Requester may optionally declare access before actually requesting the promotion
-  // (each space still promotes on its OWN branch/PR — see app_logic.space_slug). D7: if the space
-  // already has an open Promotion, the backend's existing per-slug idempotency folds this request
-  // into that SAME Promotion (a new Review Snapshot) — no special-casing needed here.
+  // G3: choosing a record only SELECTS the space (select() resets prior verdict state) — it does NOT
+  // fire the request. The next step is the confirmation panel, bound to the chosen space, where the
+  // Requester may optionally declare access before actually requesting the promotion (each space
+  // still promotes on its OWN branch/PR — see app_logic.space_slug). D7: if the space already has an
+  // open Promotion, the backend's per-slug idempotency folds this request into that SAME Promotion.
   function chooseSpace(resource: PromotableResource): void {
     promotion.select(resource);
   }
 
-  // A space is picked but not yet requested — the grid locks (only "← Escolher outro espaço" in the
-  // confirmation panel can change the selection) while that step is on screen.
+  // A space is picked but not yet requested — the register locks (only "← Escolher outro recurso" in
+  // the confirmation panel can change the selection) while that step is on screen.
   const confirming = $derived(!!promotion.resource && promotion.phase === 'idle');
 
   interface EspacoGroup {
@@ -103,9 +111,14 @@
     }
     // A promotion whose resource isn't in the caller's CURRENT dev list (removed/renamed since) —
     // still surface its history rather than silently dropping it, using the promotion's own title.
+    //
+    // Kind-filtered: `getPromotions` returns EVERY kind, so without this a promoted dashboard would
+    // appear in the Genie register (it has no matching entry in the genie_space resource list, so it
+    // fell through to here). Painéis have their own destination.
     for (const [rid, list] of byResource) {
       if (seen.has(rid)) continue;
       const first = list[0];
+      if (first.resource_kind !== 'genie_space') continue;
       groups.push({
         resource: { id: rid, title: first.resource_title ?? rid, kind: first.resource_kind },
         promotions: list,
@@ -178,19 +191,22 @@
 </script>
 
 <div class="author-home">
-  <header class="process-head">
-    <div class="process-head__intro">
-      <p class="process-head__eyebrow">Fluxo governado · Dev → Prod</p>
-      <h1>Preparar promoção</h1>
-      <p>Escolha o Space; o app prepara um rascunho com revisão automática. O Responsável Técnico revisa e promove no GitHub.</p>
-    </div>
-    <FlowSteps />
+  <header class="page-head">
+    <h1>Preparar promoção</h1>
+    <p>
+      Escolha o Space; o app prepara um rascunho com revisão automática. O Responsável Técnico revisa
+      e promove no GitHub.
+    </p>
   </header>
+
+  <!-- The flow is explained once, above the register: the author is here a few times a month and
+       needs the governance sequence re-established each visit. -->
+  <FlowSteps />
 
   {#await Promise.all([resourcesP, promotionsP])}
     <div class="workspace workspace--loading">
-      <div class="space-list"><Skeleton height="7rem" /><Skeleton height="7rem" /></div>
-      <Skeleton height="34rem" />
+      <div class="stack"><Skeleton height="4rem" /><Skeleton height="4rem" /><Skeleton height="4rem" /></div>
+      <Skeleton height="24rem" />
     </div>
   {:then [resources, promotions]}
     {@const currentPromotions = refreshedPromotions ?? promotions}
@@ -198,52 +214,61 @@
     {@const shownGroups = allGroups.filter(matchesFilter)}
     {@const selectedGroup = allGroups.find((group) => group.resource.id === promotion.resource?.id)}
 
-    <div class="toolbar">
-      <label class="toolbar__search">
-        <span aria-hidden="true">⌕</span>
-        <span class="visually-hidden">Buscar Space</span>
-        <input bind:value={searchQuery} placeholder="Buscar por nome do Space" />
-      </label>
-      <label class="toolbar__status">
-        <span class="visually-hidden">Filtrar por status</span>
-        <select bind:value={statusFilter} aria-label="Filtrar por status">
-          {#each STATUS_FILTERS as filter (filter.key)}
-            <option value={filter.key}>{filter.label}</option>
-          {/each}
-        </select>
-      </label>
-      <span class="toolbar__count"><strong>{resources.length}</strong> Spaces disponíveis em Dev</span>
-      {#if who?.is_admin}
-        <div class="toolbar__scope" role="group" aria-label="Escopo do histórico">
-          <Button variant={scope === 'mine' ? 'primary' : 'outline'} onclick={() => setScope('mine')}>Minhas</Button>
-          <Button variant={scope === 'all' ? 'primary' : 'outline'} onclick={() => setScope('all')}>Todas</Button>
-        </div>
-      {/if}
-    </div>
+    <DossierToolbar
+      bind:query={searchQuery}
+      searchLabel="Buscar por nome do Space"
+      searchName="Buscar Space"
+      countLabel={`${resources.length} Spaces disponíveis em Dev`}
+    >
+      {#snippet controls()}
+        <label class="filter">
+          <span class="visually-hidden">Filtrar por status</span>
+          <select bind:value={statusFilter} aria-label="Filtrar por status">
+            {#each STATUS_FILTERS as filter (filter.key)}
+              <option value={filter.key}>{filter.label}</option>
+            {/each}
+          </select>
+        </label>
+        {#if who?.is_admin}
+          <div class="scope" role="group" aria-label="Escopo do histórico">
+            <Button variant={scope === 'mine' ? 'primary' : 'outline'} onclick={() => setScope('mine')}>Minhas</Button>
+            <Button variant={scope === 'all' ? 'primary' : 'outline'} onclick={() => setScope('all')}>Todas</Button>
+          </div>
+        {/if}
+      {/snippet}
+    </DossierToolbar>
 
     {#if resources.length === 0 && allGroups.length === 0 && !who?.is_admin}
-      <div class="empty">
-        <p class="empty__title">Nenhum Genie Space encontrado</p>
-        <p class="muted text-sm">Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção.</p>
-      </div>
+      <DossierIndex label="Spaces disponíveis" identHeader="Genie Space">
+        <DossierEmpty
+          icon="grid"
+          title="Nenhum Genie Space encontrado"
+          hint="Crie um no Genie nativo do workspace de dev — depois ele aparece aqui para promoção."
+        />
+      </DossierIndex>
     {:else}
-      <div class="workspace">
-        <section class="space-list" aria-label="Spaces disponíveis">
+      {@const recordOpen = promotion.opening || confirming || promotion.initiatedHere}
+      <div class="workspace" class:workspace--open={recordOpen}>
+        <DossierIndex label="Spaces disponíveis" identHeader="Genie Space">
           {#if shownGroups.length === 0}
-            <div class="empty">
-              <p class="empty__title">Nenhum Genie Space encontrado</p>
-              <p class="muted text-sm">Nenhum espaço corresponde à busca e ao status selecionados.</p>
-            </div>
+            <DossierEmpty
+              icon="grid"
+              title="Nenhum Genie Space encontrado"
+              hint="Nenhum espaço corresponde à busca e ao status selecionados."
+            />
           {:else}
             {#each shownGroups as group (group.resource.id)}
               {@const activePhase = activePhaseFor(group.resource.id)}
-              <EspacoRow
+              {@const latest = group.promotions[0] ?? null}
+              <DossierRow
                 resource={group.resource}
+                icon="grid"
+                kindLabel="Genie Space"
                 promotions={group.promotions}
                 expanded={expandedIds.has(group.resource.id)}
                 onToggle={() => toggleExpanded(group.resource.id)}
-                {onOpenPromotion}
                 onPromote={chooseSpace}
+                onOpenLatest={latest ? () => onOpenPromotion(latest) : undefined}
                 busy={promotion.phase === 'reviewing' && promotion.resource?.id === group.resource.id}
                 disabled={promotion.phase === 'reviewing' && promotion.resource?.id !== group.resource.id}
                 selected={promotion.resource?.id === group.resource.id}
@@ -253,37 +278,40 @@
                 activePhaseLoading={promotion.initiatedHere
                   && promotion.resource?.id === group.resource.id
                   && promotion.waitingForLiveStatus}
-              />
+              >
+                {#snippet history()}
+                  <PromotionList promotions={group.promotions} onOpen={onOpenPromotion} />
+                {/snippet}
+              </DossierRow>
             {/each}
           {/if}
-        </section>
+        </DossierIndex>
 
-        <section class="working-panel" aria-live="polite">
-          {#if promotion.opening}
-            <div class="working-panel__loading" aria-label="Carregando promoção selecionada">
-              <Skeleton height="3.5rem" />
-              <Skeleton height="10rem" />
-              <Skeleton height="16rem" />
-            </div>
-          {:else if confirming}
-            {#key promotion.selectionSeq}
-              <PromotionConfirm
-                {promotion}
-                promotions={selectedGroup?.promotions ?? []}
-                {onOpenPromotion}
-                onCancel={() => promotion.select(null)}
-              />
-            {/key}
-          {:else if promotion.initiatedHere}
-            <PromotionReview {promotion} userEmail={who?.email ?? null} {devHost} {prodHost} />
-          {:else}
-            <div class="working-panel__empty">
-              <span aria-hidden="true">↖</span>
-              <h2>Escolha um Space</h2>
-              <p>O título, o público, as tabelas e o histórico aparecerão aqui sem tirar você do contexto.</p>
-            </div>
-          {/if}
-        </section>
+        <!-- Rendered only when a record is actually open: an always-present "Escolha um Space"
+             placeholder cost half the viewport to say nothing, and the register itself already
+             invites the choice. -->
+        {#if recordOpen}
+          <section class="working-panel" aria-live="polite">
+            {#if promotion.opening}
+              <div class="working-panel__loading" aria-label="Carregando promoção selecionada">
+                <Skeleton height="3.5rem" />
+                <Skeleton height="10rem" />
+                <Skeleton height="16rem" />
+              </div>
+            {:else if confirming}
+              {#key promotion.selectionSeq}
+                <PromotionConfirm
+                  {promotion}
+                  promotions={selectedGroup?.promotions ?? []}
+                  {onOpenPromotion}
+                  onCancel={() => promotion.select(null)}
+                />
+              {/key}
+            {:else}
+              <PromotionReview {promotion} userEmail={who?.email ?? null} {devHost} {prodHost} />
+            {/if}
+          </section>
+        {/if}
       </div>
     {/if}
   {:catch err}
@@ -296,127 +324,55 @@
       {:else}<Button variant="outline" onclick={reload}>Tentar novamente</Button>{/if}
     </div>
   {/await}
-
 </div>
 
 <style>
-  .author-home { display: flex; flex-direction: column; gap: var(--space-5); }
-  .process-head {
-    display: grid;
-    grid-template-columns: minmax(15rem, 0.8fr) minmax(34rem, 1.7fr);
-    align-items: stretch;
-    overflow: hidden;
-    border: 1px solid var(--border);
-    border-left: 4px solid var(--accent);
-    border-radius: var(--radius);
-    background: var(--surface);
-    box-shadow: 0 0.45rem 1.5rem color-mix(in srgb, var(--foreground) 5%, transparent);
-  }
-  .process-head__intro {
+  .author-home {
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    padding: var(--space-3) var(--space-5);
+    gap: var(--space-5);
   }
-  .process-head__eyebrow {
-    margin: 0 0 0.25rem;
-    color: var(--accent-hover);
-    font-size: 0.6rem;
-    font-weight: 800;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+  .page-head h1 {
+    font-size: clamp(1.25rem, 2vw, 1.5rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
-  .process-head h1 {
-    margin: 0;
-    font-family: var(--font-display, Georgia, serif);
-    font-size: clamp(1.35rem, 2vw, 1.8rem);
-    line-height: 1.05;
-    letter-spacing: -0.035em;
-  }
-  .process-head__intro > p:last-child {
-    max-width: 34rem;
-    margin: 0.45rem 0 0;
+  .page-head p {
+    margin: var(--space-2) 0 0;
+    max-width: 68ch;
     color: var(--muted-foreground);
-    font-size: 0.72rem;
-    line-height: 1.4;
+    font-size: 0.875rem;
   }
-  .toolbar {
-    display: grid;
-    grid-template-columns: minmax(14rem, 1fr) auto auto;
-    align-items: center;
-    gap: var(--space-3);
-  }
-  .toolbar__search {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    min-width: 0;
-    padding: 0.7rem 0.9rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--surface) 88%, transparent);
-  }
-  .toolbar__search input {
-    min-width: 0;
-    width: 100%;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    font: inherit;
-  }
-  .toolbar__status select {
-    min-height: 2.85rem;
-    padding: 0 var(--space-4);
+  .filter select {
+    min-height: 2.125rem;
+    padding: 0 var(--space-3);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--surface);
     color: var(--foreground);
     font: inherit;
+    font-size: 0.8125rem;
   }
-  .toolbar__count {
-    padding-left: var(--space-3);
-    border-left: 3px solid var(--destructive);
-    color: var(--muted-foreground);
-    font-size: 0.72rem;
-  }
-  .toolbar__count strong {
-    display: block;
-    color: var(--foreground);
-    font-family: var(--font-display, Georgia, serif);
-    font-size: 1.5rem;
-  }
-  .toolbar__scope {
-    grid-column: 1 / -1;
+  .scope {
     display: flex;
     gap: var(--space-2);
   }
+  /* The register leads and the open record sits beside it — the index stays visible while a record
+     is being read, so the author never loses their place in the queue.
+     With NO record open the index takes the full width instead of competing with an empty panel:
+     reserving half the viewport for a placeholder was what squeezed titles into two lines and drove
+     the phase badge into the action button. */
   .workspace {
     display: grid;
-    grid-template-columns: minmax(16rem, 0.75fr) minmax(28rem, 1.6fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     align-items: start;
   }
-  .space-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
+  .workspace--open {
+    grid-template-columns: minmax(0, 1.1fr) minmax(26rem, 1fr);
   }
   .working-panel {
     min-width: 0;
-    border-radius: var(--radius);
-  }
-  .working-panel__empty {
-    min-height: 24rem;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-    padding: var(--space-6);
-    border: 1px dashed var(--border-strong);
-    border-radius: var(--radius);
-    background: color-mix(in srgb, var(--surface) 75%, transparent);
   }
   .working-panel__loading {
     display: flex;
@@ -426,21 +382,10 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
-    box-shadow: var(--shadow-sm);
   }
-  .working-panel__empty > span { color: var(--accent-hover); font-size: 1.5rem; }
-  .working-panel__empty h2 {
-    margin-top: var(--space-2);
-    font-family: var(--font-display, Georgia, serif);
+  .workspace--loading {
+    opacity: 0.75;
   }
-  .working-panel__empty p { max-width: 28rem; color: var(--muted-foreground); }
-  .workspace--loading { opacity: 0.75; }
-  .empty {
-    padding: var(--space-5);
-    border: 1px dashed var(--border);
-    border-radius: var(--radius);
-  }
-  .empty__title { margin: 0; font-weight: 700; }
   .error-state {
     display: flex;
     align-items: center;
@@ -452,16 +397,8 @@
     font-size: 0.875rem;
   }
   @media (max-width: 1040px) {
-    .process-head { grid-template-columns: 1fr; }
-    .process-head__intro { padding: var(--space-4); }
-    .workspace { grid-template-columns: 1fr; }
-    .space-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .space-list :global(.espaco-row__history) { grid-column: 1 / -1; }
-  }
-  @media (max-width: 720px) {
-    .toolbar { grid-template-columns: minmax(0, 1fr) auto; }
-    .toolbar__count { display: none; }
-    .space-list { grid-template-columns: 1fr; }
-    .workspace { min-width: 0; }
+    .workspace {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

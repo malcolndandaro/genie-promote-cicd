@@ -31,7 +31,8 @@
   <Card>
     <div class="confirm">
       <header class="confirm__head">
-        <p class="confirm__step">Preparar promoção</p>
+        <!-- No label above the title: the heading carries its own weight, and the previous eyebrow
+             also restated the page's own h1 in the destructive colour. -->
         <h3 class="confirm__title">{resource.title}</h3>
         <p class="confirm__sub muted text-sm">
           Confirme como este recurso será publicado. O app abre um rascunho com revisão automática — o Responsável Técnico revisa e promove no GitHub.
@@ -111,21 +112,14 @@
     margin-bottom: 0;
     padding: var(--space-5);
     border-bottom: 1px solid var(--border);
-    background: linear-gradient(120deg, var(--surface) 30%, var(--accent-soft));
-  }
-  .confirm__step {
-    margin: 0 0 var(--space-2);
-    text-transform: uppercase;
-    letter-spacing: 0.13em;
-    font-size: 0.65rem;
-    font-weight: 800;
-    color: var(--destructive);
+    /* Flat, not a decorative gradient — depth in this world comes from hairlines and tone. */
+    background: var(--surface-inset);
   }
   .confirm__title {
     margin: 0;
-    font-family: var(--font-display, Georgia, serif);
-    font-size: clamp(1.45rem, 2.5vw, 2rem);
-    letter-spacing: -0.03em;
+    font-size: clamp(1.25rem, 2.5vw, 1.6rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
   .confirm__sub { margin: var(--space-2) 0 0; }
   .confirm__section {

@@ -168,9 +168,9 @@
     text-transform: uppercase;
   }
   .decision h2 {
-    font-family: var(--font-display, Georgia, serif);
-    font-size: clamp(1.35rem, 3vw, 2rem);
-    letter-spacing: -0.025em;
+    font-size: clamp(1.25rem, 3vw, 1.75rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
   .decision__truth { margin: var(--space-2) 0 var(--space-4); color: var(--muted-foreground); }
   .decision__action {

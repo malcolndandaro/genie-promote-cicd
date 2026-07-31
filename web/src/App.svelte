@@ -81,6 +81,8 @@
   }
 </script>
 
+<!-- Direction contract for this build lives in `web/index.html` (seed key b8f6d992) — the SPA's
+     root layout, so it survives the production build where a component comment would not. -->
 <AppShell sections={NAV_SECTIONS} route={router.route}>
   {#snippet header({ toggle, open })}
     <Topbar title={SECTION_TITLE[router.route.id]} {who} {open} onToggle={toggle} />

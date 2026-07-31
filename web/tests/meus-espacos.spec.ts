@@ -32,9 +32,9 @@ test('the page header is compact and explains the governed promotion flow', asyn
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.goto('/#/espacos');
 
-  const header = page.locator('.process-head');
+  const header = page.locator('.page-head');
   await expect(header.getByRole('heading', { name: 'Preparar promoção' })).toBeVisible();
-  const flow = header.getByRole('list', { name: 'Como funciona a promoção' });
+  const flow = page.getByRole('list', { name: 'Como funciona a promoção' });
   for (const label of ['Escolher', 'Checks', 'Revisão', 'Produção']) {
     await expect(flow.getByText(label, { exact: true })).toBeVisible();
   }
@@ -141,21 +141,22 @@ test('the Space status follows the active run instead of a stale deployed histor
   await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
-  const row = page.locator('.espaco-row').filter({ hasText: 'Recebíveis' });
-  await expect(row.locator('.espaco-row__summary').getByText('Aguardando aprovação da Plataforma')).toBeVisible();
-  await expect(row.locator('.espaco-row__summary').getByText('Implantado em produção')).toHaveCount(0);
+  const row = page.locator('.dossier').filter({ hasText: 'Recebíveis' });
+  await expect(row.locator('.dossier__standing').getByText('Aguardando aprovação da Plataforma')).toBeVisible();
+  await expect(row.locator('.dossier__standing').getByText('Implantado em produção')).toHaveCount(0);
   await expect(page.locator('.working-panel').getByText('A publicação aguarda a decisão da Plataforma')).toBeVisible();
 });
 
-test('each space card carries a dev env badge next to the kind badge', async ({ page }) => {
+test('each space entry declares its dev origin in the register', async ({ page }) => {
   await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.goto('/#/espacos');
 
-  const card = page.locator('.space-card').filter({ hasText: 'Recebíveis' });
-  await expect(card.getByText('Genie Space', { exact: true })).toBeVisible();
-  // the origin badge: these come from the dev authoring workspace
-  await expect(card.getByText('dev', { exact: true })).toBeVisible();
+  // The register's column header declares the kind once for every entry, rather than repeating it
+  // per row; the row itself carries the origin (these come from the dev authoring workspace).
+  await expect(page.getByText('Genie Space', { exact: true })).toBeVisible();
+  const row = page.locator('.dossier').filter({ hasText: 'Recebíveis' });
+  await expect(row.getByText('dev', { exact: true })).toBeVisible();
 });
 
 test('initial load opens the latest promotion instead of an older non-terminal PR', async ({ page }) => {

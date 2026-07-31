@@ -28,10 +28,11 @@
 </script>
 
 <ol class="flow" aria-label="Como funciona a promoção">
-  {#each STEPS as s, i (s.title)}
+  {#each STEPS as s (s.title)}
     <li class="flow__step">
+      <!-- No 01/02/03 numerals: the connectors already carry the sequence, so the numbers were
+           decoration competing with the step titles for attention. -->
       <span class="flow__marker">
-        <span class="flow__index">0{i + 1}</span>
         <span class="flow__icon" aria-hidden="true"><Icon name={s.icon} size={17} /></span>
       </span>
       <div class="flow__text">
@@ -77,13 +78,6 @@
   }
   .flow__step:last-child::after { display: none; }
   .flow__marker { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; }
-  .flow__index {
-    color: var(--muted-foreground);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.57rem;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-  }
   .flow__icon {
     display: grid;
     place-items: center;

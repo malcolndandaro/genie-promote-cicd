@@ -15,7 +15,12 @@
     | 'close'
     | 'external'
     | 'download'
-    | 'chart';
+    | 'chart'
+    | 'search'
+    | 'chevron-right'
+    | 'file-text'
+    | 'layers'
+    | 'inbox';
 
   // Stroke icons share the svg stroke attributes; only their inner geometry differs.
   const STROKE: Record<Exclude<IconName, 'github'>, string> = {
@@ -38,6 +43,16 @@
       '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
     download:
       '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+    search: '<circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/>',
+    'chevron-right': '<polyline points="9 5 16 12 9 19"/>',
+    // A case file — the dossier record a promotion becomes.
+    'file-text':
+      '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><polyline points="14 3 14 8 19 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>',
+    // Stacked planes — a painel's pages/datasets.
+    layers:
+      '<polygon points="12 2 22 8 12 14 2 8"/><polyline points="2 12 12 18 22 12"/><polyline points="2 16 12 22 22 16"/>',
+    inbox:
+      '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   };
 
   // GitHub's mark is a single filled path.
