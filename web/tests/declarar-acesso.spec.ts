@@ -44,10 +44,10 @@ test('requires Público do Space and sends canonical AudienceSpec', async ({ pag
   });
 
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
   const confirm = page.getByRole('button', { name: 'Confirmar promoção' });
-  await expect(page.getByText('2. Público do Space')).toBeVisible();
+  await expect(page.getByText('2. Público do Genie Space')).toBeVisible();
   await expect(page.getByText('obrigatório')).toBeVisible();
   await expect(confirm).toBeDisabled();
   await expect(page.getByText('Selecione ao menos uma pessoa ou grupo para continuar.')).toBeVisible();
@@ -57,7 +57,7 @@ test('requires Público do Space and sends canonical AudienceSpec', async ({ pag
   await expect(confirm).toBeEnabled();
   await confirm.click();
 
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   expect(posted).toMatchObject({
     resource_id: 'sp1',
     resource_kind: 'genie_space',
@@ -69,7 +69,7 @@ test('requires Público do Space and sends canonical AudienceSpec', async ({ pag
 
 test('offers one ACL audience flow, including workspace-local groups, with fixed CAN_RUN', async ({ page }) => {
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
   await expect(page.locator('.audience__level')).toHaveText('CAN_RUN');
   await expect(page.getByText(/A promoção não concede SELECT/)).toBeVisible();
@@ -88,13 +88,13 @@ test('re-requesting the same Space cannot reuse a stale audience', async ({ page
   });
 
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await page.getByRole('combobox', { name: 'Usuário ou grupo' }).click();
   await page.getByRole('option', { name: /Ana Souza/ }).click();
   await page.getByRole('button', { name: 'Confirmar promoção' }).click();
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
 
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   const confirm = page.getByRole('button', { name: 'Confirmar promoção' });
   await expect(confirm).toBeDisabled();
   const picker = page.getByRole('combobox', { name: 'Usuário ou grupo' });
@@ -114,12 +114,12 @@ test('re-requesting the same Space cannot reuse a stale audience', async ({ page
 
 test('cancelling the confirmation panel discards the selected audience', async ({ page }) => {
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await page.getByRole('combobox', { name: 'Usuário ou grupo' }).click();
   await page.getByRole('option', { name: /Ana Souza/ }).click();
   await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeEnabled();
 
-  await page.getByRole('button', { name: '← Escolher outro espaço' }).click();
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: '← Escolher outro recurso' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeDisabled();
 });

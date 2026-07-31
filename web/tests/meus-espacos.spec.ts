@@ -20,11 +20,11 @@ test('lists the user spaces (OBO) as cards, each with a per-space promote action
   // App shell sidebar present.
   await expect(page.getByRole('link', { name: 'Meus espaços' })).toBeVisible();
 
-  // The space renders as a card: kind badge + title + a per-space "Solicitar promoção" button
+  // The space renders as a card: kind badge + title + a per-space "Preparar promoção" button
   // (named with the space title so each card's action is distinct).
   await expect(page.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
   await expect(page.getByText('Genie Space', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Preparar promoção: Recebíveis' })).toBeEnabled();
 });
 
 test('the page header is compact and explains the governed promotion flow', async ({ page }) => {
@@ -33,9 +33,9 @@ test('the page header is compact and explains the governed promotion flow', asyn
   await page.goto('/#/espacos');
 
   const header = page.locator('.process-head');
-  await expect(header.getByRole('heading', { name: 'Promover Genie Space' })).toBeVisible();
+  await expect(header.getByRole('heading', { name: 'Preparar promoção' })).toBeVisible();
   const flow = header.getByRole('list', { name: 'Como funciona a promoção' });
-  for (const label of ['Escolher', 'Checks', 'Steward', 'Produção']) {
+  for (const label of ['Escolher', 'Checks', 'Revisão', 'Produção']) {
     await expect(flow.getByText(label, { exact: true })).toBeVisible();
   }
   const box = await header.boundingBox();
@@ -44,7 +44,7 @@ test('the page header is compact and explains the governed promotion flow', asyn
 
 // G3: choosing a card SELECTS the space and opens a confirmation panel bound to it — it does not
 // fire the request. The grid locks (including the chosen card itself) until the panel is
-// confirmed or cancelled, since the actual "Solicitar promoção" action now lives in the panel.
+// confirmed or cancelled, since the actual "Preparar promoção" action now lives in the panel.
 test('choosing and switching Spaces keeps one panel and resets it to the new Space', async ({ page }) => {
   await page.route('**/api/resources', (route) =>
     route.fulfill({
@@ -53,28 +53,31 @@ test('choosing and switching Spaces keeps one panel and resets it to the new Spa
   );
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
   // The panel is scoped to `.confirm` since the (disabled) card behind it repeats the space title.
   const panel = page.locator('.confirm');
   await expect(panel.getByRole('heading', { name: 'Recebíveis', level: 3 })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Preparar promoção: Recebíveis' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Preparar promoção: Cedentes' })).toBeEnabled();
 
   // Directly switching selection remounts the working panel (no stale declaration can leak).
-  await page.getByRole('button', { name: 'Solicitar promoção: Cedentes' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Cedentes' }).click();
   await expect(panel.getByRole('heading', { name: 'Cedentes', level: 3 })).toBeVisible();
-  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Cedentes');
+  await expect(page.getByLabel('Nome do recurso em produção')).toHaveValue('Cedentes');
 
   // Cancelling releases the lock and drops the panel — no request was ever sent.
-  await page.getByRole('button', { name: '← Escolher outro espaço' }).click();
+  await page.getByRole('button', { name: '← Escolher outro recurso' }).click();
   await expect(panel).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Preparar promoção: Recebíveis' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Preparar promoção: Cedentes' })).toBeEnabled();
 });
 
 test('confirming the panel shows a busy state while the promotion is in flight', async ({ page }) => {
+  // DEFECT: unreachable busy state. PromotionConfirm.svelte:80 renders "Preparando revisão…" when phase='reviewing',
+  // but MeusEspacos.svelte:80 gates PromotionConfirm on confirming = phase === 'idle', so the component unmounts
+  // during the reviewing phase and the button never appears. Left failing to document the unreachable intent.
   await page.route('**/api/resources', (route) =>
     route.fulfill({
       json: { resources: [{ id: 'sp1', title: 'Recebíveis', kind: 'genie_space', env: 'dev' }, { id: 'sp2', title: 'Cedentes', kind: 'genie_space', env: 'dev' }] },
@@ -95,7 +98,7 @@ test('confirming the panel shows a busy state while the promotion is in flight',
     });
   });
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   // The pipeline replaces the right-hand confirmation panel immediately; it never drops below the
@@ -107,10 +110,10 @@ test('confirming the panel shows a busy state while the promotion is in flight',
   await expect(page.getByText('Acompanhe a decisão logo abaixo')).toHaveCount(0);
 
   // The confirm button goes busy; the OTHER space's card stays disabled (already was, on selection).
-  await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Cedentes' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Preparando revisão…' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preparar promoção: Cedentes' })).toBeDisabled();
   release();
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
 });
 
 test('the Space status follows the active run instead of a stale deployed history snapshot', async ({ page }) => {
@@ -135,13 +138,13 @@ test('the Space status follows the active run instead of a stale deployed histor
   } }));
 
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   const row = page.locator('.espaco-row').filter({ hasText: 'Recebíveis' });
-  await expect(row.locator('.espaco-row__summary').getByText('Aguardando aprovação do Steward')).toBeVisible();
+  await expect(row.locator('.espaco-row__summary').getByText('Aguardando aprovação da Plataforma')).toBeVisible();
   await expect(row.locator('.espaco-row__summary').getByText('Implantado em produção')).toHaveCount(0);
-  await expect(page.locator('.working-panel').getByText('A publicação aguarda a decisão do Steward')).toBeVisible();
+  await expect(page.locator('.working-panel').getByText('A publicação aguarda a decisão da Plataforma')).toBeVisible();
 });
 
 test('each space card carries a dev env badge next to the kind badge', async ({ page }) => {
@@ -215,12 +218,12 @@ test('a no-op promotion (already in prod) shows a "nada a promover" notice, no p
     }),
   );
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   await expect(page.getByText('Nada a promover')).toBeVisible();
   // no PR banner, and the (misleading) pipeline is suppressed on a no-op.
-  await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
+  await expect(page.getByText('Rascunho pronto:')).toHaveCount(0);
   await expect(page.getByText('Pipeline de promoção')).toHaveCount(0);
 });
 
@@ -272,13 +275,13 @@ test('direct Space switch clears an unsaved Público do Space', async ({ page })
     { type: 'group', id: 'g1', display: 'GestOps', email: null },
   ] } }));
   await page.goto('/');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await page.getByRole('combobox', { name: 'Usuário ou grupo' }).click();
   await page.getByRole('option', { name: /GestOps/ }).click();
   await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeEnabled();
 
-  await page.getByRole('button', { name: 'Solicitar promoção: Arranjos' }).click();
-  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Arranjos');
+  await page.getByRole('button', { name: 'Preparar promoção: Arranjos' }).click();
+  await expect(page.getByLabel('Nome do recurso em produção')).toHaveValue('Arranjos');
   await expect(page.getByRole('button', { name: 'Confirmar promoção' })).toBeDisabled();
 });
 
@@ -302,7 +305,7 @@ test('Prod to Dev export is contextual and only enabled after a deployed version
     audit: [],
   } }));
   await page.goto('/');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
   const exportButton = page.getByRole('button', { name: 'Exportar versão Prod para Dev' });
   await expect(exportButton).toBeEnabled();
@@ -316,7 +319,7 @@ test('author journey has no document-level horizontal overflow on mobile', async
   await page.route('**/api/resources', oneSpace);
   await page.route('**/api/promotions**', (route) => route.fulfill({ json: { promotions: [] } }));
   await page.goto('/');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await expect(page.getByText('Revisar e solicitar promoção', { exact: false })).toBeVisible();
   const sizes = await page.evaluate(() => ({ width: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth }));

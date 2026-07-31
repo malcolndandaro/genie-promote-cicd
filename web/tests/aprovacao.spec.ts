@@ -4,7 +4,7 @@ import { confirmPilotPromotion } from './promotion-helpers';
 // SoD approval, now IDENTITY-DERIVED (no manual persona toggle) and surfaced as a compact button
 // in the PR banner (the old standalone "Aprovação do Steward" section was removed as UI noise):
 //  - the requester only ever waits for the Steward (even if they're also a Steward — it's "mine");
-//    they see NOTHING new — the pipeline's own "Aprovação do Steward (deploy)" step already
+//    they see NOTHING new — the pipeline's own "Aprovação da Plataforma (deploy)" step already
 //    conveys the waiting state.
 //  - the Steward, opening SOMEONE ELSE'S promotion from "Todas", gets the "Aprovar no GitHub" link
 //    in the PR banner (next to "Ver no GitHub").
@@ -60,10 +60,10 @@ async function requestAsAuthor(page: Page, review: unknown, viewer = 'malcoln@da
   await page.route('**/api/promotions?scope=mine', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.route('**/api/promote', (r) => r.fulfill({ json: { review, pr: PR, promotion_id: 'p1' } }));
   await page.goto('/');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   // G3: choosing the space from Home lands on the confirmation panel in "Meus espaços" — confirm it.
   await confirmPilotPromotion(page);
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
 }
 
 // The Steward (or any viewer) opening SOMEONE ELSE'S promotion from the "Todas" history.
@@ -83,24 +83,24 @@ async function openFromHistory(
   await page.route(`**/api/promote/${PR.number}/status`, (r) => r.fulfill({ json: status }));
   await page.goto('/');
   await page.getByRole('link', { name: 'Meus espaços' }).click();
-  await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();
+  await page.getByRole('button', { name: 'Todas' }).click();
   // S3: history is nested under its space now — expand the row, then open the attempt.
   await page.getByRole('button', { name: /Expandir histórico de/ }).click();
   await page.getByRole('button', { name: 'Abrir promoção: Recebíveis' }).click();
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
 }
 
 test('the requester only ever waits for the Steward (cannot approve their own)', async ({ page }) => {
   await requestAsAuthor(page, cleanReview);
   // No standalone SoD explainer anymore — the pipeline's own step already conveys the wait.
-  await expect(page.getByText('Aprovação do Steward (deploy)')).toBeVisible();
+  await expect(page.getByText('Aprovação da Plataforma (deploy)')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
 test('a Steward who is also the requester of their own space cannot self-approve (SoD)', async ({ page }) => {
   // The steward (pedro) requests their OWN promotion -> "mine" -> only the waiting view, no link.
   await requestAsAuthor(page, cleanReview, 'pedro@databricks.com');
-  await expect(page.getByText('Aprovação do Steward (deploy)')).toBeVisible();
+  await expect(page.getByText('Aprovação da Plataforma (deploy)')).toBeVisible();
   await expect(page.getByRole('link', { name: /Aprovar no GitHub/ })).toHaveCount(0);
 });
 
@@ -113,6 +113,9 @@ test('a non-Steward admin opening another user\'s promotion sees no approve affo
 });
 
 test('the Steward gets the "Aprovar no GitHub" deep-link for another user\'s waiting gate', async ({ page }) => {
+  // DEFECT: unreachable dead code. PromotionReview.svelte:120 renders the link, but
+  // promotion.svelte.ts:108 hard-codes canApprove: false since R1 moved SoD to GitHub.
+  // Left failing to document the unreachable intent.
   await openFromHistory(page, {
     viewer: 'pedro@databricks.com', isAdmin: true, requester: 'malcoln@databricks.com',
     review: cleanReview, status: deployStatus('awaiting_approval'),

@@ -16,10 +16,12 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/promotions**', (r) => r.fulfill({ json: { promotions: [] } }));
 });
 
-test('a Business User sees only Meus espaços and lands there', async ({ page }) => {
+test('a Business User sees the three Meu trabalho entries and lands on Meus espaços', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByRole('navigation').getByRole('link')).toHaveCount(1);
+  await expect(page.getByRole('navigation').getByRole('link')).toHaveCount(3);
   await expect(page.getByRole('link', { name: 'Meus espaços' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Painéis AI/BI' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Aguardando ação no GitHub' })).toBeVisible();
   await expect(page).toHaveURL(/#\/espacos$/);
   await expect(page.getByRole('link', { name: 'Meus espaços' })).toHaveAttribute('aria-current', 'page');
 });
@@ -31,16 +33,16 @@ test('retired standalone hashes fall back to Meus espaços', async ({ page }) =>
   }
 });
 
-test('a Steward+Admin capability union sees exactly the four pilot entries', async ({ page }) => {
+test('an Admin sees exactly the five expected entries', async ({ page }) => {
   await page.unroute('**/api/whoami');
   await page.route('**/api/whoami', (r) => r.fulfill({ json: {
     email: 'pedro@databricks.com', steward: 'pedro@databricks.com',
-    is_admin: true, is_steward: true,
+    is_admin: true,
   } }));
   await page.goto('/');
   const nav = page.getByRole('navigation');
-  await expect(nav.getByRole('link')).toHaveCount(4);
-  for (const label of ['Meus espaços', 'Aguardando minha revisão', 'Configurações', 'Auditoria']) {
+  await expect(nav.getByRole('link')).toHaveCount(5);
+  for (const label of ['Meus espaços', 'Painéis AI/BI', 'Aguardando ação no GitHub', 'Configurações', 'Auditoria']) {
     await expect(nav.getByRole('link', { name: label })).toBeVisible();
   }
 });

@@ -19,7 +19,7 @@ const review = {
     { key: 'checks', label: 'Checagens determinísticas (pré-render + allowlist)', status: 'pass' },
     { key: 'review', label: 'Revisão do agente (Genie Reviewer)', status: 'fail' },
     { key: 'eval', label: 'Eval-run (advisory)', status: 'pass' },
-    { key: 'approval', label: 'Aprovação do Steward', status: 'running' },
+    { key: 'approval', label: 'Aprovação da Plataforma (deploy)', status: 'running' },
     { key: 'deploy', label: 'Deploy em produção (service principal)', status: 'pending' },
   ],
 };
@@ -40,11 +40,11 @@ test('promoting renders the review (finding + pipeline + gate) and the PR link',
 }) => {
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } }));
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   // The opened PR is surfaced with a link to GitHub.
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   await expect(page.getByRole('link', { name: /Ver no GitHub/ })).toHaveAttribute('href', PR.url);
 
   // Finding card: rule_id + severity badge + message + suggestion + citation.
@@ -73,7 +73,7 @@ test('a KA advisory finding renders its markdown (bold/code/list), not raw ** an
   };
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review: kaReview, pr: PR } }));
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   // Non-blocking guidance is intentionally collapsed; blockers remain the only always-open class.
@@ -104,14 +104,16 @@ test('reflects the live PR status (polled) as a badge in the PR banner', async (
     }),
   );
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   await expect(page.locator('.pr-banner').getByText('Checagens em execução')).toBeVisible(); // live phase badge (polled)
 });
 
 test('shows the animated running pipeline while the promotion is in flight', async ({ page }) => {
+  // DEFECT: unreachable busy state (same as meus-espacos.spec.ts:77). PromotionConfirm.svelte:80 renders the button,
+  // but MeusEspacos.svelte:80 unmounts the component during the reviewing phase. Left failing to document intent.
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => (release = r));
   await page.route('**/api/promote', async (route) => {
@@ -119,11 +121,11 @@ test('shows the animated running pipeline while the promotion is in flight', asy
     await route.fulfill({ json: { review, pr: PR } });
   });
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   await expect(page.getByText('Executando pipeline de promoção…')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Solicitando…' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preparando revisão…' })).toBeVisible();
 
   release();
   await expect(page.getByText('EVAL-01', { exact: true })).toBeVisible();
@@ -143,7 +145,7 @@ test('renders a clean (success) review with no findings', async ({ page }) => {
             { key: 'checks', label: 'Checagens', status: 'pass' },
             { key: 'review', label: 'Revisão', status: 'pass' },
             { key: 'eval', label: 'Eval-run', status: 'pass' },
-            { key: 'approval', label: 'Aprovação do Steward', status: 'running' },
+            { key: 'approval', label: 'Aprovação da Plataforma (deploy)', status: 'running' },
             { key: 'deploy', label: 'Deploy', status: 'pending' },
           ],
         },
@@ -151,7 +153,7 @@ test('renders a clean (success) review with no findings', async ({ page }) => {
     }),
   );
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   await expect(page.getByText('Nenhum achado — espaço limpo.')).toBeVisible();
@@ -174,7 +176,7 @@ test('a finding without suggestion/citation omits those lines', async ({ page })
     }),
   );
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   await expect(page.getByText('Referência fora do ambiente.')).toBeVisible();
@@ -186,7 +188,7 @@ test('shows an error state with retry when /api/promote fails', async ({ page })
     route.fulfill({ status: 502, json: { detail: 'engine error: request_promotion' } }),
   );
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   await expect(page.getByText(/Não foi possível solicitar a promoção/)).toBeVisible();
@@ -220,7 +222,7 @@ test('a block eval state renders the panel with a failures-first question list +
   );
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review: evalReview, pr: PR } }));
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   await page.getByText('Ver resultados do eval (4)').click();
@@ -245,7 +247,7 @@ test('an advisory eval state renders only the explainer + summary, no question l
 }) => {
   await page.route('**/api/promote', (route) => route.fulfill({ json: { review, pr: PR } })); // eval: advisory, no `questions`
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 
   await page.getByText(/Ver resultados do eval/).click();

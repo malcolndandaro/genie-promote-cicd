@@ -89,7 +89,7 @@ test('recovers the stored promotion on load WITHOUT re-running the reviewer', as
   await page.goto('/#/espacos');
 
   // The recovered promotion renders: PR banner + the stored finding + the live phase badge (polled).
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   await expect(page.getByText('AUDIENCE-01', { exact: true })).toBeVisible();
   await expect(page.getByText(/Promoção bloqueada/)).toBeVisible();
   await expect(page.locator('.pr-banner').getByText('Checagens em execução')).toBeVisible(); // live status resumed
@@ -112,6 +112,6 @@ test('no stored promotions -> normal selection flow (no recovery)', async ({ pag
   );
   await page.goto('/#/espacos');
   // Nothing recovered: the empty review area, the space card is ready to drive a fresh request.
-  await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' })).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Preparar promoção: Recebíveis' })).toBeVisible();
 });

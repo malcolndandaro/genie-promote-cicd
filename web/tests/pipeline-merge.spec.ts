@@ -43,7 +43,7 @@ test.beforeEach(async ({ page }) => {
 async function promote(page: import('@playwright/test').Page, status: unknown) {
   await page.route(`**/api/promote/${PR.number}/status`, (route) => route.fulfill({ json: status }));
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 }
 
@@ -57,7 +57,7 @@ test('PR-review + Merge are distinct steps; approved/open → PR-review concluí
   page,
 }) => {
   await promote(page, liveStatus());
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   // The verdict steps are still present (unchanged from the review).
   await expect(page.getByText('Revisão do agente (Genie Reviewer)')).toBeVisible();
   // The PR is approved but not yet merged → PR-review passed, Merge is running (preconditions met).
@@ -72,7 +72,7 @@ test('changes_requested → PR-review step shows reprovado', async ({ page }) =>
 
 test('a merged PR shows the "Merge para main" step as concluído', async ({ page }) => {
   await promote(page, liveStatus({ merged: true, pr_state: 'closed', phase: 'merged' }));
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   await expect(step(page, 'Merge para main')).toContainText('concluído');
 });
 
@@ -193,7 +193,7 @@ test('deployed with a resolved prod_space_id + prod_host → shows the "Abrir Ge
     }),
   );
   await promote(page, { ...DEPLOYED(), prod_space_id: 'prod-999' });
-  const link = page.getByRole('link', { name: 'Abrir Genie em produção ↗' });
+  const link = page.getByRole('link', { name: 'Abrir Genie Space em produção ↗' });
   await expect(link).toBeVisible();
   await expect(link).toHaveAttribute('href', 'https://prod.example.com/genie/rooms/prod-999');
 });
@@ -209,14 +209,14 @@ test('deployed but prod_space_id could not be resolved (no/ambiguous title match
   );
   await promote(page, DEPLOYED()); // no prod_space_id on the status payload
   await expect(page.locator('.pr-banner').getByText('Implantado em produção')).toBeVisible(); // deployed, still rendered
-  await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Abrir Genie Space em produção ↗' })).toHaveCount(0);
 });
 
 test('deployed with prod_space_id but no prod_host configured → the deep-link is omitted', async ({ page }) => {
   // beforeEach's default /api/whoami mock has no prod_host — no override needed here.
   await promote(page, { ...DEPLOYED(), prod_space_id: 'prod-999' });
   await expect(page.locator('.pr-banner').getByText('Implantado em produção')).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Abrir Genie Space em produção ↗' })).toHaveCount(0);
 });
 
 test('not yet deployed (merged, awaiting deploy) → the deep-link never shows even with a resolved id', async ({
@@ -232,5 +232,5 @@ test('not yet deployed (merged, awaiting deploy) → the deep-link never shows e
   // engine_api._with_prod_space_id), but the UI itself must ALSO gate on phase, not merely on the
   // field's presence, in case a stale/malformed payload carries it early.
   await promote(page, { ...liveStatus({ merged: true, pr_state: 'closed', phase: 'merged' }), prod_space_id: 'prod-999' });
-  await expect(page.getByRole('link', { name: 'Abrir Genie em produção ↗' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Abrir Genie Space em produção ↗' })).toHaveCount(0);
 });

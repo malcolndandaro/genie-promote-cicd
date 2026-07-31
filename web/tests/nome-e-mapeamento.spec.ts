@@ -42,9 +42,9 @@ test.beforeEach(async ({ page }) => {
 
 test('the prod Space name is pre-filled with the dev title and editable', async ({ page }) => {
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
-  const nameInput = page.getByLabel('Nome do space em produção');
+  const nameInput = page.getByLabel('Nome do recurso em produção');
   await expect(nameInput).toHaveValue('Recebíveis');
   await nameInput.fill('Recebíveis PROD');
 
@@ -55,13 +55,13 @@ test('the prod Space name is pre-filled with the dev title and editable', async 
   });
   await confirmPilotPromotion(page);
 
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   expect(posted).toMatchObject({ resource_id: 'sp1', resource_title: 'Recebíveis PROD' });
 });
 
 test('confirming without editing the name sends the dev title unchanged', async ({ page }) => {
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
   let posted: Record<string, unknown> | undefined;
   await page.route('**/api/promote', (route) => {
@@ -70,14 +70,14 @@ test('confirming without editing the name sends the dev title unchanged', async 
   });
   await confirmPilotPromotion(page);
 
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   expect(posted).toMatchObject({ resource_title: 'Recebíveis' });
   expect(posted).not.toHaveProperty('table_mapping');
 });
 
 test('shows the de-para pre-filled with the default target and sends only the OVERRIDDEN row', async ({ page }) => {
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await openAdvancedMapping(page);
 
   await expect(page.getByText('De-para de tabelas')).toBeVisible();
@@ -97,7 +97,7 @@ test('shows the de-para pre-filled with the default target and sends only the OV
   });
   await confirmPilotPromotion(page);
 
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   expect(posted?.table_mapping).toEqual({
     'dev_recebiveis.diamond.fato_recebiveis': 'prod_recebiveis.diamond.fato_recebiveis_v2',
   });
@@ -105,7 +105,7 @@ test('shows the de-para pre-filled with the default target and sends only the OV
 
 test('"Restaurar padrão" resets an edited row back to the default target', async ({ page }) => {
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await openAdvancedMapping(page);
 
   const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
@@ -122,10 +122,10 @@ test('a preview load failure degrades gracefully — the name still defaults and
   );
 
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
   // The name still pre-fills synchronously from the already-known dev title — no network wait.
-  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Recebíveis');
+  await expect(page.getByLabel('Nome do recurso em produção')).toHaveValue('Recebíveis');
   await expect(page.getByText('Não foi possível carregar o de-para de tabelas')).toBeVisible();
 
   let posted: Record<string, unknown> | undefined;
@@ -135,7 +135,7 @@ test('a preview load failure degrades gracefully — the name still defaults and
   });
   await confirmPilotPromotion(page);
 
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   expect(posted).toMatchObject({ resource_title: 'Recebíveis' });
   expect(posted).not.toHaveProperty('table_mapping'); // no override to send — degrades to plain rebind
 });
@@ -151,26 +151,26 @@ test('re-requesting the SAME space after a completed promotion resets the name/m
   });
 
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
-  const nameInput = page.getByLabel('Nome do space em produção');
+  const nameInput = page.getByLabel('Nome do recurso em produção');
   await nameInput.fill('Recebíveis PROD');
   await openAdvancedMapping(page);
   const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
   await targetInput.fill('prod_recebiveis.diamond.fato_recebiveis_v2');
   await confirmPilotPromotion(page);
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
   expect(posted).toHaveLength(1);
   expect(posted[0]).toMatchObject({ resource_title: 'Recebíveis PROD' });
   expect(posted[0]?.table_mapping).toBeTruthy();
 
   // Re-select the SAME space without editing anything — the form must come back pre-filled with
   // the PLAIN dev title/default mapping (fresh preview), not the prior round's edit.
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Recebíveis');
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
+  await expect(page.getByLabel('Nome do recurso em produção')).toHaveValue('Recebíveis');
   await expect(page.getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
   await confirmPilotPromotion(page);
-  await expect(page.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(page.getByText('Rascunho pronto:')).toBeVisible();
 
   expect(posted).toHaveLength(2);
   expect(posted[1]).toMatchObject({ resource_title: 'Recebíveis' });
@@ -179,18 +179,18 @@ test('re-requesting the SAME space after a completed promotion resets the name/m
 
 test('cancelling the confirmation panel discards any declared name/mapping', async ({ page }) => {
   await page.goto('/#/espacos');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
 
-  const nameInput = page.getByLabel('Nome do space em produção');
+  const nameInput = page.getByLabel('Nome do recurso em produção');
   await nameInput.fill('Nome temporário');
   await openAdvancedMapping(page);
   const targetInput = page.getByLabel('Tabela em produção para dev_recebiveis.diamond.fato_recebiveis');
   await targetInput.fill('prod_recebiveis.diamond.custom');
 
-  await page.getByRole('button', { name: '← Escolher outro espaço' }).click();
+  await page.getByRole('button', { name: '← Escolher outro recurso' }).click();
 
   // Re-choosing the same space starts clean — the previously edited name/mapping are gone.
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
-  await expect(page.getByLabel('Nome do space em produção')).toHaveValue('Recebíveis');
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
+  await expect(page.getByLabel('Nome do recurso em produção')).toHaveValue('Recebíveis');
   await expect(page.getByRole('button', { name: 'Restaurar padrão' })).toHaveCount(0);
 });

@@ -47,14 +47,14 @@ test('a non-admin sees only their promotions; expanding a row and opening it sho
 
   await expect(page.getByText('Recebíveis')).toBeVisible();
   await expect(page.getByText('Cedentes')).toHaveCount(0); // scope=mine only
-  await expect(page.getByText('Todas (Steward/Admin)')).toHaveCount(0); // no scope toggle for a non-admin
+  await expect(page.getByRole('group', { name: 'Escopo do histórico' }).getByRole('button', { name: 'Todas' })).toHaveCount(0); // no scope toggle for a non-admin
 
   await page.getByRole('button', { name: /Expandir histórico de/ }).click();
   await page.getByRole('button', { name: 'Abrir promoção: Recebíveis' }).click();
   // The exact STORED snapshot fills the contextual right panel — no route change and no re-run.
   await expect(page).toHaveURL(/#\/espacos$/);
   const panel = page.locator('.working-panel');
-  await expect(panel.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(panel.getByText('Rascunho pronto:')).toBeVisible();
   await expect(panel.getByText('🟢 Pronto.')).toBeVisible();
   expect(promoteCalled).toBe(false);
 });
@@ -67,7 +67,7 @@ test('clicking a Space card opens its most recent run in the right panel', async
 
   await expect(page).toHaveURL(/#\/espacos$/);
   const panel = page.locator('.working-panel');
-  await expect(panel.getByText('PR de promoção aberto:')).toBeVisible();
+  await expect(panel.getByText('Rascunho pronto:')).toBeVisible();
   await expect(panel.getByText('🟢 Pronto.')).toBeVisible();
 });
 
@@ -76,8 +76,8 @@ test('an admin gets the scope toggle and can list all promotions, grouped by spa
   await page.goto('/');
   await page.getByRole('link', { name: 'Meus espaços' }).click();
 
-  await expect(page.getByRole('button', { name: 'Todas (Steward/Admin)' })).toBeVisible();
-  await page.getByRole('button', { name: 'Todas (Steward/Admin)' }).click();
+  await expect(page.getByRole('button', { name: 'Todas' })).toBeVisible();
+  await page.getByRole('button', { name: 'Todas' }).click();
   // The cross-user view groups another author's promotion under its OWN space row too.
   await expect(page.getByText('Cedentes')).toBeVisible();
   await expect(page.getByText('Recebíveis')).toBeVisible();

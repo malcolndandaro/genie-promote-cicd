@@ -91,3 +91,20 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run check
+
+  # Playwright smoke tests — the frontend regression gate. Runs against the built SPA with `/api/*`
+  # mocked, catching UI behavioral changes. NOT a required check (only `bundle validate (prod)` gates
+  # merges), so a flaky npm install can never block a merge. Runs on self-hosted for the same npm-
+  # registry reliability reason as svelte-check above.
+  smoke:
+    name: smoke (SPA)
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies + run Playwright
+        working-directory: web
+        timeout-minutes: 10
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          CI=1 npx playwright test

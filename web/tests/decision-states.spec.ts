@@ -59,7 +59,7 @@ async function start(page: Page, review: any, statuses: any[]): Promise<void> {
     review, pr: blocked ? null : PR, promotion_id: blocked ? undefined : 'p1', blocked,
   } }));
   await page.goto('/');
-  await page.getByRole('button', { name: 'Solicitar promoção: Recebíveis' }).click();
+  await page.getByRole('button', { name: 'Preparar promoção: Recebíveis' }).click();
   await confirmPilotPromotion(page);
 }
 
@@ -88,7 +88,7 @@ test('blockers stay visible while advisory guidance is collapsed', async ({ page
   };
   await start(page, blocked, [baseStatus]);
   await expect(page.getByRole('heading', { name: 'Ajustes necessários antes de promover' })).toBeVisible();
-  await expect(page.getByText('PR de promoção aberto:')).toHaveCount(0);
+  await expect(page.getByText('Rascunho pronto:')).toHaveCount(0);
   await expect(page.getByText('Tabela aponta para outro ambiente.')).toBeVisible();
   await expect(page.getByText('Considere melhorar a descrição.')).not.toBeVisible();
   await page.getByText('Orientações não bloqueantes (1)', { exact: true }).click();

@@ -32,30 +32,20 @@ test('the GitHub link falls back to the default repo when whoami omits repo_url'
   );
 });
 
-test('a Steward (email == configured steward) sees the Steward badge', async ({ page }) => {
-  routes(page, { email: 'pedro@databricks.com', steward: 'pedro@databricks.com', is_admin: true });
-  await page.goto('/');
-  await expect(page.getByRole('banner').getByText('Steward', { exact: true })).toBeVisible();
-  await expect(page.getByRole('banner').getByText('Admin', { exact: true })).toHaveCount(0);
-});
+// DELETED: Tests for "Steward" badge removed with R1 role cutover.
+// The Steward role no longer exists post-R1; SoD moved entirely to GitHub.
+// Remaining tests below cover the still-live admin role behavior.
 
-test('a pure Steward (email == steward, not admin) still sees the Steward badge', async ({ page }) => {
-  routes(page, { email: 'pedro@databricks.com', steward: 'pedro@databricks.com', is_admin: false });
-  await page.goto('/');
-  await expect(page.getByRole('banner').getByText('Steward', { exact: true })).toBeVisible();
-});
-
-test('an Admin (not the steward) sees the Admin badge', async ({ page }) => {
+test('an Admin (not the steward) sees the Plataforma badge', async ({ page }) => {
   routes(page, { email: 'malcoln@databricks.com', steward: 'pedro@databricks.com', is_admin: true });
   await page.goto('/');
-  await expect(page.getByRole('banner').getByText('Admin', { exact: true })).toBeVisible();
+  await expect(page.getByRole('banner').getByText('Plataforma', { exact: true })).toBeVisible();
 });
 
 test('a plain requester sees no role badge', async ({ page }) => {
   routes(page, { email: 'ana@databricks.com', steward: 'pedro@databricks.com', is_admin: false });
   await page.goto('/');
-  await expect(page.getByRole('banner').getByText('Steward', { exact: true })).toHaveCount(0);
-  await expect(page.getByRole('banner').getByText('Admin', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('banner').getByText('Plataforma', { exact: true })).toHaveCount(0);
   // ...but the identity is still shown.
   await expect(page.getByRole('banner').getByText('ana@databricks.com')).toBeVisible();
 });

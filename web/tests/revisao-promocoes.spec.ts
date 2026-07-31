@@ -16,17 +16,18 @@ function routes(page, { isSteward = true, isAdmin = false } = {}) {
     r.fulfill({ json: { email: 'pedro@databricks.com', steward: null, is_admin: isAdmin, is_steward: isSteward } }));
 }
 
-test('the Steward persona sees a "Revisão de promoções" nav section', async ({ page }) => {
+test('the page appears in the universal nav as "Aguardando ação no GitHub"', async ({ page }) => {
   routes(page);
   page.route('**/api/promotions?scope=steward-queue', (r) => r.fulfill({ json: { promotions: QUEUE } }));
   await page.goto('/');
-  await expect(page.getByRole('link', { name: 'Aguardando minha revisão' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Aguardando ação no GitHub' })).toBeVisible();
 });
 
-test('a caller without the Steward/Admin persona sees no "Revisão de promoções" section', async ({ page }) => {
+test('the page is universally accessible in the nav, not persona-restricted', async ({ page }) => {
   routes(page, { isSteward: false, isAdmin: false });
   await page.goto('/');
-  await expect(page.getByRole('link', { name: 'Aguardando minha revisão' })).toHaveCount(0);
+  // "Aguardando ação no GitHub" appears for all users; per-user queue filtering happens server-side.
+  await expect(page.getByRole('link', { name: 'Aguardando ação no GitHub' })).toBeVisible();
 });
 
 test('lists cross-user promotions with a GitHub link, no in-app approve action', async ({ page }) => {
@@ -46,7 +47,7 @@ test('an empty queue shows a clear message', async ({ page }) => {
   routes(page);
   page.route('**/api/promotions?scope=steward-queue', (r) => r.fulfill({ json: { promotions: [] } }));
   await page.goto('/#/revisao');
-  await expect(page.getByText('Nenhuma promoção aguardando revisão no momento.')).toBeVisible();
+  await expect(page.getByText('Nenhuma promoção aguardando ação no momento.')).toBeVisible();
 });
 
 test('a 403 surfaces as a clear error', async ({ page }) => {
