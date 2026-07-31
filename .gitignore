@@ -23,6 +23,8 @@ node_modules/
 dist/
 build/
 .next/
+# Abandoned Next.js scratch tree — build output only (~570MB), never part of the app.
+web-next/
 
 # OS / editor
 .DS_Store
