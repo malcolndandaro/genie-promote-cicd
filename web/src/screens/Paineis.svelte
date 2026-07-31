@@ -233,7 +233,9 @@
     align-items: start;
   }
   .workspace--open {
-    grid-template-columns: minmax(0, 1.1fr) minmax(26rem, 1fr);
+    /* The open record gets the larger share: it holds the pipeline, findings, audit trail and the
+       PR banner's links, while the register only needs to stay scannable. */
+    grid-template-columns: minmax(0, 0.85fr) minmax(30rem, 1.15fr);
   }
   .working-panel {
     min-width: 0;

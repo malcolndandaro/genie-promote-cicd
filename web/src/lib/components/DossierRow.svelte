@@ -203,12 +203,11 @@
 
   .dossier__main {
     display: grid;
-    /* The identity column carries a real floor: with `minmax(0, 1fr)` the two `auto` columns (a long
-       phase badge plus a requester email) could squeeze the title to zero width, wrapping it one
-       character per line. The title is the entry's whole point and never yields.
-       The standing track is FIXED rather than `auto`: a long phase label ("Aguardando aprovação da
-       Plataforma") otherwise widened the track until the badge overlapped the action button. */
-    grid-template-columns: auto minmax(11rem, 1fr) 13rem auto;
+    /* Every track is allowed to give: the identity column keeps a floor so a title never wraps one
+       character per line, the standing track shrinks from a comfortable 13rem rather than being
+       fixed (a fixed track plus a nowrap button overflowed the register's clip edge when the
+       working record narrowed this column), and the action track reserves exactly the button. */
+    grid-template-columns: auto minmax(7rem, 1fr) minmax(6rem, 13rem) auto;
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
@@ -292,8 +291,11 @@
   }
   .dossier__standing > :global(.badge) {
     max-width: 100%;
-    /* A long phase label wraps within the badge instead of forcing the track wider. */
+    /* A long phase label wraps within the badge instead of forcing the track wider. Tighter leading
+       than body text so a two-line phase stays a compact block rather than stretching the row. */
     white-space: normal;
+    line-height: 1.25;
+    text-align: right;
   }
   .dossier__requester {
     max-width: 100%;
@@ -330,10 +332,11 @@
   .dossier__action {
     flex-shrink: 0;
   }
-  /* The action label stays on one line: in the narrowed register (a record open beside it) the
-     button otherwise wrapped to two lines and the rows lost their even rhythm. */
+  /* Deliberately NOT `white-space: nowrap`: the register clips its overflow, so forcing one line
+     cut the button's right edge off instead of wrapping it. A two-line label is legible; a
+     half-visible one is not. `hyphens` keeps the wrap from splitting mid-word awkwardly. */
   .dossier__action :global(.btn) {
-    white-space: nowrap;
+    text-align: center;
   }
 
   .dossier__disclosure {

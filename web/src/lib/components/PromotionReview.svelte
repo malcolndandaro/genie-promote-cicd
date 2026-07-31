@@ -237,6 +237,10 @@
   .pr-banner {
     display: flex;
     align-items: center;
+    /* Wraps: this banner carries up to four links ("Ver no GitHub", "Aprovar no GitHub", "Abrir …
+       em produção") and sat in a non-wrapping row, so in a narrower panel the last ones ran past
+       the edge. Every link here is an action the reviewer may need. */
+    flex-wrap: wrap;
     gap: var(--space-2);
     margin-bottom: var(--space-5);
     padding: var(--space-3) var(--space-4);
