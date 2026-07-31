@@ -27,19 +27,28 @@
 
 <style>
   .index {
+    /* Query container so the column header can follow the SAME rule as the rows it labels. */
+    container-type: inline-size;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
     overflow: hidden;
   }
+  /* Hidden by default: column labels are meaningless over stacked rows. They appear only when the
+     register is wide enough for DossierRow to enter its four-column shape (same 975px threshold). */
   .index__head {
-    display: grid;
+    display: none;
     /* Mirrors DossierRow's grid: glyph gutter + identity + standing + action. */
     grid-template-columns: 1.75rem minmax(0, 1fr) auto auto;
     gap: var(--space-3);
     padding: 0.5rem var(--space-4);
     background: var(--surface-inset);
     border-bottom: 1px solid var(--border);
+  }
+  @container (min-width: 975px) {
+    .index__head {
+      display: grid;
+    }
   }
   .index__col {
     color: var(--muted-foreground);
@@ -58,10 +67,5 @@
     /* Reserves the action column's width so the header rule aligns with the buttons below. */
     min-width: 9.5rem;
     text-align: right;
-  }
-  @media (max-width: 860px) {
-    .index__head {
-      display: none;
-    }
   }
 </style>

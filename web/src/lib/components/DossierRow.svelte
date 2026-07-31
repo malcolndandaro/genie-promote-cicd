@@ -178,6 +178,9 @@
   /* Register entries share edges: the index reads as one continuous ledger, not a scatter of
      floating cards. The container supplies the outer frame; a row owns only its bottom rule. */
   .dossier {
+    /* The query container for the row layout below: an element cannot query its own width, so the
+       entry wrapper carries the container and `.dossier__main` responds to it. */
+    container-type: inline-size;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     transition: background-color 0.12s ease;
@@ -201,16 +204,55 @@
     box-shadow: inset 2px 0 0 var(--warning);
   }
 
+  /* The row responds to the WIDTH OF THE REGISTER, not the viewport.
+     This is the bug two earlier attempts kept missing by tuning grid tracks: the register is narrow
+     at a WIDE viewport whenever a record is open beside it, so a `@media` breakpoint never fired and
+     the row went on cramming four columns into ~560px. Measured, a single-line four-column row needs
+     ~975px (a 413px title + a 293px phase badge + a 171px button + gaps); no track ratio fits that
+     into 560px, so the layout has to change SHAPE. A container query is the only thing that can see
+     the real constraint. */
+  /* STACKED is the default — it fits any width. The wide four-column register is the enhancement,
+     applied only once the row itself actually has room for it (see the container query below). */
   .dossier__main {
     display: grid;
-    /* Every track is allowed to give: the identity column keeps a floor so a title never wraps one
-       character per line, the standing track shrinks from a comfortable 13rem rather than being
-       fixed (a fixed track plus a nowrap button overflowed the register's clip edge when the
-       working record narrowed this column), and the action track reserves exactly the button. */
-    grid-template-columns: auto minmax(7rem, 1fr) minmax(6rem, 13rem) auto;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      'glyph ident'
+      '.     standing'
+      '.     action';
     align-items: center;
-    gap: var(--space-3);
+    justify-items: start;
+    gap: var(--space-2) var(--space-3);
     padding: var(--space-3) var(--space-4);
+  }
+  .dossier__glyph {
+    grid-area: glyph;
+  }
+  .dossier__ident {
+    grid-area: ident;
+    justify-self: stretch;
+  }
+  .dossier__standing {
+    grid-area: standing;
+  }
+  .dossier__action {
+    grid-area: action;
+  }
+
+  /* 975px is the measured single-line requirement (413px title + 293px badge + 171px button + gaps);
+     below it the stacked default above stays in force, at ANY viewport size. */
+  @container (min-width: 975px) {
+    .dossier__main {
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      grid-template-areas: 'glyph ident standing action';
+      gap: var(--space-3);
+    }
+    .dossier__standing {
+      justify-self: end;
+    }
+    .dossier__action {
+      justify-self: end;
+    }
   }
   .dossier__glyph {
     display: flex;
@@ -276,26 +318,16 @@
     color: var(--muted-foreground);
     font-size: 0.75rem;
   }
-  /* The standing column gets a real track of its own (`minmax` in the grid above), and its contents
-     stay INSIDE it: a phase label like "Aguardando aprovação da Plataforma" is wide, and without an
-     explicit floor the auto track collapsed while the badge overflowed leftward across the title —
-     silently stealing the title button's clicks. Wrapping keeps the requester readable rather than
-     clipped, since it answers "who already has this in flight". */
+  /* Standing reads as one line — badge then requester. The row only enters its four-column shape
+     once it has the measured room for that (container query above), so the badge never needs to wrap
+     and the phase label stays a single scannable chip instead of a three-line block. */
   .dossier__standing {
     display: flex;
-    align-items: flex-end;
-    flex-direction: column;
-    gap: var(--space-1);
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
     min-width: 0;
-    text-align: right;
-  }
-  .dossier__standing > :global(.badge) {
     max-width: 100%;
-    /* A long phase label wraps within the badge instead of forcing the track wider. Tighter leading
-       than body text so a two-line phase stays a compact block rather than stretching the row. */
-    white-space: normal;
-    line-height: 1.25;
-    text-align: right;
   }
   .dossier__requester {
     max-width: 100%;
@@ -368,19 +400,6 @@
     margin-top: var(--space-2);
   }
 
-  /* Narrow: the register becomes stacked entries — standing and action drop below the identity
-     rather than compressing into unreadable columns. */
-  @media (max-width: 860px) {
-    .dossier__main {
-      grid-template-columns: auto minmax(0, 1fr);
-      row-gap: var(--space-2);
-    }
-    .dossier__standing {
-      grid-column: 2;
-      justify-content: flex-start;
-    }
-    .dossier__action {
-      grid-column: 2;
-    }
-  }
+  /* No viewport `@media` for the row shape: the container query above covers narrow viewports AND a
+     narrow register at a wide viewport, which a media query structurally cannot. */
 </style>
