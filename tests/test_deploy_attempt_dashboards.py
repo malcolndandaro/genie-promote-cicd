@@ -121,7 +121,8 @@ class _Tags:
         self.store[(entity_type, entity_id, tag_key)] = assignment.tag_value
 
 
-def _operations(tmp_path: Path, *, permissions=None, tags=None):
+def _operations(tmp_path: Path, *, permissions=None, tags=None, allow_destructive=False,
+                allow_empty_content=False):
     permissions = permissions or _Permissions()
     tags = tags or _Tags()
     client = NS(
@@ -140,7 +141,8 @@ def _operations(tmp_path: Path, *, permissions=None, tags=None):
     )
     ops = deploy_attempt.ProductionOperations(
         tmp_path, "wh-1", client=client, certification_readback_retry_seconds=0,
-        certification_readback_sleep=lambda _s: None)
+        certification_readback_sleep=lambda _s: None, allow_destructive=allow_destructive,
+        allow_empty_content=allow_empty_content)
     return ops, permissions, tags
 
 
@@ -172,6 +174,47 @@ def test_an_entirely_empty_content_tree_still_fails_closed(tmp_path):
         assert "no rendered promotable artifacts" in str(e)
     else:
         raise AssertionError("an empty content tree must fail closed")
+
+
+def _empty_tree(tmp_path: Path) -> Path:
+    (tmp_path / "build" / "genie").mkdir(parents=True)
+    (tmp_path / "build" / "dashboards").mkdir(parents=True)
+    return tmp_path
+
+
+def test_an_empty_tree_is_refused_when_only_emptiness_is_authorized(tmp_path):
+    """`allow_empty_content` ALONE must not open the decommission path.
+
+    Emptying the content tree IS "delete the managed content", so it is only honoured together with
+    the destructive flag — the two-key rule. One key is still a refusal.
+    """
+    ops, _p, _t = _operations(_empty_tree(tmp_path), allow_empty_content=True)
+    try:
+        ops._all_artifacts()
+    except ValueError as e:
+        assert "no rendered promotable artifacts" in str(e)
+    else:
+        raise AssertionError("emptiness alone must not authorize a decommission")
+
+
+def test_an_empty_tree_is_refused_when_only_destruction_is_authorized(tmp_path):
+    """The other half of the two-key rule: `allow_destructive` is set for ordinary key renames, and
+    must NOT by itself turn an accidentally-emptied content tree into a full decommission."""
+    ops, _p, _t = _operations(_empty_tree(tmp_path), allow_destructive=True)
+    try:
+        ops._all_artifacts()
+    except ValueError as e:
+        assert "no rendered promotable artifacts" in str(e)
+    else:
+        raise AssertionError("a destructive run must not silently accept an empty tree")
+
+
+def test_an_empty_tree_is_allowed_when_both_keys_are_turned(tmp_path, capsys):
+    """The deliberate decommission: both flags set yields an empty desired set, loudly warned."""
+    ops, _p, _t = _operations(_empty_tree(tmp_path), allow_destructive=True,
+                              allow_empty_content=True)
+    assert ops._all_artifacts() == []
+    assert "deploy-empty-content" in capsys.readouterr().out
 
 
 def test_a_slug_shared_across_kinds_is_refused(tmp_path):

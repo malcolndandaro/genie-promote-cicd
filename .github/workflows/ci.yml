@@ -56,8 +56,15 @@ jobs:
           # crafted dashboard title cannot inject a sibling key such as `embed_credentials: true`.
           # Without it those three tests ERROR on import, so the YAML-injection floor was not being
           # verified on the runner at all — a green-looking suite validating less than it appears to.
+          # TEMPORARY upper bound, and a mirror artifact rather than a product constraint: the
+          # runner installs through an intercepting PyPI proxy that currently returns HTTP 403 for
+          # the databricks-sdk 0.124.0 and 0.125.0 wheels while serving <=0.123.0 normally. An
+          # unbounded `>=0.111.0` resolves to the newest, so this job failed in `pip` and the suite
+          # never ran at all — a red check that had nothing to say about the code. The product
+          # supports the newer SDK; only this mirror cannot fetch it. REMOVE the ceiling once the
+          # proxy serves those versions (re-check, don't assume) so CI stops silently pinning old.
           .venv/bin/python -m pip install -q \
-            'databricks-sdk>=0.111.0' fastapi uvicorn httpx pytest pyyaml
+            'databricks-sdk>=0.111.0,<0.124' fastapi uvicorn httpx pytest pyyaml
           .venv/bin/python -m pytest tests/ -q
       - name: Pre-render + identifier allowlist (standalone — no content, emits empty resources)
         run: bash scripts/render.sh prod
