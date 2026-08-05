@@ -85,6 +85,12 @@ fixe o commit exato e revisado do engine no `engine.lock` do repositório de con
   PROD passa a ser gerenciado. Um `src/` vazio do engine pode ser interpretado como o estado desejado
   (vazio) e apagar o conteúdo gerenciado. Todo deploy de regime permanente deve sobrepor o repositório
   de conteúdo completo, como descrito no `SETUP.md`.
+- Um estado desejado VAZIO é recusado no `preflight` por padrão, e desativar essa recusa exige **duas
+  chaves**: `ALLOW_EMPTY_CONTENT_DEPLOY=1` **e** `ALLOW_DESTRUCTIVE_DEPLOY=1`, ambas por execução. A
+  segunda não é redundante: esvaziar o conteúdo *é* apagar recurso gerenciado, e um `src/` perdido por
+  acidente não liga também o flag destrutivo. Só use as duas para um descomissionamento deliberado, e
+  apague as variáveis depois (`gh variable delete` — `--body ""` devolve 422). Re-promover depois gera
+  **id e URL permanente NOVOS**: o git guarda a definição, nunca a identidade.
 - Agentes automatizados não devem fazer deploy, conceder permissões, rotacionar credenciais, configurar
   o GitHub, fazer merge, push ou commit a menos que a pessoa usuária peça explicitamente essa ação
   externa ou persistente. Pessoas contribuidoras devem seguir o processo normal de revisão e release do

@@ -185,6 +185,7 @@ class ProductionOperations:
 
     def __init__(self, root: Path, warehouse_id: str, previous_content_root: Path | None = None,
                  client=None, *, allow_destructive: bool = False,
+                 allow_empty_content: bool = False,
                  certification_readback_max_attempts: int = _CERTIFICATION_READBACK_MAX_ATTEMPTS,
                  certification_readback_retry_seconds: float = _CERTIFICATION_READBACK_RETRY_SECONDS,
                  certification_readback_sleep: Callable[[float], None] = time.sleep):
@@ -194,6 +195,7 @@ class ProductionOperations:
         self.warehouse_id = warehouse_id
         self.previous_content_root = previous_content_root
         self.allow_destructive = allow_destructive
+        self.allow_empty_content = allow_empty_content
         self.certification_readback_max_attempts = certification_readback_max_attempts
         self.certification_readback_retry_seconds = certification_readback_retry_seconds
         self.certification_readback_sleep = certification_readback_sleep
@@ -248,8 +250,17 @@ class ProductionOperations:
 
         The "nothing to deploy" refusal is evaluated over the UNION, not per kind: a promotion that
         contains only dashboards (or only Spaces) is perfectly valid, while a genuinely empty content
-        tree still fails closed — an empty desired state must never be mistaken for "deploy nothing",
-        because for a bundle it reads as "delete the managed content".
+        tree fails closed by DEFAULT — an empty desired state must never be mistaken for "deploy
+        nothing", because for a bundle it reads as "delete the managed content".
+
+        `allow_empty_content` (opt-in, per run) is the deliberate decommission: emptying the content
+        repo to retire every governed resource at once. It is NOT a relaxation of the invariant above,
+        because deleting managed content is exactly what the refusal describes — so it is only honoured
+        together with `allow_destructive`, whose `--auto-approve` the same deploy needs anyway. That
+        coupling is what keeps an accidentally-empty tree failing: dropping the content directory by
+        mistake does not also set the destructive flag, and setting BOTH is a two-key act by whoever
+        authorized it. Re-promoting afterwards assigns NEW ids and permanent URLs; the ids are not
+        recoverable from git, only the definitions are.
         """
         out: list[tuple[object, str, Path, Path, Path]] = []
         seen: dict[str, str] = {}
@@ -269,7 +280,12 @@ class ProductionOperations:
                 seen[slug] = kind.kind
                 out.append((kind, slug, rendered, title, audience))
         if not out:
-            raise ValueError("no rendered promotable artifacts found")
+            if not (self.allow_empty_content and self.allow_destructive):
+                raise ValueError("no rendered promotable artifacts found")
+            print("::warning title=deploy-empty-content::content tree is EMPTY and both "
+                  "ALLOW_EMPTY_CONTENT_DEPLOY=1 and ALLOW_DESTRUCTIVE_DEPLOY=1 are set: this deploy "
+                  "reconciles EVERY governed resource as a deletion and REMOVES it from production. "
+                  "Re-promotion assigns new ids and permanent URLs. Unset both after this run.")
         return out
 
     def _artifacts(self) -> list[tuple[str, Path, Path, Path]]:
@@ -557,11 +573,18 @@ def main(argv: list[str] | None = None) -> int:
         help=("pass --auto-approve to `bundle deploy`, permitting DELETION/RECREATION of managed "
               "resources (a recreated dashboard changes id + permanent URL). Off by default; set "
               "only for a run a human has explicitly authorized."))
+    parser.add_argument(
+        "--allow-empty-content", action="store_true",
+        default=os.environ.get("ALLOW_EMPTY_CONTENT_DEPLOY") == "1",
+        help=("permit an EMPTY content tree, which reconciles every governed resource as a DELETION "
+              "and removes it from production (re-promotion assigns new ids + permanent URLs). Off by "
+              "default, and ignored unless --allow-destructive is also set."))
     args = parser.parse_args(argv)
     previous = Path(args.previous_content_root).resolve() if args.previous_content_root else None
     evidence = _evidence(ROOT)
     operations = ProductionOperations(ROOT, args.warehouse_id, previous,
-                                      allow_destructive=args.allow_destructive)
+                                      allow_destructive=args.allow_destructive,
+                                      allow_empty_content=args.allow_empty_content)
     return run_attempt(operations, evidence)
 
 
